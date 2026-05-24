@@ -1,0 +1,23 @@
+[package]
+name = "rt-async-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+executor = { path = "../../rt-async/modules/executor" }
+platform = { path = "../../rt-async/modules/platform" }
+futures = { path = "../../rt-async/modules/futures" }
+chip-qemu-virt-rt = { path = "../../modules/chip-qemu-virt-rt" }
+ov-channal = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+fugit = "0.4"
+log = { version = "0.4", default-features = false }
+
+[features]
+default = ["riscv64"]
+riscv64 = ["platform/riscv64"]
+
+[[bin]]
+name = "demo"

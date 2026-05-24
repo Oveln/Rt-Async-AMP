@@ -1,0 +1,6 @@
+/target
+/build
+/opensbi
+/qemu/build
+*.bin
+*.elf

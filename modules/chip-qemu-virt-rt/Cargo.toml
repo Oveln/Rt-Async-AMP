@@ -1,0 +1,10 @@
+[package]
+name = "chip-qemu-virt-rt"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+platform = { path = "../../rt-async/modules/platform" }
+extern-trait = "0.4.3"
+riscv = "0.16.0"
