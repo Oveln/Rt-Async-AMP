@@ -1,0 +1,117 @@
+diff --git a/Makefile b/Makefile
+index 4654106..3d68acb 100644
+--- a/Makefile
++++ b/Makefile
+@@ -192,7 +192,7 @@ REPRODUCIBLE_FLAGS		+=	-ffile-prefix-map=$(src_dir)=
+ endif
+ 
+ # Check whether the linker supports creating PIEs
+-OPENSBI_LD_PIE := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) $(USE_LD_FLAG) -fPIE -nostdlib -Wl,-pie -x c /dev/null -o /dev/null >/dev/null 2>&1 && echo y || echo n)
++OPENSBI_LD_PIE := n
+ 
+ # Check whether the linker supports --exclude-libs
+ OPENSBI_LD_EXCLUDE_LIBS := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) $(USE_LD_FLAG) "-Wl,--exclude-libs,ALL" -x c /dev/null -o /dev/null >/dev/null 2>&1 && echo y || echo n)
+@@ -209,9 +209,9 @@ CC_SUPPORT_ZICSR_ZIFENCEI := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdl
+ # Check whether the assembler and the compiler support the Vector extension
+ CC_SUPPORT_VECTOR := $(shell $(CC) $(CLANG_TARGET) $(RELAX_FLAG) -nostdlib -march=rv$(OPENSBI_CC_XLEN)gv -dM -E -x c /dev/null 2>&1 | grep -q riscv.*vector && echo y || echo n)
+ 
+-ifneq ($(OPENSBI_LD_PIE),y)
+-$(error Your linker does not support creating PIEs, opensbi requires this.)
+-endif
++#ifneq ($(OPENSBI_LD_PIE),y)
++#$(error Your linker does not support creating PIEs, opensbi requires this.)
++#endif
+ 
+ # Build Info:
+ # OPENSBI_BUILD_TIME_STAMP -- the compilation time stamp
+@@ -397,7 +397,7 @@ CFLAGS		+=	-mcmodel=$(PLATFORM_RISCV_CODE_MODEL)
+ CFLAGS		+=	$(RELAX_FLAG)
+ CFLAGS		+=	$(GENFLAGS)
+ CFLAGS		+=	$(platform-cflags-y)
+-CFLAGS		+=	-fPIE -pie
++CFLAGS		+=	
+ CFLAGS		+=	$(firmware-cflags-y)
+ 
+ CPPFLAGS	+=	$(GENFLAGS)
+@@ -406,7 +406,7 @@ CPPFLAGS	+=	$(firmware-cppflags-y)
+ 
+ ASFLAGS		=	-g -Wall -nostdlib
+ ASFLAGS		+=	-fno-omit-frame-pointer -fno-optimize-sibling-calls
+-ASFLAGS		+=	-fPIE
++ASFLAGS		+=	
+ ASFLAGS		+=	$(REPRODUCIBLE_FLAGS)
+ # Optionally supported flags
+ ifeq ($(CC_SUPPORT_SAVE_RESTORE),y)
+@@ -435,7 +435,7 @@ ifeq ($(OPENSBI_LD_EXCLUDE_LIBS),y)
+ ELFFLAGS	+=	-Wl,--exclude-libs,ALL
+ endif
+ ELFFLAGS	+=	-Wl,--build-id=none
+-ELFFLAGS	+=	-Wl,--no-dynamic-linker -Wl,-pie
++ELFFLAGS	+=	
+ ELFFLAGS	+=	$(platform-ldflags-y)
+ ELFFLAGS	+=	$(firmware-ldflags-y)
+ 
+diff --git a/firmware/fw_base.S b/firmware/fw_base.S
+index 5d6540d..c7e31fb 100644
+--- a/firmware/fw_base.S
++++ b/firmware/fw_base.S
+@@ -46,6 +46,18 @@
+ 	.globl _start
+ 	.globl _start_warm
+ _start:
++	/* ---- AMP hart routing: hart 1 -> rt-async @ 0x82800000 ---- */
++	csrr	t0, CSR_MHARTID
++	li	t1, 1
++	bne	t0, t1, .Lnormal_boot
++	/* hart 1: jump directly to rt-async (stay in M-mode) */
++	li	t1, 0x82800000
++	csrw	CSR_MEPC, t1
++	li	t1, ((0b11 << 11) | (1 << 7))
++	csrw	CSR_MSTATUS, t1
++	mret
++.Lnormal_boot:
++	/* ---- End AMP hart routing ---- */
+ 	/* Find preferred boot HART id */
+ 	MOV_3R	s0, a0, s1, a1, s2, a2
+ 	call	fw_boot_hart
+diff --git a/firmware/fw_dynamic.S b/firmware/fw_dynamic.S
+index 5ee2883..3b177a9 100644
+--- a/firmware/fw_dynamic.S
++++ b/firmware/fw_dynamic.S
+@@ -128,7 +128,7 @@ fw_options:
+ _dynamic_next_arg1:
+ 	RISCV_PTR 0x0
+ _dynamic_next_addr:
+-	RISCV_PTR 0x0
++	RISCV_PTR 0x80200000
+ _dynamic_next_mode:
+ 	RISCV_PTR PRV_S
+ _dynamic_options:
+diff --git a/lib/sbi/sbi_ipi.c b/lib/sbi/sbi_ipi.c
+index 5b2d2f7..fd24900 100644
+--- a/lib/sbi/sbi_ipi.c
++++ b/lib/sbi/sbi_ipi.c
+@@ -259,6 +259,8 @@ void sbi_ipi_process(void)
+ 	sbi_ipi_raw_clear(false);
+ 
+ 	ipi_type = atomic_raw_xchg_ulong(&ipi_data->ipi_type, 0);
++	if (!ipi_type)
++		csr_set(CSR_MIP, MIP_SSIP);
+ 	ipi_event = 0;
+ 	while (ipi_type) {
+ 		if (ipi_type & 1UL) {
+diff --git a/lib/utils/ipi/aclint_mswi.c b/lib/utils/ipi/aclint_mswi.c
+index d4acacf..6658482 100644
+--- a/lib/utils/ipi/aclint_mswi.c
++++ b/lib/utils/ipi/aclint_mswi.c
+@@ -103,7 +103,9 @@ int aclint_mswi_cold_init(struct aclint_mswi_data *mswi)
+ 	rc = sbi_domain_root_add_memrange(mswi->addr, mswi->size, ACLINT_MSWI_ALIGN,
+ 					  SBI_DOMAIN_MEMREGION_MMIO |
+ 					  SBI_DOMAIN_MEMREGION_M_READABLE |
+-					  SBI_DOMAIN_MEMREGION_M_WRITABLE);
++					  SBI_DOMAIN_MEMREGION_M_WRITABLE |
++					  SBI_DOMAIN_MEMREGION_SU_READABLE |
++					  SBI_DOMAIN_MEMREGION_SU_WRITABLE);
+ 	if (rc)
+ 		return rc;
+ 

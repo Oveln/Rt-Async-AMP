@@ -3,6 +3,9 @@ members = [
     "modules/chip-qemu-virt-rt",
     "apps/rt-async-app",
 ]
+exclude = [
+    "apps/user-test-ipc",
+]
 resolver = "3"
 
 [workspace.dependencies]

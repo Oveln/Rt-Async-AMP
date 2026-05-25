@@ -1,71 +1,94 @@
 # rt-async-amp
 
-QEMU RISC-V virt 双核 AMP：rt-async (hart 0, M-mode) + StarryOS (hart 1, S-mode via OpenSBI)
+QEMU RISC-V virt dual-core AMP: rt-async (hart 1, M-mode) + StarryOS (hart 0, S-mode via OpenSBI).
 
-## 架构
+## Architecture
 
 ```
 QEMU virt (-smp 2 -m 256M)
-├─ hart 0: OpenSBI → mret M-mode → rt-async @ 0x80800000 (UART1)
-└─ hart 1: OpenSBI → mret S-mode → StarryOS @ 0x80200000 (UART0)
+├─ hart 0: OpenSBI → sret S-mode → StarryOS @ 0x80200000 (UART0)
+└─ hart 1: OpenSBI → mret M-mode → rt-async @ 0x82800000 (UART1)
 
-共享内存 IPC @ 0x88000000 (64KB)
+Shared memory IPC @ 0x88000000 (ov_channal)
 ```
 
-## 快速开始
+## Quick Start
 
 ```bash
-# 1. 初始化 submodule
+# 1. Init submodules
 git submodule update --init --recursive
 
-# 2. 编译 rt-async app
-make rt-async
+# 2. Clone + patch OpenSBI and QEMU
+make setup
 
-# 3. 编译 OpenSBI (需要 riscv64 交叉编译工具链)
-make opensbi
+# 3. Build everything
+make all
 
-# 4. 编译 StarryOS
-make starryos
-
-# 5. 启动 QEMU
+# 4. Run
 make run
-# 或
-./run.sh
 ```
 
-## 目录结构
+### Prerequisites
 
-```
-rt-async/          ← rt-async RTOS (submodule)
-StarryOS/          ← StarryOS 内核 (submodule)
-opensbi/           ← OpenSBI (带 hart 路由 patch, submodule)
-modules/ipc/       ← 共享内存 IPC 协议定义
-modules/chip-qemu-virt-rt/ ← UART1 芯片实现
-apps/rt-async-app/ ← rt-async 侧应用
-```
+- `rustup target add riscv64imac-unknown-none-elf`
+- `riscv64-elf-gcc` (Homebrew: `brew install riscv64-elf-gcc`)
+- `riscv64-linux-musl-objcopy` (for StarryOS: see note below)
+- Ninja / Meson (QEMU build: `brew install ninja meson`)
+- Python 3
 
-## OpenSBI hart 路由
+### Build individual components
 
-OpenSBI 需要打 patch，在 `fw_base.S` 的启动路径中根据 `mhartid` 分发：
-
-```asm
-# hart 0 → rt-async (M-mode)
-csrr t0, mhartid
-bnez t0, .Lnormal_boot
-la   t1, 0x80800000
-csrw mepc, t1
-li   t1, (0b11 << 11) | (1 << 7)  # MPP=M, MPIE=1
-csrw mstatus, t1
-mret
-.Lnormal_boot:
-# hart 1+: 正常 OpenSBI 流程
+```bash
+make rt-async    # rt-async RTOS binary
+make opensbi     # Patched OpenSBI firmware
+make starryos    # StarryOS kernel (needs StarryOS submodule)
+make qemu        # Custom QEMU with UART1
 ```
 
-## IPC 通信
+## Directory Structure
 
-通过 CLINT MSIP 寄存器触发跨核中断：
+```
+rt-async/              rt-async RTOS (submodule)
+StarryOS/              StarryOS kernel (submodule)
+apps/rt-async-app/     rt-async side application
+apps/user-test-ipc/    StarryOS userspace IPC test (Rust, cross-compiled)
+modules/
+  chip-qemu-virt-rt/   QEMU virt chip support (UART1, CLINT, IPI)
+  axplat-riscv64-qemu-virt/  axplat platform config
+patches/
+  opensbi-amp.patch    OpenSBI: hart routing + PIE fix + IPI forwarding
+  qemu-uart1.patch     QEMU: second UART at 0x10002000
+amp.config             Shared address constants (single source of truth)
+docs/IPC-DESIGN.md     IPC mechanism design document
+```
 
-- **StarryOS → rt-async**: SBI ecall → OpenSBI 写 MSIP0 → rt-async MachineSoft 中断
-- **rt-async → StarryOS**: 写 MSIP1 → OpenSBI 收到 MSI → 设置 MIP.SSIP → StarryOS SSI 中断
+## Patches
 
-共享内存使用无锁 SPSC 环形缓冲区，定义在 `modules/ipc/`。
+### OpenSBI (`opensbi-amp.patch`)
+
+Applied on top of upstream OpenSBI (pinned commit in Makefile):
+
+1. **Hart routing** (`fw_base.S`): hart 1 mrets directly to rt-async @ 0x82800000 in M-mode
+2. **Default next address** (`fw_dynamic.S`): set to 0x80200000 for StarryOS
+3. **Disable PIE**: bare-metal toolchain doesn't support PIE linking
+4. **IPI forwarding** (`sbi_ipi.c`): forward direct MSIP writes to SSIP for S-mode
+5. **CLINT S/U access** (`aclint_mswi.c`): allow S-mode to write MSIP registers
+
+### QEMU (`qemu-uart1.patch`)
+
+Adds a second NS16550A UART at 0x10002000 (IRQ 12) for rt-async output.
+
+## IPC Flow
+
+```
+StarryOS → rt-async:  SBI ecall → OpenSBI → MSIP hart 1 → MachineSoft ISR
+rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
+```
+
+Userspace access via `/dev/rt_shm` device: `open` → `mmap` → `ioctl(NOTIFY/AWAIT)`.
+
+## Notes
+
+- `riscv64-linux-musl-objcopy` for StarryOS: install via musl cross-make or adjust the path in the Makefile
+- `make distclean` removes cloned opensbi/ and qemu/ directories
+- `amp.config` is the single source of truth for all address constants

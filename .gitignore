@@ -1,6 +1,7 @@
 /target
 /build
 /opensbi
-/qemu/build
+/qemu
 *.bin
 *.elf
+apps/user-test-ipc/target/

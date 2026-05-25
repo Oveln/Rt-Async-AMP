@@ -4,6 +4,3 @@
 [submodule "StarryOS"]
 	path = StarryOS
 	url = git@github.com:Oveln/StarryOS.git
-[submodule "qemu"]
-	path = qemu
-	url = https://github.com/qemu/qemu.git

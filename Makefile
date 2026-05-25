@@ -1,60 +1,81 @@
 # rt-async-amp Makefile
 #
-# 一键构建 + 运行 QEMU virt 双核 (rt-async + StarryOS)
+# Build + run QEMU virt dual-core AMP (rt-async + StarryOS)
 #
-# 用法:
-#   make qemu          # 编译自定义 QEMU (带 UART1)
-#   make rt-async      # 编译 rt-async app
-#   make run           # 启动 QEMU (需要 OpenSBI + StarryOS 已就绪)
-#   make all           # 编译全部
+# Usage:
+#   make setup      # Clone + patch opensbi/qemu (first time)
+#   make all        # Build rt-async, opensbi, starryos
+#   make run        # Launch QEMU
+#   make clean
 
-TARGET  := riscv64imac-unknown-none-elf
+# ── Read address layout from amp.config ──────────────────────────────────────
+AMP_CONFIG   := amp.config
+RTASYNCBASE  := $(shell sed -n 's/^RTASYNCBASE=//p' $(AMP_CONFIG))
+SHMBASE      := $(shell sed -n 's/^SHMBASE=//p' $(AMP_CONFIG))
+SHMSIZE      := $(shell sed -n 's/^SHMSIZE=//p' $(AMP_CONFIG))
+QEMUSMP      := $(shell sed -n 's/^QEMUSMP=//p' $(AMP_CONFIG))
+QEMURAM      := $(shell sed -n 's/^QEMURAM=//p' $(AMP_CONFIG))
 
-# ── 从 amp.config 读取约定地址 ─────────────────────────────────────────────
-AMP_CONFIG := amp.config
-RTASYNCBASE := $(shell sed -n 's/RTASYNCBASE=//p' $(AMP_CONFIG))
-SHMBASE     := $(shell sed -n 's/SHMBASE=//p' $(AMP_CONFIG))
-SHMSIZE     := $(shell sed -n 's/SHMSIZE=//p' $(AMP_CONFIG))
-QEMUSMP     := $(shell sed -n 's/QEMUSMP=//p' $(AMP_CONFIG))
-QEMURAM     := $(shell sed -n 's/QEMURAM=//p' $(AMP_CONFIG))
+# ── Upstream repo pins ───────────────────────────────────────────────────────
+OPENSBI_REPO  := https://github.com/riscv-software-src/opensbi.git
+OPENSBI_COMMIT := 547a5bbda7c3ec0096a6c87809851f8c2df047d1
 
-# ── 路径 ──────────────────────────────────────────────────────────────────────
+QEMU_REPO     := https://github.com/qemu/qemu.git
+QEMU_COMMIT   := f5a2438405d4ae8b62de7c9b39fac0b2155ee544
 
-RT_ASYNC_DIR  := rt-async
-BUILD_DIR     := build
-APP_ELF       := target/$(TARGET)/release/demo
-APP_BIN       := $(BUILD_DIR)/rt-async.bin
+# ── Paths ────────────────────────────────────────────────────────────────────
+TARGET       := riscv64imac-unknown-none-elf
+BUILD_DIR    := build
+RT_ASYNC_DIR := rt-async
+APP_ELF      := target/$(TARGET)/release/demo
+APP_BIN      := $(BUILD_DIR)/rt-async.bin
 
-OPENSBI_DIR   := opensbi
-OPENSBI_FW    := $(OPENSBI_DIR)/build/platform/generic/firmware/fw_dynamic.bin
+OPENSBI_DIR  := opensbi
+OPENSBI_FW   := $(BUILD_DIR)/fw_dynamic.bin
 
-STARRYOS_DIR  := StarryOS
-STARRYOS_BIN  := $(BUILD_DIR)/starryos.bin
+STARRYOS_DIR   := StarryOS
+STARRYOS_BIN   := $(BUILD_DIR)/starryos.bin
 STARRYOS_TARGET := riscv64gc-unknown-none-elf
 STARRYOS_FEATURES := axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu
 
-QEMU_SRC_DIR  := qemu
-QEMU_BUILD    := $(QEMU_SRC_DIR)/build
-QEMU_BIN      := $(QEMU_BUILD)/qemu-system-riscv64
-UART_LOG      := $(BUILD_DIR)/rt-async-uart.log
-QEMU_FLAGS    := -machine virt -display none -serial mon:stdio -serial file:$(UART_LOG) -smp $(QEMUSMP) -m $(QEMURAM)
+QEMU_SRC_DIR := qemu
+QEMU_BUILD   := $(QEMU_SRC_DIR)/build
+QEMU_BIN     := $(QEMU_BUILD)/qemu-system-riscv64-unsigned
+UART_LOG     := $(BUILD_DIR)/rt-async-uart.log
 
-# ── Targets ───────────────────────────────────────────────────────────────────
+QEMU_FLAGS   := -machine virt -display none \
+                -serial mon:stdio -serial file:$(UART_LOG) \
+                -smp $(QEMUSMP) -m $(QEMURAM)
 
-.PHONY: all qemu rt-async opensbi starryos run clean
+# ── Phony targets ────────────────────────────────────────────────────────────
+DEBUGFS      := /opt/homebrew/opt/e2fsprogs/sbin/debugfs
+ROOTFS       := $(STARRYOS_DIR)/rootfs-riscv64.img
 
-all: rt-async
+.PHONY: all setup rt-async opensbi starryos qemu user-test install run clean distclean
+
+all: rt-async opensbi starryos
 	@echo "Build complete. Run 'make run' to start QEMU."
 
-# ── 自定义 QEMU (带 UART1 @ 0x10002000) ──────────────────────────────────────
+# ── Setup: clone + patch external repos ──────────────────────────────────────
+setup: $(OPENSBI_DIR)/.patched $(QEMU_SRC_DIR)/.patched
+	@echo "Setup complete."
 
+$(OPENSBI_DIR)/.patched:
+	git clone --filter=blob:none $(OPENSBI_REPO) $(OPENSBI_DIR)
+	cd $(OPENSBI_DIR) && git checkout -f $(OPENSBI_COMMIT)
+	cd $(OPENSBI_DIR) && git apply --whitespace=nowarn $(CURDIR)/patches/opensbi-amp.patch
+	@touch $@
+
+$(QEMU_SRC_DIR)/.patched:
+	git clone --filter=blob:none $(QEMU_REPO) $(QEMU_SRC_DIR)
+	cd $(QEMU_SRC_DIR) && git checkout -f $(QEMU_COMMIT)
+	cd $(QEMU_SRC_DIR) && git apply --whitespace=nowarn $(CURDIR)/patches/qemu-uart1.patch
+	@touch $@
+
+# ── Build: QEMU ──────────────────────────────────────────────────────────────
 qemu: $(QEMU_BIN)
 
-$(QEMU_BIN):
-	@if [ ! -f "$(QEMU_SRC_DIR)/configure" ]; then \
-		echo "QEMU source not found. Run 'git submodule update --init qemu' first."; \
-		exit 1; \
-	fi
+$(QEMU_BIN): $(QEMU_SRC_DIR)/.patched
 	mkdir -p $(QEMU_BUILD)
 	cd $(QEMU_BUILD) && ../configure \
 		--target-list=riscv64-softmmu \
@@ -65,6 +86,7 @@ $(QEMU_BIN):
 	$(MAKE) -C $(QEMU_BUILD) -j$$(nproc)
 	@echo "QEMU → $(QEMU_BIN)"
 
+# ── Build: rt-async ──────────────────────────────────────────────────────────
 rt-async: $(APP_BIN)
 
 $(APP_BIN): $(APP_ELF)
@@ -76,17 +98,23 @@ $(APP_ELF):
 	cd apps/rt-async-app && \
 	cargo build --target $(TARGET) --release -p rt-async-app
 
-opensbi:
-	cd $(OPENSBI_DIR) && \
-	make -j$$(nproc) PLATFORM=generic CROSS_COMPILE=riscv64-elf- O=build FW_TEXT_START=0x80000000
-	@mkdir -p $(BUILD_DIR)
-	cp $(OPENSBI_FW) $(BUILD_DIR)/fw_dynamic.bin
-	@echo "OpenSBI → build/fw_dynamic.bin"
+# ── Build: OpenSBI ───────────────────────────────────────────────────────────
+opensbi: $(OPENSBI_FW)
 
-starryos:
+$(OPENSBI_FW): $(OPENSBI_DIR)/.patched
+	cd $(OPENSBI_DIR) && \
+		make -j$$(nproc) PLATFORM=generic CROSS_COMPILE=riscv64-elf- \
+		O=build FW_TEXT_START=0x80000000
+	@mkdir -p $(BUILD_DIR)
+	cp $(OPENSBI_DIR)/build/platform/generic/firmware/fw_dynamic.bin $@
+	@echo "OpenSBI → $@"
+
+# ── Build: StarryOS ─────────────────────────────────────────────────────────
+starryos: $(STARRYOS_BIN)
+
+$(STARRYOS_BIN):
 	@if [ ! -d "$(STARRYOS_DIR)" ]; then \
-		echo "StarryOS not found at $(STARRYOS_DIR)/"; \
-		echo "Clone StarryOS first. See README."; \
+		echo "StarryOS not found. Run 'git submodule update --init StarryOS'."; \
 		exit 1; \
 	fi
 	@mkdir -p $(BUILD_DIR)
@@ -96,38 +124,57 @@ starryos:
 		--target $(STARRYOS_TARGET) --target-dir target --release \
 		--features '$(STARRYOS_FEATURES)'
 	riscv64-elf-objcopy -O binary \
-		$(STARRYOS_DIR)/target/$(STARRYOS_TARGET)/release/starryos $(STARRYOS_BIN)
-	@echo "StarryOS → $(STARRYOS_BIN)"
+		$(STARRYOS_DIR)/target/$(STARRYOS_TARGET)/release/starryos $@
+	@echo "StarryOS → $@"
 
+# ── Build: userspace programs ────────────────────────────────────────────────
+USER_TEST_TARGET := riscv64gc-unknown-linux-musl
+USER_TEST_BIN    := $(BUILD_DIR)/user-test-ipc
+
+user-test: $(USER_TEST_BIN)
+
+$(USER_TEST_BIN):
+	@mkdir -p $(BUILD_DIR)
+	cd apps/user-test-ipc && \
+	cargo build --target $(USER_TEST_TARGET) --release
+	cp apps/user-test-ipc/target/$(USER_TEST_TARGET)/release/user-test-ipc $@
+	@echo "user-test-ipc → $@"
+
+# install-<binary> — install a file from build/ into the StarryOS rootfs
+# Usage: make install-user-test-ipc   or   make install-build/some-binary
+# Generic: make install FILE=build/some-binary DST=/some-binary
+
+install:
+	@if [ -z "$(FILE)" ]; then echo "Usage: make install FILE=build/<name> [DST=/<name>]"; exit 1; fi
+	@DST=$${DST:-/$(notdir $(FILE))}; \
+	if [ ! -f "$(FILE)" ]; then echo "File not found: $(FILE)"; exit 1; fi; \
+	if [ ! -f "$(ROOTFS)" ]; then echo "Rootfs not found: $(ROOTFS)"; exit 1; fi; \
+	pkill -9 qemu-system-riscv64 2>/dev/null || true; \
+	sleep 0.5; \
+	$(DEBUGFS) -w -R "rm $$DST" $(ROOTFS) 2>/dev/null || true; \
+	$(DEBUGFS) -w -R "write $(FILE) $$DST" $(ROOTFS); \
+	echo "Installed $(FILE) → $$DST in $(ROOTFS)"
+
+# ── Run ──────────────────────────────────────────────────────────────────────
 run:
-	@if [ ! -f "$(BUILD_DIR)/fw_dynamic.bin" ]; then \
-		echo "OpenSBI firmware not found. Run 'make opensbi' first."; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(APP_BIN)" ]; then \
-		echo "rt-async binary not found. Run 'make rt-async' first."; \
-		exit 1; \
-	fi
-	@if [ ! -f "$(STARRYOS_BIN)" ]; then \
-		echo "Warning: StarryOS binary not found. Starting without it."; \
-	fi
-	@echo "Starting QEMU virt (2 cores, 256M RAM)..."
-	@echo "  UART0 (serial0) → stdio  (OpenSBI/StarryOS)"
-	@echo "  UART1 (serial1) → $(UART_LOG)  (rt-async)"
+	@if [ ! -f "$(OPENSBI_FW)" ]; then echo "Run 'make opensbi' first."; exit 1; fi
+	@if [ ! -f "$(APP_BIN)" ]; then echo "Run 'make rt-async' first."; exit 1; fi
+	@if [ ! -f "$(STARRYOS_BIN)" ]; then echo "Warning: no StarryOS binary."; fi
+	@echo "Starting QEMU ($(QEMUSMP) cores, $(QEMURAM) RAM)..."
+	@echo "  UART0 → stdio (OpenSBI/StarryOS)"
+	@echo "  UART1 → $(UART_LOG) (rt-async)"
 	$(QEMU_BIN) $(QEMU_FLAGS) \
-		-bios $(BUILD_DIR)/fw_dynamic.bin \
-		$${STARRYOS_BIN:+-kernel $(STARRYOS_BIN)} \
+		-bios $(OPENSBI_FW) \
+		-kernel $(STARRYOS_BIN) \
 		-device loader,addr=$(RTASYNCBASE),file=$(APP_BIN) \
 		-drive file=$(STARRYOS_DIR)/rootfs-riscv64.img,format=raw,if=none,id=hd0 \
 		-device virtio-blk-pci,drive=hd0
 
+# ── Clean ────────────────────────────────────────────────────────────────────
 clean:
 	cargo clean
 	rm -rf $(BUILD_DIR)
 
-qemu-clean:
-	$(MAKE) -C $(QEMU_BUILD) clean
-
 distclean: clean
-	rm -rf $(QEMU_BUILD)
-	@echo "Run 'git submodule deinit --all' manually if needed."
+	rm -rf $(OPENSBI_DIR) $(QEMU_SRC_DIR)
+	@echo "Removed opensbi/ and qemu/. Run 'make setup' to re-clone."

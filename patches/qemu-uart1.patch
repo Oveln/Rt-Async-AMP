@@ -1,21 +1,17 @@
-From: rt-async-amp <dev@rt-async-amp>
-Subject: [PATCH] hw/riscv/virt: Add second UART (UART1) at 0x10002000
-
-Add a second NS16550A UART to the virt machine for dual-core AMP use:
-- UART0 (0x10000000, IRQ 10): normal world (StarryOS / OpenSBI)
-- UART1 (0x10002000, IRQ 12): rt-async (M-mode RTOS on hart 0)
-
 diff --git a/hw/riscv/virt.c b/hw/riscv/virt.c
-index __BASE__..__UART1__ 100644
+index 315049bc86..4a0141bc72 100644
 --- a/hw/riscv/virt.c
 +++ b/hw/riscv/virt.c
 @@ -93,6 +93,7 @@ static const MemMapEntry virt_memmap[] = {
+     [VIRT_APLIC_M] =      {  0xc000000, APLIC_SIZE(VIRT_CPUS_MAX) },
+     [VIRT_APLIC_S] =      {  0xd000000, APLIC_SIZE(VIRT_CPUS_MAX) },
      [VIRT_UART0] =        { 0x10000000,         0x100 },
 +    [VIRT_UART1] =        { 0x10002000,         0x100 },
      [VIRT_VIRTIO] =       { 0x10001000,        0x1000 },
      [VIRT_FW_CFG] =       { 0x10100000,          0x18 },
-
-@@ -970,6 +971,22 @@ static void create_fdt_uart(RISCVVirtState *s,
+     [VIRT_FLASH] =        { 0x20000000,     0x4000000 },
+@@ -970,6 +971,24 @@ static void create_fdt_uart(RISCVVirtState *s,
+ 
      qemu_fdt_setprop_string(ms->fdt, "/chosen", "stdout-path", name);
      qemu_fdt_setprop_string(ms->fdt, "/aliases", "serial0", name);
 +
@@ -37,30 +33,35 @@ index __BASE__..__UART1__ 100644
 +    }
 +    qemu_fdt_setprop_string(ms->fdt, "/aliases", "serial1", name);
  }
-
-@@ -1698,6 +1715,10 @@ static void virt_machine_init(MachineState *machine)
+ 
+ static void create_fdt_rtc(RISCVVirtState *s,
+@@ -1696,6 +1715,9 @@ static void virt_machine_init(MachineState *machine)
      serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
          0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
          serial_hd(0), DEVICE_LITTLE_ENDIAN);
 +    serial_mm_init(system_memory, s->memmap[VIRT_UART1].base,
 +        0, qdev_get_gpio_in(mmio_irqchip, UART1_IRQ), 399193,
 +        serial_hd(1), DEVICE_LITTLE_ENDIAN);
-+
+ 
      sysbus_create_simple("goldfish_rtc", s->memmap[VIRT_RTC].base,
          qdev_get_gpio_in(mmio_irqchip, RTC_IRQ));
-
 diff --git a/include/hw/riscv/virt.h b/include/hw/riscv/virt.h
-index __BASE__..__UART1__ 100644
+index 18a2a323a3..a1ad6dbf2c 100644
 --- a/include/hw/riscv/virt.h
 +++ b/include/hw/riscv/virt.h
-@@ -79,6 +79,7 @@ enum {
+@@ -77,6 +77,7 @@ enum {
+     VIRT_APLIC_M,
+     VIRT_APLIC_S,
      VIRT_UART0,
 +    VIRT_UART1,
      VIRT_VIRTIO,
      VIRT_FW_CFG,
-
-@@ -94,6 +95,7 @@ enum {
+     VIRT_IMSIC_M,
+@@ -93,6 +94,7 @@ enum {
+ enum {
      UART0_IRQ = 10,
      RTC_IRQ = 11,
 +    UART1_IRQ = 12,
      VIRTIO_IRQ = 1, /* 1 to 8 */
+     VIRTIO_COUNT = 8,
+     PCIE_IRQ = 0x20, /* 32 to 35 */
