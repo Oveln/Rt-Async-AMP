@@ -69,6 +69,12 @@ fn main(spawner: Pin<&'static Spawner<4>>) {
 }
 
 #[executor::interrupt]
+fn MachineSoft(_tf: &mut TrapFrame) {
+    log::info!("[IPC] received IPI from StarryOS");
+    rt_async_app::intercom::process_pending();
+}
+
+#[executor::interrupt]
 fn MachineTimer(_tf: &mut TrapFrame) {
     futures::timer::handle_timer_isr();
 }
