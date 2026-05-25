@@ -1,11 +1,12 @@
 ENTRY(__start);
 
-/* 单核测试: 0x80000000 (QEMU -kernel 默认跳转地址)
- * 双核 AMP: 改为 ORIGIN = 0x80800000，由 OpenSBI 路由
+/* StarryOS: 0x80200000 ~ 0x826bf0c0 (~38MB)
+ * rt-async: 0x82800000 (after StarryOS, 2MB aligned)
+ * SHM IPC:  0x88000000
  */
 MEMORY
 {
-    RAM : ORIGIN = 0x80800000, LENGTH = 32M
+    RAM : ORIGIN = 0x82800000, LENGTH = 8M
 }
 
 _max_hart_id = 0;

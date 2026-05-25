@@ -10,6 +10,14 @@
 
 TARGET  := riscv64imac-unknown-none-elf
 
+# ── 从 amp.config 读取约定地址 ─────────────────────────────────────────────
+AMP_CONFIG := amp.config
+RTASYNCBASE := $(shell sed -n 's/RTASYNCBASE=//p' $(AMP_CONFIG))
+SHMBASE     := $(shell sed -n 's/SHMBASE=//p' $(AMP_CONFIG))
+SHMSIZE     := $(shell sed -n 's/SHMSIZE=//p' $(AMP_CONFIG))
+QEMUSMP     := $(shell sed -n 's/QEMUSMP=//p' $(AMP_CONFIG))
+QEMURAM     := $(shell sed -n 's/QEMURAM=//p' $(AMP_CONFIG))
+
 # ── 路径 ──────────────────────────────────────────────────────────────────────
 
 RT_ASYNC_DIR  := rt-async
@@ -22,12 +30,14 @@ OPENSBI_FW    := $(OPENSBI_DIR)/build/platform/generic/firmware/fw_dynamic.bin
 
 STARRYOS_DIR  := StarryOS
 STARRYOS_BIN  := $(BUILD_DIR)/starryos.bin
+STARRYOS_TARGET := riscv64gc-unknown-none-elf
+STARRYOS_FEATURES := axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu
 
 QEMU_SRC_DIR  := qemu
 QEMU_BUILD    := $(QEMU_SRC_DIR)/build
 QEMU_BIN      := $(QEMU_BUILD)/qemu-system-riscv64
 UART_LOG      := $(BUILD_DIR)/rt-async-uart.log
-QEMU_FLAGS    := -machine virt -display none -serial mon:stdio -serial file:$(UART_LOG) -smp 2 -m 256M
+QEMU_FLAGS    := -machine virt -display none -serial mon:stdio -serial file:$(UART_LOG) -smp $(QEMUSMP) -m $(QEMURAM)
 
 # ── Targets ───────────────────────────────────────────────────────────────────
 
@@ -79,16 +89,14 @@ starryos:
 		echo "Clone StarryOS first. See README."; \
 		exit 1; \
 	fi
-	cd $(STARRYOS_DIR) && make qemu_riscv64 LOG=info
 	@mkdir -p $(BUILD_DIR)
-	@if [ -f "$(STARRYOS_DIR)/StarryOS_qemu.bin" ]; then \
-		cp $(STARRYOS_DIR)/StarryOS_qemu.bin $(STARRYOS_BIN); \
-	elif [ -f "$(STARRYOS_DIR)/StarryOS_qemu.elf" ]; then \
-		riscv64-elf-objcopy -O binary \
-			$(STARRYOS_DIR)/StarryOS_qemu.elf $(STARRYOS_BIN); \
-	else \
-		echo "StarryOS binary not found"; exit 1; \
-	fi
+	cd $(STARRYOS_DIR) && AX_CONFIG_PATH=$$PWD/.axconfig.toml \
+		RUSTFLAGS='-C link-arg=-Ttarget/$(STARRYOS_TARGET)/release/linker_riscv64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc' \
+		cargo build -Z unstable-options \
+		--target $(STARRYOS_TARGET) --target-dir target --release \
+		--features '$(STARRYOS_FEATURES)'
+	riscv64-elf-objcopy -O binary \
+		$(STARRYOS_DIR)/target/$(STARRYOS_TARGET)/release/starryos $(STARRYOS_BIN)
 	@echo "StarryOS → $(STARRYOS_BIN)"
 
 run:
@@ -108,8 +116,10 @@ run:
 	@echo "  UART1 (serial1) → $(UART_LOG)  (rt-async)"
 	$(QEMU_BIN) $(QEMU_FLAGS) \
 		-bios $(BUILD_DIR)/fw_dynamic.bin \
-		-device loader,addr=0x80800000,file=$(APP_BIN) \
-		$${STARRYOS_BIN:+-device loader,addr=0x80200000,file=$(STARRYOS_BIN)}
+		$${STARRYOS_BIN:+-kernel $(STARRYOS_BIN)} \
+		-device loader,addr=$(RTASYNCBASE),file=$(APP_BIN) \
+		-drive file=$(STARRYOS_DIR)/rootfs-riscv64.img,format=raw,if=none,id=hd0 \
+		-device virtio-blk-pci,drive=hd0
 
 clean:
 	cargo clean

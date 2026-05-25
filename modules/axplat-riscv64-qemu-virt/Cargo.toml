@@ -1,0 +1,28 @@
+[package]
+name = "axplat-riscv64-qemu-virt"
+version = "0.3.1-pre.6"
+edition = "2024"
+description = "Implementation of `axplat` for QEMU RISC-V virt board (AMP local)"
+build = "build.rs"
+
+[features]
+fp-simd = ["axcpu/fp-simd"]
+irq = ["axplat/irq", "dep:riscv_plic"]
+rtc = ["dep:riscv_goldfish"]
+smp = ["axplat/smp"]
+
+[dependencies]
+axconfig-macros = "0.2"
+axcpu = "0.3.0-preview.7"
+axplat = "0.3.1-pre.6"
+kspin = "0.1"
+lazyinit = "0.2"
+log = "0.4"
+riscv = "0.16"
+riscv_goldfish = { version = "0.1", optional = true }
+riscv_plic = { version = "0.2", optional = true }
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+uart_16550 = "0.4.0"
+
+[package.metadata.docs.rs]
+targets = ["riscv64gc-unknown-none-elf"]

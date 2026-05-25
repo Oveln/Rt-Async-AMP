@@ -1,8 +1,8 @@
 //! # QEMU Virt RT 芯片实现
 //!
 //! 基于 rt-async 的 `qemu-virt`，使用自定义 QEMU 的 UART1:
-//! - UART0 (0x10000000): OpenSBI / StarryOS
-//! - UART1 (0x10002000): rt-async (M-mode RTOS, hart 0)
+//! - UART0 (0x10000000): OpenSBI / StarryOS (hart 0, S-mode)
+//! - UART1 (0x10002000): rt-async (hart 1, M-mode RTOS)
 
 #![no_std]
 #![allow(unreachable_code)]
@@ -10,16 +10,11 @@
 use extern_trait::extern_trait;
 use platform::{Chip, TimerChip};
 
-/// QEMU virt UART1 基址 (自定义 QEMU: serial@10002000)
-const UART_BASE: usize = 0x1000_2000;
-/// SiFive Test 关机寄存器
-const SIFIVE_TEST_BASE: usize = 0x100_000;
-/// CLINT msip (hart 0)
-const CLINT_MSIP: usize = 0x2000_000;
-/// CLINT mtimecmp (hart 0)
-const CLINT_MTIMECMP: usize = 0x200_4000;
-/// CLINT mtime
-const CLINT_MTIME: usize = 0x200_BFF8;
+mod amp {
+    include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
+}
+
+pub use amp::{SHMBASE, SHMSIZE};
 
 pub struct QemuVirtRt;
 
@@ -27,7 +22,7 @@ pub struct QemuVirtRt;
 impl Chip for QemuVirtRt {
     fn shutdown() -> ! {
         unsafe {
-            core::ptr::write_volatile(SIFIVE_TEST_BASE as *mut u32, 0x5555);
+            core::ptr::write_volatile(0x100_000 as *mut u32, 0x5555);
         }
         loop {}
     }
@@ -35,17 +30,17 @@ impl Chip for QemuVirtRt {
     fn put_str(s: &str) {
         for &byte in s.as_bytes() {
             unsafe {
-                core::ptr::write_volatile(UART_BASE as *mut u8, byte);
+                core::ptr::write_volatile(amp::UART1BASE as *mut u8, byte);
             }
         }
     }
 
     unsafe fn pend() {
-        unsafe { core::ptr::write_volatile(CLINT_MSIP as *mut u32, 1) };
+        unsafe { core::ptr::write_volatile((amp::CLINTBASE + 4) as *mut u32, 1) };
     }
 
     unsafe fn clear_pend() {
-        unsafe { core::ptr::write_volatile(CLINT_MSIP as *mut u32, 0) };
+        unsafe { core::ptr::write_volatile((amp::CLINTBASE + 4) as *mut u32, 0) };
     }
 }
 
@@ -56,11 +51,11 @@ impl TimerChip for QemuVirtRt {
     }
 
     fn now_ticks() -> u64 {
-        unsafe { core::ptr::read_volatile(CLINT_MTIME as *const u64) }
+        unsafe { core::ptr::read_volatile(0x200_BFF8 as *const u64) }
     }
 
     fn set_deadline(tick: u64) {
-        unsafe { core::ptr::write_volatile(CLINT_MTIMECMP as *mut u64, tick) };
+        unsafe { core::ptr::write_volatile((amp::CLINTBASE + 0x4008) as *mut u64, tick) };
     }
 
     unsafe fn enable_timer_irq() {
@@ -69,12 +64,12 @@ impl TimerChip for QemuVirtRt {
     }
 }
 
-/// 向 hart 1 (StarryOS) 发送 IPI (写 MSIP1)
+/// 向 hart 0 (StarryOS) 发送 IPI (写 MSIP0)
 pub unsafe fn send_ipi_to_linux() {
-    unsafe { core::ptr::write_volatile((0x2000_000 + 4) as *mut u32, 1) };
+    unsafe { core::ptr::write_volatile(amp::CLINTBASE as *mut u32, 1) };
 }
 
-/// 清除 hart 1 的 MSIP1
+/// 清除 hart 0 的 MSIP0
 pub unsafe fn clear_ipi_to_linux() {
-    unsafe { core::ptr::write_volatile((0x2000_000 + 4) as *mut u32, 0) };
+    unsafe { core::ptr::write_volatile(amp::CLINTBASE as *mut u32, 0) };
 }

@@ -1,7 +1,7 @@
 //! rt-async-amp 双核 demo
 //!
-//! hart 0 (M-mode): rt-async 优先级抢占调度，输出到 UART1
-//! hart 1 (S-mode): StarryOS，输出到 UART0
+//! hart 1 (M-mode): rt-async 优先级抢占调度，输出到 UART1
+//! hart 0 (S-mode): StarryOS，输出到 UART0
 //!
 //! 共享内存 IPC 位于 0x88000000
 
@@ -58,8 +58,8 @@ async fn task_ipc() {
 
 #[executor::main]
 fn main(spawner: Pin<&'static Spawner<4>>) {
-    ChipImpl::put_str("rt-async-amp: hart 0 direct write\n");
-    log::info!("rt-async-amp: hart 0 started at 0x80800000");
+    ChipImpl::put_str("rt-async-amp: rt-async started\n");
+    log::info!("rt-async-amp: hart 1 (rt-async) started");
 
     spawner.spawn(Priority::new(0), task_a().unwrap());
     spawner.spawn(Priority::new(1), task_b().unwrap());

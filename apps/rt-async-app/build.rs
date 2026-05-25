@@ -1,10 +1,6 @@
-use std::env;
-
 fn main() {
-    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    // memory.x from this crate
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     println!("cargo:rustc-link-search={}", manifest_dir);
-    // link.x from riscv64-rt (resolved via platform dependency)
     let rt_dir = format!("{}/../../rt-async/modules/platform/archs/riscv64-rt", manifest_dir);
     println!("cargo:rustc-link-search={}", rt_dir);
     println!("cargo:rustc-link-arg=-Tmemory.x");

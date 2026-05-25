@@ -1,29 +1,28 @@
 //! 双核 AMP 通信模块
 //!
-//! 共享内存布局 (0x8800_0000):
+//! 共享内存布局:
 //! - Channel 0: StarryOS -> rt-async (请求/通知)
 //! - Channel 1: rt-async -> StarryOS (响应/通知)
+//!
+//! 约定地址来自 amp.config (通过 chip-qemu-virt-rt 重导出).
 
 extern crate alloc;
 
 use ov_channal::{ChannelId, Message, MsgType, SharedMemory};
 
-/// 共享内存基地址
-pub const SHM_BASE_ADDR: usize = 0x8800_0000;
-
 /// 初始化共享内存（由 rt-async 启动时调用一次）
 pub fn init() {
     unsafe {
-        let shm = SharedMemory::at(SHM_BASE_ADDR);
+        let shm = SharedMemory::at(chip_qemu_virt_rt::SHMBASE);
         shm.init();
     }
-    log::info!("[InterCom] initialized at {:#x}", SHM_BASE_ADDR);
+    log::info!("[InterCom] initialized at {:#x}", chip_qemu_virt_rt::SHMBASE);
 }
 
 /// 检查 StarryOS 是否发来消息
 pub fn has_pending() -> bool {
     unsafe {
-        let shm = SharedMemory::at(SHM_BASE_ADDR);
+        let shm = SharedMemory::at(chip_qemu_virt_rt::SHMBASE);
         shm.receiver(ChannelId::new(0))
             .is_ok_and(|rx| rx.has_pending())
     }
@@ -32,7 +31,7 @@ pub fn has_pending() -> bool {
 /// 接收并处理所有待处理消息
 pub fn process_pending() {
     unsafe {
-        let shm = SharedMemory::at(SHM_BASE_ADDR);
+        let shm = SharedMemory::at(chip_qemu_virt_rt::SHMBASE);
         if let Ok(rx) = shm.receiver(ChannelId::new(0)) {
             for msg in rx.iter() {
                 handle_message(msg);
@@ -92,7 +91,7 @@ fn handle_request(method_id: u64, msg: Message) {
 /// 向 StarryOS 发送消息
 pub fn send_message(msg: Message) {
     unsafe {
-        let shm = SharedMemory::at(SHM_BASE_ADDR);
+        let shm = SharedMemory::at(chip_qemu_virt_rt::SHMBASE);
         if let Ok(tx) = shm.sender(ChannelId::new(1))
             && tx.try_send(&msg).is_ok()
         {
