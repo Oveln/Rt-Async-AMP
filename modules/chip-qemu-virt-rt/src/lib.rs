@@ -36,6 +36,7 @@ impl Chip for QemuVirtRt {
     }
 
     unsafe fn pend() {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
         unsafe { core::ptr::write_volatile((amp::CLINTBASE + 4) as *mut u32, 1) };
     }
 
@@ -65,7 +66,12 @@ impl TimerChip for QemuVirtRt {
 }
 
 /// 向 hart 0 (StarryOS) 发送 IPI (写 MSIP0)
+///
+/// # Safety
+/// 调用前应确保共享内存中的数据已写入完成。
+/// 内部使用 `fence(Release)` 保证写 CLINT 之前的所有内存操作对 hart 0 可见。
 pub unsafe fn send_ipi_to_linux() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
     unsafe { core::ptr::write_volatile(amp::CLINTBASE as *mut u32, 1) };
 }
 

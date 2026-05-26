@@ -59,12 +59,12 @@ index 5d6540d..c7e31fb 100644
  	.globl _start
  	.globl _start_warm
  _start:
-+	/* ---- AMP hart routing: hart 1 -> rt-async @ 0x82800000 ---- */
++	/* ---- AMP hart routing: hart {RTASYNCHART} -> rt-async @ {RTASYNCBASE} ---- */
 +	csrr	t0, CSR_MHARTID
-+	li	t1, 1
++	li	t1, {RTASYNCHART}
 +	bne	t0, t1, .Lnormal_boot
-+	/* hart 1: jump directly to rt-async (stay in M-mode) */
-+	li	t1, 0x82800000
++	/* hart {RTASYNCHART}: jump directly to rt-async (stay in M-mode) */
++	li	t1, {RTASYNCBASE}
 +	csrw	CSR_MEPC, t1
 +	li	t1, ((0b11 << 11) | (1 << 7))
 +	csrw	CSR_MSTATUS, t1
@@ -83,7 +83,7 @@ index 5ee2883..3b177a9 100644
  	RISCV_PTR 0x0
  _dynamic_next_addr:
 -	RISCV_PTR 0x0
-+	RISCV_PTR 0x80200000
++	RISCV_PTR {STARRYOSBASE}
  _dynamic_next_mode:
  	RISCV_PTR PRV_S
  _dynamic_options:

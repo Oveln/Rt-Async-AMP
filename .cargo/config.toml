@@ -1,6 +1,5 @@
 [target.riscv64imac-unknown-none-elf]
-# 单核测试 (无 OpenSBI): 直接加载到 0x80000000
 runner = ["qemu-system-riscv64", "-machine", "virt", "-nographic", "-bios", "none", "-kernel"]
 
-[build]
-target = "riscv64imac-unknown-none-elf"
+[alias]
+xtask = "run --package xtask --"

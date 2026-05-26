@@ -1,0 +1,49 @@
+# rt-async-amp 共享约定配置
+#
+# Single source of truth for address layout, build parameters, and repo pins.
+# Template variables {VAR} in patch files (patches/*.patch) are substituted
+# from top-level values below during `cargo xtask setup`.
+
+# ── Physical memory layout ──────────────────────────────────────────────────
+# QEMU virt 256M RAM: 0x80000000 ~ 0x90000000
+OPENSBIBASE  = "0x80000000"
+OPENSBISIZE  = "0x80000"
+STARRYOSBASE = "0x80200000"
+RTASYNCBASE  = "0x82800000"
+RTASYNCSIZE  = "0x800000"
+
+# ── IPC shared memory ───────────────────────────────────────────────────────
+SHMBASE = "0x88000000"
+SHMSIZE = 67072
+
+# ── rt-async hart (core) assignment ─────────────────────────────────────────
+RTASYNCHART = 1
+
+# ── CLINT ───────────────────────────────────────────────────────────────────
+CLINTBASE = "0x2000000"
+
+# ── Peripherals ─────────────────────────────────────────────────────────────
+UART0BASE = "0x10000000"
+UART1BASE = "0x10002000"
+
+# ── ioctl (rt_shm device) ──────────────────────────────────────────────────
+RTSHM_IOC_NOTIFY = "0x735001"
+RTSHM_IOC_AWAIT  = "0x735002"
+
+# ── SBI constants ───────────────────────────────────────────────────────────
+SBI_EXT_IPI       = "0x735049"
+SBI_FUNC_SEND_IPI = "0x00"
+
+# ── QEMU configuration ─────────────────────────────────────────────────────
+QEMUSMP = 2
+QEMURAM = "256M"
+
+# ── Upstream repos ──────────────────────────────────────────────────────────
+
+[opensbi]
+repo   = "https://github.com/riscv-software-src/opensbi.git"
+commit = "547a5bbda7c3ec0096a6c87809851f8c2df047d1"
+
+[qemu_src]
+repo   = "https://github.com/qemu/qemu.git"
+commit = "f5a2438405d4ae8b62de7c9b39fac0b2155ee544"

@@ -6,8 +6,6 @@
 //!
 //! 约定地址来自 amp.config (通过 chip-qemu-virt-rt 重导出).
 
-extern crate alloc;
-
 use ov_channal::{ChannelId, Message, MsgType, SharedMemory};
 
 /// 初始化共享内存（由 rt-async 启动时调用一次）

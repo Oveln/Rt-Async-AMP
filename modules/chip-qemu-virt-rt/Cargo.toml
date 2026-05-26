@@ -8,3 +8,6 @@ publish = false
 platform = { path = "../../rt-async/modules/platform" }
 extern-trait = "0.4.3"
 riscv = "0.16.0"
+
+[build-dependencies]
+toml = "0.8"
