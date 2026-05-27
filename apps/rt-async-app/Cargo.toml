@@ -15,6 +15,7 @@ serde = { workspace = true }
 postcard = { workspace = true }
 fugit = "0.4"
 log = { version = "0.4", default-features = false }
+portable-atomic = { version = "1", default-features = false }
 
 [features]
 default = ["riscv64"]

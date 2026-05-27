@@ -60,15 +60,20 @@ pub fn has_pending() -> bool {
     SERVER.has_pending()
 }
 
-/// 接收并处理所有待处理消息（RPC + 通知）
-///
-/// RPC 请求自动分发给 `RtAsyncRpc` handler，
-/// 非 RPC 消息（通知、数据）走原有逻辑。
-pub fn process_pending() {
-    let n = SERVER.process_all::<RtAsyncRpc, _>(|msg| handle_non_rpc(msg));
+/// 处理所有待处理消息（RPC + 通知），返回是否有工作
+pub fn process_pending() -> bool {
+    let mut n = 0;
+    loop {
+        match SERVER.process_one::<RtAsyncRpc>() {
+            ov_rpc::ProcessResult::NoMessage => break,
+            ov_rpc::ProcessResult::Handled => n += 1,
+            ov_rpc::ProcessResult::NotRpc(msg) => handle_non_rpc(msg),
+        }
+    }
     if n > 0 {
         unsafe { chip_qemu_virt_rt::send_ipi_to_linux() };
     }
+    n > 0
 }
 
 fn handle_non_rpc(msg: Message) {

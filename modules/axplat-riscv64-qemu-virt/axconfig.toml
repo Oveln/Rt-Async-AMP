@@ -37,6 +37,7 @@ boot-stack-size = 0x40000                       # uint
 # MMIO ranges with format (`base_paddr`, `size`).
 mmio-ranges = [
     [0x0010_1000, 0x1000],          # RTC
+    [0x0200_0000, 0x1_0000],        # CLINT
     [0x0c00_0000, 0x21_0000],       # PLIC
     [0x1000_0000, 0x1000],          # UART0
     [0x1000_1000, 0x8000],          # VirtIO

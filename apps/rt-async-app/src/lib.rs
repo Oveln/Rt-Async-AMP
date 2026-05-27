@@ -7,3 +7,4 @@
 #![no_std]
 
 pub mod intercom;
+pub mod ipc_wait;

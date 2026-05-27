@@ -72,6 +72,31 @@ pub fn starryos(root: &Path, _cfg: &Config) {
     let target = "riscv64gc-unknown-none-elf";
     let features = "axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu";
     let axconfig = dir.join(".axconfig.toml");
+
+    let plat_config = root
+        .join("modules/axplat-riscv64-qemu-virt/axconfig.toml");
+    let defconfig = dir.join("make/defconfig.toml");
+    if !axconfig.exists()
+        || fs::metadata(&plat_config)
+            .ok()
+            .map_or(true, |m| fs::metadata(&axconfig).ok().map_or(true, |a| m.modified().unwrap() > a.modified().unwrap()))
+    {
+        util::run(
+            &dir,
+            "axconfig-gen",
+            &[
+                &defconfig.to_string_lossy(),
+                &plat_config.to_string_lossy(),
+                "-w",
+                "arch=\"riscv64\"",
+                "-w",
+                "platform=\"riscv64-qemu-virt\"",
+                "-o",
+                &axconfig.to_string_lossy(),
+            ],
+        );
+    }
+
     let rustflags = format!(
         "-C link-arg=-Ttarget/{target}/release/linker_riscv64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc"
     );

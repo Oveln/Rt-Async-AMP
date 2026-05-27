@@ -552,6 +552,7 @@ dependencies = [
  "ov-channels",
  "ov-rpc",
  "platform",
+ "portable-atomic",
  "postcard",
  "serde",
 ]

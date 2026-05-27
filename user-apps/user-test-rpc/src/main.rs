@@ -7,7 +7,8 @@ use ov_rpc::{define_service, RpcClient};
 
 const RT_SHM_IOC_NOTIFY: libc::c_ulong = 0x7350_01;
 const RT_SHM_IOC_AWAIT: libc::c_ulong = 0x7350_02;
-const SHM_SIZE: usize = 67_072;
+const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = 0x7350_03;
+const SHM_SIZE: usize = 69632;
 
 define_service! {
     RtAsyncRpc {
@@ -72,6 +73,11 @@ impl RtShm {
         Ok(())
     }
 
+    fn clear_pending(&self) -> io::Result<()> {
+        do_ioctl(self.fd, RT_SHM_IOC_CLR_PENDING, 0)?;
+        Ok(())
+    }
+
     fn await_ipi(&self) -> io::Result<()> {
         do_ioctl(self.fd, RT_SHM_IOC_AWAIT, 0)?;
         Ok(())
@@ -95,6 +101,7 @@ fn main() {
 
     println!("[test_rpc] opening /dev/rt_shm...");
     let rt = RtShm::open().expect("failed to open /dev/rt_shm");
+    rt.clear_pending().expect("CLR_PENDING failed");
 
     let client = RpcClient::new(rt.shm_addr(), ChannelId::new(0), ChannelId::new(1));
 

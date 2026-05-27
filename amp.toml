@@ -14,7 +14,7 @@ RTASYNCSIZE  = "0x800000"
 
 # ── IPC shared memory ───────────────────────────────────────────────────────
 SHMBASE = "0x88000000"
-SHMSIZE = 67072
+SHMSIZE = 69632
 
 # ── rt-async hart (core) assignment ─────────────────────────────────────────
 RTASYNCHART = 1

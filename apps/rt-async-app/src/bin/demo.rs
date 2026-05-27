@@ -4,7 +4,7 @@
 //! hart 0 (S-mode): StarryOS，输出到 UART0
 //!
 //! 共享内存 IPC 位于 0x88000000
-
+//!
 #![no_std]
 #![no_main]
 #![feature(impl_trait_in_assoc_type)]
@@ -15,44 +15,16 @@ use core::pin::Pin;
 
 use executor::priority::Priority;
 use executor::spawner::Spawner;
-use fugit::ExtU64;
 use platform::arch::TrapFrame;
 use platform::{Chip, ChipImpl};
-
-#[executor::task]
-async fn task_a() {
-    let mut count = 0u32;
-    loop {
-        log::info!("[task_a] tick #{count}");
-        count += 1;
-        futures::timer::after(500.millis()).await;
-    }
-}
-
-#[executor::task]
-async fn task_b() {
-    let mut count = 0u32;
-    loop {
-        log::info!("[task_b] tock #{count}");
-        count += 1;
-        futures::timer::after(700.millis()).await;
-    }
-}
 
 #[executor::task]
 async fn task_ipc() {
     rt_async_app::intercom::init();
 
-    let mut tick = 0u32;
     loop {
-        rt_async_app::intercom::process_pending();
-
-        if tick.is_multiple_of(10) {
-            rt_async_app::intercom::send_notification(tick);
-        }
-
-        tick += 1;
-        futures::timer::after(1000.millis()).await;
+        rt_async_app::ipc_wait::WaitForMessage.await;
+        while rt_async_app::intercom::process_pending() {}
     }
 }
 
@@ -61,17 +33,14 @@ fn main(spawner: Pin<&'static Spawner<4>>) {
     ChipImpl::put_str("rt-async-amp: rt-async started\n");
     log::info!("rt-async-amp: hart 1 (rt-async) started");
 
-    spawner.spawn(Priority::new(0), task_a().unwrap());
-    spawner.spawn(Priority::new(1), task_b().unwrap());
     spawner.spawn(Priority::new(2), task_ipc().unwrap());
 
-    log::info!("rt-async-amp: 3 tasks spawned, entering scheduler");
+    log::info!("rt-async-amp: task spawned, entering scheduler");
 }
 
 #[executor::interrupt]
 fn MachineSoft(_tf: &mut TrapFrame) {
-    log::info!("[IPC] received IPI from StarryOS");
-    rt_async_app::intercom::process_pending();
+    rt_async_app::ipc_wait::notify_from_isr();
 }
 
 #[executor::interrupt]

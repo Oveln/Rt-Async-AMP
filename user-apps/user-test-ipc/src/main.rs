@@ -6,8 +6,9 @@ use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
 
 const RT_SHM_IOC_NOTIFY: libc::c_ulong = 0x7350_01;
 const RT_SHM_IOC_AWAIT: libc::c_ulong = 0x7350_02;
+const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = 0x7350_03;
 
-const SHM_SIZE: usize = 67_072;
+const SHM_SIZE: usize = 69632;
 
 fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Result<libc::c_int> {
     let ret = unsafe { libc::ioctl(fd, cmd as _, arg) };
@@ -56,6 +57,11 @@ impl RtShm {
         Ok(())
     }
 
+    fn clear_pending(&self) -> io::Result<()> {
+        do_ioctl(self.fd, RT_SHM_IOC_CLR_PENDING, 0)?;
+        Ok(())
+    }
+
     fn await_ipi(&self) -> io::Result<()> {
         do_ioctl(self.fd, RT_SHM_IOC_AWAIT, 0)?;
         Ok(())
@@ -79,6 +85,7 @@ fn main() {
 
     println!("[test_ipc] opening /dev/rt_shm...");
     let rt = RtShm::open().expect("failed to open /dev/rt_shm");
+    rt.clear_pending().expect("CLR_PENDING failed");
     println!("[test_ipc] opened fd={}", rt.fd);
 
     let shm = rt.shm();
