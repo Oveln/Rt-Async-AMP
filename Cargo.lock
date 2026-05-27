@@ -180,6 +180,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
 
 [[package]]
+name = "embedded-io"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1a6892d9eef45c8fa6b9e0086428a2cca8491aca8f787c534a3d6d0bcb3ced"
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,11 +403,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "ov-channal"
+name = "ov-channels"
 version = "0.1.0"
-source = "git+https://github.com/Oveln/ov_channal?rev=41744b81f90e4a6c68ede8ff85570113f8539035#41744b81f90e4a6c68ede8ff85570113f8539035"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6ccb846c5ad7d3a378a6713d86f8f7c04ec3e8778bd5ef0a223e40c4d0a9024"
 dependencies = [
  "critical-section",
+ "portable-atomic",
+ "postcard",
+ "serde",
+]
+
+[[package]]
+name = "ov-rpc"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "ov-channels",
  "portable-atomic",
  "postcard",
  "serde",
@@ -439,6 +463,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
 dependencies = [
  "cobs",
+ "embedded-io 0.4.0",
+ "embedded-io 0.6.1",
  "serde",
 ]
 
@@ -523,7 +549,8 @@ dependencies = [
  "fugit",
  "futures",
  "log",
- "ov-channal",
+ "ov-channels",
+ "ov-rpc",
  "platform",
  "postcard",
  "serde",
@@ -782,6 +809,18 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "user-test-rpc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ov-channels",
+ "ov-rpc",
+ "portable-atomic",
+ "postcard",
+ "serde",
+]
 
 [[package]]
 name = "utf8parse"

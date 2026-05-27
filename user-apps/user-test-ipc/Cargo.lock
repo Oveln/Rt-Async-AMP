@@ -36,9 +36,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
-name = "ov-channal"
+name = "ov-channels"
 version = "0.1.0"
-source = "git+https://github.com/Oveln/ov_channal?rev=41744b81f90e4a6c68ede8ff85570113f8539035#41744b81f90e4a6c68ede8ff85570113f8539035"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6ccb846c5ad7d3a378a6713d86f8f7c04ec3e8778bd5ef0a223e40c4d0a9024"
 dependencies = [
  "critical-section",
  "portable-atomic",
@@ -157,7 +158,7 @@ name = "user-test-ipc"
 version = "0.1.0"
 dependencies = [
  "libc",
- "ov-channal",
+ "ov-channels",
  "postcard",
  "serde",
 ]

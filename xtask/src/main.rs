@@ -53,9 +53,11 @@ enum Cmd {
     #[command(about = "Install a file into the StarryOS rootfs")]
     Install {
         #[arg(help = "Path to the file to install (e.g. build/user-test-ipc)")]
-        file: String,
+        file: Option<String>,
         #[arg(short, long, help = "Destination path inside rootfs (default: /<filename>)")]
         dst: Option<String>,
+        #[arg(long, help = "Install all user-apps")]
+        all: bool,
     },
     #[command(about = "Remove build artifacts")]
     Clean {
@@ -79,7 +81,10 @@ enum BuildTarget {
     RtAsync,
     Opensbi,
     Starryos,
+    #[value(name = "user-test-ipc")]
     UserTest,
+    #[value(name = "user-test-rpc")]
+    UserTestRpc,
 }
 
 fn main() {
@@ -94,12 +99,15 @@ fn main() {
                 build::rt_async(&root, &cfg);
                 build::opensbi(&root, &cfg);
                 build::starryos(&root, &cfg);
+                build::user_test(&root, &cfg);
+                build::user_test_rpc(&root, &cfg);
                 eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
             }
             BuildTarget::RtAsync => build::rt_async(&root, &cfg),
             BuildTarget::Opensbi => build::opensbi(&root, &cfg),
             BuildTarget::Starryos => build::starryos(&root, &cfg),
             BuildTarget::UserTest => build::user_test(&root, &cfg),
+            BuildTarget::UserTestRpc => build::user_test_rpc(&root, &cfg),
         },
         Cmd::Run { tmux } => {
             if tmux {
@@ -109,17 +117,29 @@ fn main() {
             }
         }
         Cmd::Log => run::log(&root),
-        Cmd::Install { file, dst } => {
-            let dst = dst.unwrap_or_else(|| {
-                format!(
-                    "/{}",
-                    Path::new(&file)
-                        .file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                )
-            });
-            install::run(&root, &file, &dst);
+        Cmd::Install { file, dst, all } => {
+            if all {
+                for name in ["user-test-ipc", "user-test-rpc"] {
+                    let src = root.join("build").join(name);
+                    if src.exists() {
+                        install::run(&root, &src.to_string_lossy(), &format!("/{name}"));
+                    } else {
+                        eprintln!("{} not found in build/. Run 'cargo xtask build' first.", name);
+                    }
+                }
+            } else {
+                let file = file.expect("FILE is required when --all is not set");
+                let dst = dst.unwrap_or_else(|| {
+                    format!(
+                        "/{}",
+                        Path::new(&file)
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                    )
+                });
+                install::run(&root, &file, &dst);
+            }
         }
         Cmd::Clean { dist } => {
             let build_dir = root.join("build");

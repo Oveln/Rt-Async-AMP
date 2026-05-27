@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-ov-channal = { git = "https://github.com/Oveln/ov_channal", rev = "41744b81f90e4a6c68ede8ff85570113f8539035", features = ["std"] }
+ov-channels = { version = "0.1.0", features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
 postcard = { version = "1.1", default-features = false }
 libc = "0.2.186"

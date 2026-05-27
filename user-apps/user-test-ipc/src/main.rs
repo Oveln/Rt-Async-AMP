@@ -2,7 +2,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::IntoRawFd;
 
-use ov_channal::{ChannelId, Message, MsgType, SharedMemory};
+use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
 
 const RT_SHM_IOC_NOTIFY: libc::c_ulong = 0x7350_01;
 const RT_SHM_IOC_AWAIT: libc::c_ulong = 0x7350_02;

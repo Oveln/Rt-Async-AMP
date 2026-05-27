@@ -126,7 +126,7 @@ pub fn starryos(root: &Path, _cfg: &Config) {
 pub fn user_test(root: &Path, _cfg: &Config) {
     let target = "riscv64gc-unknown-linux-musl";
     util::run(
-        &root.join("apps/user-test-ipc"),
+        &root.join("user-apps/user-test-ipc"),
         "cargo",
         &["build", "--target", target, "--release"],
     );
@@ -135,13 +135,34 @@ pub fn user_test(root: &Path, _cfg: &Config) {
     fs::create_dir_all(&build_dir).unwrap();
 
     let src = root
-        .join("apps/user-test-ipc/target")
+        .join("user-apps/user-test-ipc/target")
         .join(target)
         .join("release")
         .join("user-test-ipc");
     let dst = build_dir.join("user-test-ipc");
     fs::copy(&src, &dst).unwrap();
     eprintln!("user-test-ipc → {}", dst.display());
+}
+
+pub fn user_test_rpc(root: &Path, _cfg: &Config) {
+    let target = "riscv64gc-unknown-linux-musl";
+    util::run(
+        &root.join("user-apps/user-test-rpc"),
+        "cargo",
+        &["build", "--target", target, "--release"],
+    );
+
+    let build_dir = root.join("build");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let src = root
+        .join("target")
+        .join(target)
+        .join("release")
+        .join("user-test-rpc");
+    let dst = build_dir.join("user-test-rpc");
+    fs::copy(&src, &dst).unwrap();
+    eprintln!("user-test-rpc → {}", dst.display());
 }
 
 pub fn qemu(root: &Path, _cfg: &Config) {

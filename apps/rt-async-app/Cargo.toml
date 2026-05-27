@@ -9,7 +9,8 @@ executor = { path = "../../rt-async/modules/executor" }
 platform = { path = "../../rt-async/modules/platform" }
 futures = { path = "../../rt-async/modules/futures" }
 chip-qemu-virt-rt = { path = "../../modules/chip-qemu-virt-rt" }
-ov-channal = { workspace = true }
+ov-channels = { workspace = true }
+ov-rpc = { path = "../../modules/ov-rpc" }
 serde = { workspace = true }
 postcard = { workspace = true }
 fugit = "0.4"

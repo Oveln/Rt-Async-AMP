@@ -1,0 +1,21 @@
+[package]
+name = "ov-rpc"
+version = "0.1.0"
+edition = "2024"
+authors = ["oveln"]
+description = "Type-safe RPC framework built on ov-channels for AMP systems"
+
+[dependencies]
+ov-channels = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+portable-atomic = { version = "1.13", default-features = false }
+log = { version = "0.4", default-features = false, optional = true }
+
+[features]
+default = []
+amp = []
+logging = ["dep:log"]
+
+[dev-dependencies]
+ov-channels = { workspace = true, features = ["std"] }

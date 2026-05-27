@@ -1,0 +1,18 @@
+[package]
+name = "user-test-rpc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ov-channels = { workspace = true, features = ["std"] }
+ov-rpc = { path = "../../modules/ov-rpc" }
+serde = { workspace = true }
+postcard = { workspace = true }
+portable-atomic = { version = "1.13", default-features = false }
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

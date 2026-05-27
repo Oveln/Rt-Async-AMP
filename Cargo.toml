@@ -1,15 +1,17 @@
 [workspace]
 members = [
     "modules/chip-qemu-virt-rt",
+    "modules/ov-rpc",
     "apps/rt-async-app",
+    "user-apps/user-test-rpc",
     "xtask",
 ]
 exclude = [
-    "apps/user-test-ipc",
+    "user-apps/user-test-ipc",
 ]
 resolver = "3"
 
 [workspace.dependencies]
-ov-channal = { git = "https://github.com/Oveln/ov_channal", rev = "41744b81f90e4a6c68ede8ff85570113f8539035", default-features = false, features = ["critical-section"] }
+ov-channels = { version = "0.1.0", default-features = false, features = ["critical-section"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.1", default-features = false }
