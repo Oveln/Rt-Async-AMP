@@ -27,8 +27,9 @@ UART0BASE = "0x10000000"
 UART1BASE = "0x10002000"
 
 # ── ioctl (rt_shm device) ──────────────────────────────────────────────────
-RTSHM_IOC_NOTIFY = "0x735001"
-RTSHM_IOC_AWAIT  = "0x735002"
+RTSHM_IOC_NOTIFY       = "0x735001"
+RTSHM_IOC_AWAIT        = "0x735002"
+RTSHM_IOC_CLR_PENDING  = "0x735003"
 
 # ── SBI constants ───────────────────────────────────────────────────────────
 SBI_EXT_IPI       = "0x735049"

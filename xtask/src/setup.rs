@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use crate::config::Config;
+use xtask::config::{Config, RepoSource};
 use crate::util;
 
 pub fn run(root: &Path, cfg: &Config) {
@@ -26,7 +26,7 @@ pub fn run(root: &Path, cfg: &Config) {
 fn clone_and_patch(
     root: &Path,
     dir_name: &str,
-    source: &crate::config::RepoSource,
+    source: &RepoSource,
     patch_file: &str,
     vars: &HashMap<String, String>,
 ) {

@@ -12,7 +12,5 @@ postcard = { workspace = true }
 portable-atomic = { version = "1.13", default-features = false }
 libc = "0.2"
 
-[profile.release]
-opt-level = "s"
-lto = true
-strip = true
+[build-dependencies]
+xtask = { path = "../../xtask" }

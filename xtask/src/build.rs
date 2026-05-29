@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::Config;
+use xtask::config::{self as amp_config, Config};
 use crate::util;
 
 pub fn rt_async(root: &Path, _cfg: &Config) {
@@ -30,7 +30,7 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
     eprintln!("rt-async → {}", bin.display());
 }
 
-pub fn opensbi(root: &Path, _cfg: &Config) {
+pub fn opensbi(root: &Path, cfg: &Config) {
     let dir = root.join("opensbi");
     assert!(
         dir.join(".patched").exists(),
@@ -41,6 +41,8 @@ pub fn opensbi(root: &Path, _cfg: &Config) {
         .map(|n| n.to_string())
         .unwrap_or_else(|_| "4".into());
 
+    let fw_text_start = cfg.get("OPENSBIBASE");
+
     util::run(
         &dir,
         "make",
@@ -49,7 +51,7 @@ pub fn opensbi(root: &Path, _cfg: &Config) {
             "PLATFORM=generic",
             "CROSS_COMPILE=riscv64-elf-",
             "O=build",
-            "FW_TEXT_START=0x80000000",
+            &format!("FW_TEXT_START={fw_text_start}"),
         ],
     );
 
@@ -62,7 +64,7 @@ pub fn opensbi(root: &Path, _cfg: &Config) {
     eprintln!("OpenSBI → {}", dst.display());
 }
 
-pub fn starryos(root: &Path, _cfg: &Config) {
+pub fn starryos(root: &Path, cfg: &Config) {
     let dir = root.join("StarryOS");
     assert!(
         dir.is_dir(),
@@ -73,8 +75,7 @@ pub fn starryos(root: &Path, _cfg: &Config) {
     let features = "axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu";
     let axconfig = dir.join(".axconfig.toml");
 
-    let plat_config = root
-        .join("modules/axplat-riscv64-qemu-virt/axconfig.toml");
+    let plat_config = generate_axconfig(root, cfg);
     let defconfig = dir.join("make/defconfig.toml");
     if !axconfig.exists()
         || fs::metadata(&plat_config)
@@ -231,4 +232,37 @@ fn read_toolchain(path: &Path) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or_else(|| panic!("no toolchain.channel found in {}", path.display()))
         .to_string()
+}
+
+fn generate_axconfig(root: &Path, cfg: &Config) -> PathBuf {
+    let template_path = root.join("modules/axplat-riscv64-qemu-virt/axconfig.toml.in");
+    let output_path = root.join("modules/axplat-riscv64-qemu-virt/axconfig.toml");
+
+    let template = std::fs::read_to_string(&template_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", template_path.display(), e));
+
+    let mut vars = cfg.template_vars().clone();
+
+    let qemu_ram = amp_config::parse_size(cfg.get("QEMURAM"));
+    vars.insert("QEMURAM_HEX".into(), format!("0x{qemu_ram:x}"));
+
+    let starryos_base = u64::from_str_radix(cfg.get("STARRYOSBASE").trim_start_matches("0x"), 16)
+        .expect("invalid STARRYOSBASE");
+    let phys_virt_offset: u64 = 0xffff_ffc0_0000_0000;
+    let kernel_base_vaddr = phys_virt_offset + starryos_base;
+    vars.insert("KERNEL_BASE_VADDR".into(), format!("0x{kernel_base_vaddr:x}"));
+
+    let rendered = substitute(&template, &vars);
+    std::fs::write(&output_path, &rendered)
+        .unwrap_or_else(|e| panic!("failed to write {}: {}", output_path.display(), e));
+
+    output_path
+}
+
+fn substitute(content: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut out = content.to_string();
+    for (key, value) in vars {
+        out = out.replace(&format!("{{{key}}}"), value);
+    }
+    out
 }

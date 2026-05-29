@@ -2,7 +2,7 @@ use std::io::BufRead;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-use crate::config::Config;
+use xtask::config::Config;
 
 const TMUX_SESSION: &str = "rt-async-amp";
 

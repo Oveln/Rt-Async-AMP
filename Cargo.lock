@@ -90,7 +90,7 @@ dependencies = [
  "extern-trait",
  "platform",
  "riscv",
- "toml",
+ "xtask",
 ]
 
 [[package]]
@@ -555,6 +555,7 @@ dependencies = [
  "portable-atomic",
  "postcard",
  "serde",
+ "xtask",
 ]
 
 [[package]]
@@ -812,6 +813,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "user-test-ipc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ov-channels",
+ "postcard",
+ "serde",
+ "xtask",
+]
+
+[[package]]
 name = "user-test-rpc"
 version = "0.1.0"
 dependencies = [
@@ -821,6 +833,7 @@ dependencies = [
  "portable-atomic",
  "postcard",
  "serde",
+ "xtask",
 ]
 
 [[package]]

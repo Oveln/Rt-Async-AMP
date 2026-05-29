@@ -8,13 +8,14 @@
 #   make run        # Launch QEMU
 #   make clean
 
-# ── Read address layout from amp.config ──────────────────────────────────────
-AMP_CONFIG   := amp.config
-RTASYNCBASE  := $(shell sed -n 's/^RTASYNCBASE=//p' $(AMP_CONFIG))
-SHMBASE      := $(shell sed -n 's/^SHMBASE=//p' $(AMP_CONFIG))
-SHMSIZE      := $(shell sed -n 's/^SHMSIZE=//p' $(AMP_CONFIG))
-QEMUSMP      := $(shell sed -n 's/^QEMUSMP=//p' $(AMP_CONFIG))
-QEMURAM      := $(shell sed -n 's/^QEMURAM=//p' $(AMP_CONFIG))
+# ── Read address layout from amp.toml ────────────────────────────────────────
+AMP_CONFIG   := amp.toml
+RTASYNCBASE  := $(shell sed -n 's/^RTASYNCBASE.*=.*"\(.*\)".*/\1/p' $(AMP_CONFIG))
+SHMBASE      := $(shell sed -n 's/^SHMBASE.*=.*"\(.*\)".*/\1/p' $(AMP_CONFIG))
+SHMSIZE      := $(shell sed -n 's/^SHMSIZE.*= *\([0-9]*\)/\1/p' $(AMP_CONFIG))
+QEMUSMP      := $(shell sed -n 's/^QEMUSMP.*= *\([0-9]*\)/\1/p' $(AMP_CONFIG))
+QEMURAM      := $(shell sed -n 's/^QEMURAM.*=.*"\(.*\)".*/\1/p' $(AMP_CONFIG))
+OPENSBIBASE  := $(shell sed -n 's/^OPENSBIBASE.*=.*"\(.*\)".*/\1/p' $(AMP_CONFIG))
 
 # ── Upstream repo pins ───────────────────────────────────────────────────────
 OPENSBI_REPO  := https://github.com/riscv-software-src/opensbi.git
@@ -104,7 +105,7 @@ opensbi: $(OPENSBI_FW)
 $(OPENSBI_FW): $(OPENSBI_DIR)/.patched
 	cd $(OPENSBI_DIR) && \
 		make -j$$(nproc) PLATFORM=generic CROSS_COMPILE=riscv64-elf- \
-		O=build FW_TEXT_START=0x80000000
+		O=build FW_TEXT_START=$(OPENSBIBASE)
 	@mkdir -p $(BUILD_DIR)
 	cp $(OPENSBI_DIR)/build/platform/generic/firmware/fw_dynamic.bin $@
 	@echo "OpenSBI → $@"

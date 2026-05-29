@@ -12,13 +12,13 @@ package = "axplat-riscv64-qemu-virt"            # str
 # Maximum number of CPUs.
 max-cpu-num = 1                                 # uint
 # Base address of the whole physical memory.
-phys-memory-base = 0x8000_0000                  # uint
-# Size of the whole physical memory. (256M)
-phys-memory-size = 0x1000_0000                  # uint
+phys-memory-base = {OPENSBIBASE}                # uint
+# Size of the whole physical memory.
+phys-memory-size = {QEMURAM_HEX}                # uint
 # Base physical address of the kernel image.
-kernel-base-paddr = 0x8020_0000                 # uint
+kernel-base-paddr = {STARRYOSBASE}              # uint
 # Base virtual address of the kernel image.
-kernel-base-vaddr = "0xffff_ffc0_8020_0000"     # uint
+kernel-base-vaddr = "{KERNEL_BASE_VADDR}"       # uint
 # Linear mapping offset.
 phys-virt-offset = "0xffff_ffc0_0000_0000"      # uint
 # Offset of bus address and phys address.
@@ -37,9 +37,9 @@ boot-stack-size = 0x40000                       # uint
 # MMIO ranges with format (`base_paddr`, `size`).
 mmio-ranges = [
     [0x0010_1000, 0x1000],          # RTC
-    [0x0200_0000, 0x1_0000],        # CLINT
+    [{CLINTBASE}, 0x1_0000],        # CLINT
     [0x0c00_0000, 0x21_0000],       # PLIC
-    [0x1000_0000, 0x1000],          # UART0
+    [{UART0BASE}, 0x1000],          # UART0
     [0x1000_1000, 0x8000],          # VirtIO
     [0x3000_0000, 0x1000_0000],     # PCI config space
     [0x4000_0000, 0x4000_0000],     # PCI memory ranges
@@ -80,5 +80,5 @@ rtc-paddr = 0x10_1000               # uint
 plic-paddr = 0x0c00_0000            # uint
 
 # UART0 base address.
-uart-paddr = 0x1000_0000            # uint
+uart-paddr = {UART0BASE}            # uint
 uart-irq = 0x0a                     # uint

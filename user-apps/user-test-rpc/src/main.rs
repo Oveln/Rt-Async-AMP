@@ -5,10 +5,15 @@ use std::os::unix::io::IntoRawFd;
 use ov_channels::ChannelId;
 use ov_rpc::{define_service, RpcClient};
 
-const RT_SHM_IOC_NOTIFY: libc::c_ulong = 0x7350_01;
-const RT_SHM_IOC_AWAIT: libc::c_ulong = 0x7350_02;
-const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = 0x7350_03;
-const SHM_SIZE: usize = 69632;
+#[allow(dead_code)]
+mod amp {
+    include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
+}
+
+const RT_SHM_IOC_NOTIFY: libc::c_ulong = amp::RTSHM_IOC_NOTIFY as libc::c_ulong;
+const RT_SHM_IOC_AWAIT: libc::c_ulong = amp::RTSHM_IOC_AWAIT as libc::c_ulong;
+const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = amp::RTSHM_IOC_CLR_PENDING as libc::c_ulong;
+const SHM_SIZE: usize = amp::SHMSIZE;
 
 define_service! {
     RtAsyncRpc {

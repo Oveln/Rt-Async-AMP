@@ -5,7 +5,6 @@ use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 
 mod build;
-mod config;
 mod install;
 mod run;
 mod setup;
@@ -90,7 +89,7 @@ enum BuildTarget {
 fn main() {
     let cli = Cli::parse();
     let root = project_root();
-    let cfg = config::Config::load(&root);
+    let cfg = xtask::config::Config::load(&root);
 
     match cli.cmd {
         Cmd::Setup => setup::run(&root, &cfg),

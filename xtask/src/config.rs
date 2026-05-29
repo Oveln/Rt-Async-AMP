@@ -17,27 +17,12 @@ impl Config {
         let path = root.join("amp.toml");
         let content = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-
         let doc: toml::Value = content
             .parse()
             .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
-
         let table = doc.as_table().expect("amp.toml root must be a table");
 
-        let mut vars = HashMap::new();
-        for (key, value) in table {
-            if value.is_table() {
-                continue;
-            }
-            vars.insert(
-                key.clone(),
-                match value {
-                    toml::Value::String(s) => s.clone(),
-                    toml::Value::Integer(i) => i.to_string(),
-                    other => other.to_string(),
-                },
-            );
-        }
+        let vars = flatten_toplevel(table);
 
         let opensbi = {
             let t = table
@@ -76,5 +61,81 @@ impl Config {
 
     pub fn template_vars(&self) -> &HashMap<String, String> {
         &self.vars
+    }
+}
+
+fn flatten_toplevel(table: &toml::map::Map<String, toml::Value>) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (key, value) in table {
+        if value.is_table() {
+            continue;
+        }
+        let s = match value {
+            toml::Value::String(s) => s.clone(),
+            toml::Value::Integer(i) => i.to_string(),
+            other => other.to_string(),
+        };
+        map.insert(key.clone(), s);
+    }
+    map
+}
+
+pub fn load_amp_toml(ws: &Path) -> HashMap<String, String> {
+    let path = ws.join("amp.toml");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+    let doc: toml::Value = content
+        .parse()
+        .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
+    flatten_toplevel(doc.as_table().expect("amp.toml root must be a table"))
+}
+
+pub fn generate_amp_rs(config: &HashMap<String, String>, out_dir: &Path) {
+    let mut keys: Vec<&String> = config.keys().collect();
+    keys.sort();
+
+    let mut buf = String::from("// Auto-generated from amp.toml. Do not edit.\n\n");
+    for key in keys {
+        let value = &config[key];
+        let const_name = key.to_uppercase();
+        if let Ok(addr) = u64::from_str_radix(value.trim_start_matches("0x"), 16) {
+            buf.push_str(&format!("pub const {const_name}: usize = 0x{addr:x};\n"));
+        } else if let Ok(int) = value.parse::<u64>() {
+            buf.push_str(&format!("pub const {const_name}: usize = {int};\n"));
+        } else {
+            buf.push_str(&format!("pub const {const_name}: &str = \"{value}\";\n"));
+        }
+    }
+    let out_path = out_dir.join("amp_gen.rs");
+    std::fs::write(&out_path, &buf)
+        .unwrap_or_else(|e| panic!("failed to write {}: {}", out_path.display(), e));
+}
+
+pub fn parse_size(s: &str) -> u64 {
+    let s = s.trim();
+    if let Ok(v) = u64::from_str_radix(s.trim_start_matches("0x"), 16) {
+        return v;
+    }
+    let (num, unit) = s.split_at(s.len() - 1);
+    let n: u64 = num.parse().expect("invalid size number");
+    match unit {
+        "K" | "k" => n * 1024,
+        "M" | "m" => n * 1024 * 1024,
+        "G" | "g" => n * 1024 * 1024 * 1024,
+        _ => panic!("unknown size unit: {unit}"),
+    }
+}
+
+pub fn workspace_dir_from_manifest() -> std::path::PathBuf {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let mut dir = std::path::PathBuf::from(manifest_dir);
+    loop {
+        if dir.join("amp.toml").exists() {
+            return dir;
+        }
+        dir = dir
+            .parent()
+            .expect("reached filesystem root without finding amp.toml")
+            .to_path_buf();
     }
 }

@@ -10,6 +10,7 @@
 use extern_trait::extern_trait;
 use platform::{Chip, TimerChip};
 
+#[allow(dead_code)]
 mod amp {
     include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
 }
@@ -52,7 +53,7 @@ impl TimerChip for QemuVirtRt {
     }
 
     fn now_ticks() -> u64 {
-        unsafe { core::ptr::read_volatile(0x200_BFF8 as *const u64) }
+        unsafe { core::ptr::read_volatile((amp::CLINTBASE + 0xBFF8) as *const u64) }
     }
 
     fn set_deadline(tick: u64) {
