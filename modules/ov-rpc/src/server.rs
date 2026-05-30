@@ -2,85 +2,91 @@
 
 use ov_channels::{ChannelId, Message, SharedMemory};
 
-/// Method ID 类型
-pub type MethodId = u64;
+use crate::{MethodId, strip_flags, is_one_way, wants_notify};
 
-/// Request ID 类型
-pub type RequestId = u64;
-
-/// RPC 请求处理 trait
-///
-/// 实现此 trait 以定义 RPC 方法集合。
-/// 推荐使用 [`define_service!`](crate::define_service) 宏自动生成实现。
-///
-/// # 手动实现示例
-///
-/// ```ignore
-/// struct MyService;
-///
-/// impl RpcHandler for MyService {
-///     fn handle(method: MethodId, msg: Message) -> Option<Message> {
-///         match method {
-///             0 => {
-///                 let (rid, _, val): (RequestId, MethodId, u32) = msg.as_request()?;
-///                 Message::response(rid, &(val * 2)).ok()
-///             }
-///             _ => None,
-///         }
-///     }
-/// }
-/// ```
-pub trait RpcHandler {
-    /// 处理一个 RPC 请求，返回响应消息
-    ///
-    /// - `method`: 方法 ID
-    /// - `msg`: 原始请求消息（含 request_id、method_id、序列化参数）
-    ///
-    /// 返回 `Some(response)` 表示成功处理，`None` 表示方法未知或处理失败。
-    fn handle(method: MethodId, msg: Message) -> Option<Message>;
+/// 通道布局约定。
+pub mod channel {
+    use ov_channels::ChannelId;
+    pub const REQ: ChannelId = ChannelId::new(0);
+    pub const RESP: ChannelId = ChannelId::new(1);
+    pub const URGENT: ChannelId = ChannelId::new(2);
 }
 
-/// [`RpcServer::process_one`] 的返回结果
+/// 反序列化失败时返回的错误指示符。
+///
+/// 由 [`define_service!`](crate::define_service) 宏在 payload 无法解码时产生。
+/// 服务端据此发送错误响应，防止客户端在两方调用上永久阻塞。
+pub struct DeserializeFailed;
+
+/// RPC 请求处理 trait。
+///
+/// 推荐使用 [`define_service!`](crate::define_service) 宏自动生成实现。
+pub trait RpcHandler {
+    /// 处理一个 RPC 请求。
+    ///
+    /// `method` 已去除协议 flag，是实际的 method ID。
+    /// - 返回 `Ok(Some(response))` — 序列化结果，写回响应通道
+    /// - 返回 `Ok(None)` — 方法未知或单向调用已完成（无响应）
+    /// - 返回 `Err(DeserializeFailed)` — method 已匹配但 payload 反序列化失败
+    fn handle(method: MethodId, msg: Message) -> Result<Option<Message>, DeserializeFailed>;
+}
+
+/// 处理结果的附带信息。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandledKind {
+    /// interrupt 模式，需要回 IPI
+    Notify,
+    /// busy-poll 模式，不回 IPI
+    Quiet,
+    /// 单向调用，无响应发送
+    OneWay,
+}
+
+/// [`RpcServer::process_one`] / [`RpcServer::process_urgent`] 的返回结果。
 #[derive(Debug)]
 pub enum ProcessResult {
     /// Channel 中无待处理消息
     NoMessage,
-    /// RPC 请求已成功处理
-    Handled,
-    /// 非 RPC 消息（通知、数据等），已从 channel 中取出，交由调用者处理
+    /// RPC 请求已处理
+    Handled(HandledKind),
+    /// RPC 请求已知但未被处理（方法未知或 handler 返回 None）
+    Unhandled(MethodId),
+    /// 非 RPC 消息，交由调用者处理
     NotRpc(Message),
 }
 
-/// RPC 服务端
-///
-/// 从指定的 channel 接收请求，通过 `RpcHandler` 分发处理，
-/// 将响应写入另一个 channel。
-///
-/// # 通道布局
+/// RPC 服务端。
 ///
 /// ```text
-/// RpcServer { req_channel: 0, resp_channel: 1 }
-///
-/// Channel 0 (req_channel):  对端 ──▶ 本端  (接收请求)
-/// Channel 1 (resp_channel): 本端 ──▶ 对端  (发送响应)
+/// CH0 (req_ch):    Client ──▶ 本端  (普通请求)
+/// CH1 (resp_ch):   本端  ──▶ Client (响应)
+/// CH2 (urgent_ch): Client ──▶ 本端  (急停)
 /// ```
 pub struct RpcServer {
     shm_addr: usize,
-    req_channel: ChannelId,
-    resp_channel: ChannelId,
+    req_ch: ChannelId,
+    resp_ch: ChannelId,
+    urgent_ch: ChannelId,
 }
 
 impl RpcServer {
-    /// 创建 RPC 服务端
-    ///
-    /// - `shm_addr`: 共享内存物理地址
-    /// - `req_channel`: 接收请求的 channel ID
-    /// - `resp_channel`: 发送响应的 channel ID
-    pub const fn new(shm_addr: usize, req_channel: ChannelId, resp_channel: ChannelId) -> Self {
+    /// 使用默认通道布局创建。
+    pub const fn new(shm_addr: usize) -> Self {
+        Self::with_channels(shm_addr, channel::REQ, channel::RESP, channel::URGENT)
+    }
+
+    /// 自定义通道创建。
+    pub const fn with_channels(
+        shm_addr: usize,
+        req_ch: ChannelId,
+        resp_ch: ChannelId,
+        urgent_ch: ChannelId,
+    ) -> Self {
         Self {
             shm_addr,
-            req_channel,
-            resp_channel,
+            req_ch,
+            resp_ch,
+            urgent_ch,
         }
     }
 
@@ -89,15 +95,9 @@ impl RpcServer {
         unsafe { SharedMemory::at(self.shm_addr) }
     }
 
-    /// 处理一条消息
-    ///
-    /// 从 `req_channel` 取出一条消息：
-    /// - 若是 RPC 请求：调用 `H::handle` 处理并将响应写入 `resp_channel`，返回 [`ProcessResult::Handled`]
-    /// - 若是非 RPC 消息（通知、数据）：不处理，以 [`ProcessResult::NotRpc`] 返回给调用者
-    /// - 若 channel 为空：返回 [`ProcessResult::NoMessage`]
-    pub fn process_one<H: RpcHandler>(&self) -> ProcessResult {
+    fn process_channel<H: RpcHandler>(&self, ch: ChannelId) -> ProcessResult {
         let shm = self.shm();
-        let Ok(rx) = shm.receiver(self.req_channel) else {
+        let Ok(rx) = shm.receiver(ch) else {
             return ProcessResult::NoMessage;
         };
 
@@ -105,44 +105,122 @@ impl RpcServer {
             return ProcessResult::NoMessage;
         };
 
-        let Some(method_id) = msg.method_id() else {
+        let Some(raw_method) = msg.method_id() else {
             return ProcessResult::NotRpc(msg);
         };
 
-        let Some(resp) = H::handle(method_id, msg) else {
-            #[cfg(feature = "logging")]
-            log::warn!("[RpcServer] unhandled method: {}", method_id);
-            return ProcessResult::Handled;
+        let one_way = is_one_way(raw_method);
+        let notify = wants_notify(raw_method);
+        let method = strip_flags(raw_method);
+
+        let resp = match H::handle(method, msg) {
+            Ok(Some(resp)) => resp,
+            Ok(None) => {
+                // Method matched but was one-way (send/urgent), or method ID unknown.
+                return ProcessResult::Unhandled(method);
+            }
+            Err(_) => {
+                // Method matched but payload deserialization failed.
+                #[cfg(feature = "logging")]
+                log::warn!("[RpcServer] deserialization failed for method {}", method);
+                if !one_way {
+                    // Send an error response so the client doesn't hang forever.
+                    if let Ok(tx) = shm.sender(self.resp_ch) {
+                        if tx.try_send(&Message::notification(0)).is_err() {
+                            #[cfg(feature = "logging")]
+                            log::warn!("[RpcServer] failed to send error response for method {}", method);
+                        }
+                    }
+                }
+                return ProcessResult::Unhandled(method);
+            }
         };
 
-        if let Ok(tx) = shm.sender(self.resp_channel) {
-            let _ = tx.try_send(&resp);
+        if !one_way {
+            if let Ok(tx) = shm.sender(self.resp_ch) {
+                if tx.try_send(&resp).is_err() {
+                    #[cfg(feature = "logging")]
+                    log::warn!("[RpcServer] failed to send response for method {}", method);
+                }
+            } else {
+                #[cfg(feature = "logging")]
+                log::warn!("[RpcServer] failed to acquire response channel for method {}", method);
+            }
         }
 
-        ProcessResult::Handled
+        ProcessResult::Handled(if one_way {
+            HandledKind::OneWay
+        } else if notify {
+            HandledKind::Notify
+        } else {
+            HandledKind::Quiet
+        })
     }
 
-    /// 处理 channel 中所有消息
+    /// 处理急停通道 (CH2) 的一条消息。
+    pub fn process_urgent<H: RpcHandler>(&self) -> ProcessResult {
+        self.process_channel::<H>(self.urgent_ch)
+    }
+
+    /// 处理普通通道 (CH0) 的一条消息。
+    pub fn process_one<H: RpcHandler>(&self) -> ProcessResult {
+        self.process_channel::<H>(self.req_ch)
+    }
+
+    /// 先处理所有急停，再处理所有普通消息。
     ///
-    /// 循环调用 [`process_one`](Self::process_one)，
-    /// 非RPC 消息通过 `on_other` 回调交由调用者处理。
-    ///
-    /// 返回已处理的 RPC 请求数量。
-    pub fn process_all<H: RpcHandler, F: FnMut(Message)>(&self, mut on_other: F) -> usize {
+    /// 非 RPC 消息通过 `on_other` 回调。
+    /// 返回 `(handled_count, should_notify)`。
+    pub fn process_all<H: RpcHandler, F: FnMut(Message)>(
+        &self,
+        mut on_other: F,
+    ) -> (usize, bool) {
         let mut count = 0;
+        let mut should_notify = false;
+
         loop {
-            match self.process_one::<H>() {
-                ProcessResult::NoMessage => return count,
-                ProcessResult::Handled => count += 1,
+            match self.process_urgent::<H>() {
+                ProcessResult::NoMessage => break,
+                ProcessResult::Handled(HandledKind::OneWay) => count += 1,
+                ProcessResult::Handled(kind) => {
+                    count += 1;
+                    if kind == HandledKind::Notify {
+                        should_notify = true;
+                    }
+                }
+                ProcessResult::Unhandled(_) => {}
                 ProcessResult::NotRpc(msg) => on_other(msg),
             }
         }
+
+        loop {
+            match self.process_one::<H>() {
+                ProcessResult::NoMessage => break,
+                ProcessResult::Handled(kind) => {
+                    count += 1;
+                    if kind == HandledKind::Notify {
+                        should_notify = true;
+                    }
+                }
+                ProcessResult::Unhandled(_) => {}
+                ProcessResult::NotRpc(msg) => on_other(msg),
+            }
+        }
+
+        (count, should_notify)
     }
 
-    /// 检查是否有待处理消息
+    /// 检查急停通道是否有待处理消息。
+    pub fn has_urgent(&self) -> bool {
+        let shm = self.shm();
+        shm.receiver(self.urgent_ch)
+            .is_ok_and(|rx| rx.has_pending())
+    }
+
+    /// 检查普通通道是否有待处理消息。
     pub fn has_pending(&self) -> bool {
         let shm = self.shm();
-        shm.receiver(self.req_channel)
+        shm.receiver(self.req_ch)
             .is_ok_and(|rx| rx.has_pending())
     }
 }

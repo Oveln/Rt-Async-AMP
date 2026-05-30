@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 
 mod build;
@@ -50,6 +50,7 @@ enum Cmd {
     #[command(about = "Tail the rt-async UART1 log with colored prefix")]
     Log,
     #[command(about = "Install a file into the StarryOS rootfs")]
+    #[command(group = ArgGroup::new("install_target").args(["file", "all"]).required(true))]
     Install {
         #[arg(help = "Path to the file to install (e.g. build/user-test-ipc)")]
         file: Option<String>,
@@ -127,7 +128,13 @@ fn main() {
                     }
                 }
             } else {
-                let file = file.expect("FILE is required when --all is not set");
+                let file = match file {
+                    Some(f) => f,
+                    None => {
+                        eprintln!("error: FILE is required when --all is not set");
+                        std::process::exit(1);
+                    }
+                };
                 let dst = dst.unwrap_or_else(|| {
                     format!(
                         "/{}",

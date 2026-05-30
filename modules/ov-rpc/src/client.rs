@@ -1,37 +1,76 @@
 //! RPC 客户端
 
-use ov_channels::{ChannelId, Message, SharedMemory};
-use portable_atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::RequestId;
+use ov_channels::{ChannelId, Message, SharedMemory};
+
+use crate::{RequestId, NOTIFY_FLAG, ONE_WAY_FLAG};
+
+/// Errors that can occur when receiving an RPC response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvError {
+    /// A response was present in the buffer but failed to deserialize.
+    ///
+    /// The message has been consumed (removed from the buffer); the caller
+    /// cannot retry with a different type.
+    DeserializeFailed,
+}
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-fn alloc_request_id() -> RequestId {
-    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+/// Response buffer capacity.
+///
+/// Each `poll_responses()` call drains up to `BUF_CAP` messages from the
+/// shared-memory channel into an on-stack array. Any responses that don't
+/// fit remain in the channel's ring buffer and will be picked up on the
+/// next `poll_responses()` call — nothing is lost.
+///
+/// Callers that expect more than `BUF_CAP` in-flight RPCs between two
+/// consecutive polls should increase this value, or simply poll more
+/// frequently. In a no\_std / real-time context a bounded buffer is
+/// intentional: unbounded buffering would risk uncontrolled stack growth.
+const BUF_CAP: usize = 8;
+
+/// 通道布局约定。
+pub mod channel {
+    use ov_channels::ChannelId;
+    pub const REQ: ChannelId = ChannelId::new(0);
+    pub const RESP: ChannelId = ChannelId::new(1);
+    pub const URGENT: ChannelId = ChannelId::new(2);
 }
 
-/// RPC 客户端
+/// RPC 客户端。
 ///
-/// 向指定 channel 发送请求，从另一个 channel 接收响应。
-/// 通过 `request_id` 匹配请求和响应。
+/// 支持四种调用模式：`call` / `call_quiet` / `send` / `urgent`。
 pub struct RpcClient {
     shm_addr: usize,
-    req_channel: ChannelId,
-    resp_channel: ChannelId,
+    req_ch: ChannelId,
+    resp_ch: ChannelId,
+    urgent_ch: ChannelId,
+    buf_len: usize,
+    buf: [(RequestId, Message); BUF_CAP],
 }
 
 impl RpcClient {
-    /// 创建 RPC 客户端
-    ///
-    /// - `shm_addr`: 共享内存物理地址
-    /// - `req_channel`: 发送请求的 channel ID
-    /// - `resp_channel`: 接收响应的 channel ID
-    pub const fn new(shm_addr: usize, req_channel: ChannelId, resp_channel: ChannelId) -> Self {
+    /// 创建 RPC 客户端，使用默认通道布局 (CH0/CH1/CH2)。
+    pub const fn new(shm_addr: usize) -> Self {
+        Self::with_channels(shm_addr, channel::REQ, channel::RESP, channel::URGENT)
+    }
+
+    /// 创建 RPC 客户端，自定义通道。
+    pub const fn with_channels(
+        shm_addr: usize,
+        req_ch: ChannelId,
+        resp_ch: ChannelId,
+        urgent_ch: ChannelId,
+    ) -> Self {
         Self {
             shm_addr,
-            req_channel,
-            resp_channel,
+            req_ch,
+            resp_ch,
+            urgent_ch,
+            buf_len: 0,
+            buf: [(0, Message::empty()); BUF_CAP],
         }
     }
 
@@ -40,140 +79,141 @@ impl RpcClient {
         unsafe { SharedMemory::at(self.shm_addr) }
     }
 
-    /// 发起 RPC 调用（仅发送请求，不等待响应）
-    ///
-    /// 返回 `RequestId` 用于后续 [`wait_response`](Self::wait_response)。
-    pub fn call_async<Args: serde::Serialize>(
+    fn send_request(
         &self,
         method_id: u64,
-        args: &Args,
+        args: &impl serde::Serialize,
+        ch: ChannelId,
     ) -> Result<RequestId, ov_channels::SendError> {
-        let rid = alloc_request_id();
+        let rid = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
         let msg = Message::request(rid, method_id, args)
             .map_err(|_| ov_channels::SendError::Invalid)?;
 
         let shm = self.shm();
-        let tx = shm
-            .sender(self.req_channel)
-            .map_err(|_| ov_channels::SendError::Invalid)?;
+        let tx = shm.sender(ch).map_err(|_| ov_channels::SendError::Invalid)?;
         tx.try_send(&msg)?;
 
         Ok(rid)
     }
 
-    /// 等待指定 `request_id` 的响应
-    ///
-    /// 扫描 `resp_channel` 中所有待处理消息，寻找匹配的响应。
-    /// 不匹配的响应会被丢弃。
-    pub fn wait_response<T: serde::de::DeserializeOwned>(
+    /// 请求-响应 (interrupt)：发送后 IPI 回复。
+    pub fn call<Args: serde::Serialize>(
         &self,
-        request_id: RequestId,
-    ) -> Option<T> {
+        method_id: u64,
+        args: &Args,
+    ) -> Result<RequestId, ov_channels::SendError> {
+        self.send_request(method_id | NOTIFY_FLAG, args, self.req_ch)
+    }
+
+    /// 请求-响应 (busy-poll)：不回 IPI。
+    pub fn call_quiet<Args: serde::Serialize>(
+        &self,
+        method_id: u64,
+        args: &Args,
+    ) -> Result<RequestId, ov_channels::SendError> {
+        self.send_request(method_id, args, self.req_ch)
+    }
+
+    /// 单向调用：不期待响应，走普通请求通道。
+    pub fn send<Args: serde::Serialize>(
+        &self,
+        method_id: u64,
+        args: &Args,
+    ) -> Result<(), ov_channels::SendError> {
+        self.send_request(method_id | ONE_WAY_FLAG, args, self.req_ch)?;
+        Ok(())
+    }
+
+    /// 急停：走高优先级通道 (CH2)，不期待响应。
+    pub fn urgent<Args: serde::Serialize>(
+        &self,
+        method_id: u64,
+        args: &Args,
+    ) -> Result<(), ov_channels::SendError> {
+        self.send_request(method_id | ONE_WAY_FLAG, args, self.urgent_ch)?;
+        Ok(())
+    }
+
+    /// Drain up to `BUF_CAP` response messages from `resp_ch` into the
+    /// internal buffer and return the number drained.
+    ///
+    /// If more than `BUF_CAP` responses are pending, only the first
+    /// `BUF_CAP` are buffered; the rest stay in the channel and will be
+    /// available on the next call. No responses are lost — this is
+    /// batching, not dropping.
+    ///
+    /// When to call: on IPI receipt or inside a busy-poll loop. For
+    /// workloads with many concurrent RPCs, poll frequently enough that
+    /// the buffer (and the channel behind it) do not fill up and exert
+    /// back-pressure on the sender.
+    pub fn poll_responses(&mut self) -> usize {
         let shm = self.shm();
-        let Ok(rx) = shm.receiver(self.resp_channel) else {
-            return None;
+        let Ok(rx) = shm.receiver(self.resp_ch) else {
+            return 0;
         };
 
-        for msg in rx.iter() {
-            if let Some((rid, result)) = msg.as_response::<T>() {
-                if rid == request_id {
-                    return Some(result);
-                }
+        let mut count = 0;
+        while self.buf_len < BUF_CAP {
+            let Some(msg) = rx.try_recv() else { break };
+            if let Some(rid) = msg.request_id() {
+                self.buf[self.buf_len] = (rid, msg);
+                self.buf_len += 1;
+                count += 1;
             }
         }
-
-        None
+        count
     }
 
-    /// 发起 RPC 调用并等待响应（便捷方法）
+    /// FIFO 按序取下一条响应（不按 rid 匹配）。
     ///
-    /// **注意**：在单线程测试中，需要先让服务端处理请求后再调用此方法，
-    /// 否则会立即返回 `None`。推荐使用 [`call_async`](Self::call_async) +
-    /// [`wait_response`](Self::wait_response) 的拆分模式。
-    pub fn call<T, Args>(&self, method_id: u64, args: &Args) -> Option<T>
-    where
-        Args: serde::Serialize,
-        T: serde::de::DeserializeOwned,
-    {
-        let rid = self.call_async(method_id, args).ok()?;
-        self.wait_response(rid)
-    }
-
-    /// 发起 RPC 调用，发送请求后触发 IPI 通知
-    #[cfg(feature = "amp")]
-    pub fn call_with_notify<T, Args, F>(
-        &self,
-        method_id: u64,
-        args: &Args,
-        notify: F,
-    ) -> Option<T>
-    where
-        Args: serde::Serialize,
-        T: serde::de::DeserializeOwned,
-        F: FnOnce(),
-    {
-        let rid = self.call_async(method_id, args).ok()?;
-        notify();
-        self.wait_response(rid)
-    }
-
-    /// 尝试接收一次响应（非阻塞轮询）
-    pub fn try_recv_response<T: serde::de::DeserializeOwned>(&self) -> Option<(RequestId, T)> {
-        let shm = self.shm();
-        let rx = shm.receiver(self.resp_channel).ok()?;
-        let msg = rx.try_recv()?;
-        msg.as_response::<T>()
-    }
-}
-
-#[cfg(feature = "amp")]
-pub struct AmpRpcClient {
-    inner: RpcClient,
-    notify_fn: unsafe fn(),
-}
-
-#[cfg(feature = "amp")]
-impl AmpRpcClient {
-    pub const fn new(
-        shm_addr: usize,
-        req_channel: ChannelId,
-        resp_channel: ChannelId,
-        notify_fn: unsafe fn(),
-    ) -> Self {
-        Self {
-            inner: RpcClient::new(shm_addr, req_channel, resp_channel),
-            notify_fn,
+    /// 前提：响应按请求顺序到达。
+    ///
+    /// Returns `Ok(None)` if the buffer is empty, `Ok(Some(value))` on
+    /// successful deserialization, or `Err(RecvError::DeserializeFailed)` if
+    /// a response was present but could not be decoded as type `T`.
+    pub fn recv<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, RecvError> {
+        if self.buf_len == 0 {
+            return Ok(None);
         }
+        let msg = self.buf[0].1;
+        // Parse BEFORE dequeuing so the message is still available on error.
+        let (_request_id, result) = msg
+            .as_response::<T>()
+            .ok_or(RecvError::DeserializeFailed)?;
+        self.buf_len -= 1;
+        self.buf.copy_within(1..=self.buf_len, 0);
+        self.buf[self.buf_len] = (0, Message::empty());
+        Ok(Some(result))
     }
 
-    pub fn call<T, Args>(&self, method_id: u64, args: &Args) -> Option<T>
-    where
-        Args: serde::Serialize,
-        T: serde::de::DeserializeOwned,
-    {
-        let rid = self.inner.call_async(method_id, args).ok()?;
-        unsafe {
-            (self.notify_fn)();
-        }
-        self.inner.wait_response(rid)
-    }
-
-    pub fn call_async<Args: serde::Serialize>(
-        &self,
-        method_id: u64,
-        args: &Args,
-    ) -> Option<RequestId> {
-        let rid = self.inner.call_async(method_id, args).ok()?;
-        unsafe {
-            (self.notify_fn)();
-        }
-        Some(rid)
-    }
-
-    pub fn poll_response<T: serde::de::DeserializeOwned>(
-        &self,
+    /// 按 rid 匹配取响应（乱序场景）。
+    ///
+    /// Returns `Ok(None)` if no matching response is buffered,
+    /// `Ok(Some(value))` on successful deserialization, or
+    /// `Err(RecvError::DeserializeFailed)` if a matching response was present
+    /// but could not be decoded as type `T`.
+    pub fn recv_for<T: serde::de::DeserializeOwned>(
+        &mut self,
         request_id: RequestId,
-    ) -> Option<T> {
-        self.inner.wait_response(request_id)
+    ) -> Result<Option<T>, RecvError> {
+        for i in 0..self.buf_len {
+            if self.buf[i].0 == request_id {
+                let msg = self.buf[i].1;
+                // Parse BEFORE dequeuing so the message is still available on error.
+                let (_rid, result) = msg
+                    .as_response::<T>()
+                    .ok_or(RecvError::DeserializeFailed)?;
+                self.buf_len -= 1;
+                self.buf[i] = self.buf[self.buf_len];
+                self.buf[self.buf_len] = (0, Message::empty());
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 缓冲区中待处理的响应数量。
+    pub fn buffered(&self) -> usize {
+        self.buf_len
     }
 }

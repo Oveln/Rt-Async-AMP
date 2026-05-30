@@ -94,7 +94,17 @@ fn main() {
     println!("[test_ipc] opened fd={}", rt.fd);
 
     let shm = rt.shm();
-    assert!(shm.is_valid(), "shared memory invalid");
+    let timeout = std::time::Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    while !shm.is_valid() {
+        if start.elapsed() > timeout {
+            panic!(
+                "shared memory not initialized after {:?} -- is rt-async running?",
+                timeout
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     println!("[test_ipc] shm valid");
 
     let ch0 = ChannelId::new(0);
@@ -112,8 +122,6 @@ fn main() {
 
         println!("[test_ipc] ioctl NOTIFY (IPI to rt-async)...");
         rt.notify().expect("NOTIFY failed");
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("[test_ipc] ioctl AWAIT (wait for rt-async reply)...");
         rt.await_ipi().expect("AWAIT failed");
@@ -150,22 +158,15 @@ fn main() {
         println!("[test_ipc] ioctl NOTIFY...");
         rt.notify().expect("NOTIFY failed");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
         println!("[test_ipc] ioctl AWAIT...");
         rt.await_ipi().expect("AWAIT failed");
 
-        if let Some(resp) = rx.try_recv() {
-            if resp.ty() == Some(MsgType::Response) {
-                if let Some((rid, result)) = resp.as_response::<i32>() {
-                    println!("[test_ipc] received response: rid={} result={}", rid, result);
-                }
-            } else {
-                println!("[test_ipc] received msg type={:?} from ch1", resp.ty());
-            }
-        } else {
-            println!("[test_ipc] ch1 empty (no reply)");
-        }
+        let resp = rx.try_recv().expect("ADD: no response");
+        assert_eq!(resp.ty(), Some(MsgType::Response), "ADD: expected Response, got {:?}", resp.ty());
+        let (resp_rid, result) = resp.as_response::<i32>().expect("ADD: malformed response");
+        assert_eq!(resp_rid, rid, "ADD: wrong request ID");
+        assert_eq!(result, a.wrapping_add(b), "ADD: wrong result");
+        println!("[test_ipc] ADD response OK: rid={} result={}", resp_rid, result);
     }
 
     println!("\n[test_ipc] done");

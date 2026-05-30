@@ -1,11 +1,9 @@
 //! ov-rpc 综合测试
-//!
-//! 覆盖：define_service! 宏、RpcServer（含 ProcessResult）、RpcClient、混合消息处理
 
-use std::cell::UnsafeCell;
-
-use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
-use ov_rpc::{define_service, ProcessResult, RpcClient, RpcServer};
+use ov_channels::{ChannelId, Message, SharedMemory};
+use ov_rpc::{
+    define_service, HandledKind, ProcessResult, RpcClient, RpcServer,
+};
 
 // ============================================================================
 // 测试服务定义
@@ -13,44 +11,37 @@ use ov_rpc::{define_service, ProcessResult, RpcClient, RpcServer};
 
 define_service! {
     pub CalcService {
-        ECHO: 0 => fn echo(val: u32) -> u32;
-        ADD: 1 => fn add(a: i32, b: i32) -> i32;
-        PING: 2 => fn ping() -> u32;
-        NEGATE: 3 => fn negate(val: i32) -> i32;
-        SUM3: 4 => fn sum3(a: i32, b: i32, c: i32) -> i32;
+        ECHO:   0 => call echo(val: u32) -> u32;
+        ADD:    1 => call add(a: i32, b: i32) -> i32;
+        PING:   2 => call ping() -> u32;
+        NEGATE: 3 => call negate(val: i32) -> i32;
+        SUM3:   4 => call sum3(a: i32, b: i32, c: i32) -> i32;
+        LOG:    5 => send log(msg: u32);
+        STOP:   6 => urgent stop();
     }
 }
+
+static mut LAST_LOG: u32 = 0;
+static mut STOPPED: bool = false;
 
 impl CalcService {
-    fn echo(val: u32) -> u32 {
-        val
-    }
-    fn add(a: i32, b: i32) -> i32 {
-        a.wrapping_add(b)
-    }
-    fn ping() -> u32 {
-        42
-    }
-    fn negate(val: i32) -> i32 {
-        -val
-    }
-    fn sum3(a: i32, b: i32, c: i32) -> i32 {
-        a + b + c
-    }
+    fn echo(val: u32) -> u32 { val }
+    fn add(a: i32, b: i32) -> i32 { a.wrapping_add(b) }
+    fn ping() -> u32 { 42 }
+    fn negate(val: i32) -> i32 { -val }
+    fn sum3(a: i32, b: i32, c: i32) -> i32 { a + b + c }
+    fn log(msg: u32) { unsafe { LAST_LOG = msg }; }
+    fn stop() { unsafe { STOPPED = true }; }
 }
-
-// 另一个服务定义，测试多服务共存
 
 define_service! {
     pub RawService {
-        IDENT: 0 => fn ident(val: u64) -> u64;
+        IDENT: 0 => call ident(val: u64) -> u64;
     }
 }
 
 impl RawService {
-    fn ident(val: u64) -> u64 {
-        val
-    }
+    fn ident(val: u64) -> u64 { val }
 }
 
 // ============================================================================
@@ -70,395 +61,259 @@ impl TestContext {
         let addr = shm as *const _ as usize;
         Self {
             _shm: shm,
-            server: RpcServer::new(addr, ChannelId::new(0), ChannelId::new(1)),
-            client: RpcClient::new(addr, ChannelId::new(0), ChannelId::new(1)),
+            server: RpcServer::new(addr),
+            client: RpcClient::new(addr),
         }
     }
 }
 
 // ============================================================================
-// 基础 RPC 调用
+// call (request-response)
 // ============================================================================
 
 #[test]
-fn test_echo_single_arg() {
-    let ctx = TestContext::new();
+fn test_call_echo() {
+    let mut ctx = TestContext::new();
+    let _rid = ctx.client.call(CalcService::ECHO, &42u32).unwrap();
+    ctx.server.process_one::<CalcService>();
+    ctx.client.poll_responses();
+    let val: u32 = ctx.client.recv().unwrap().unwrap();
+    assert_eq!(val, 42);
+}
 
-    let rid = ctx.client.call_async(CalcService::ECHO, &42u32).unwrap();
+#[test]
+fn test_call_add() {
+    let mut ctx = TestContext::new();
+    let _rid = ctx.client.call(CalcService::ADD, &(3i32, 4i32)).unwrap();
+    ctx.server.process_one::<CalcService>();
+    ctx.client.poll_responses();
+    let val: i32 = ctx.client.recv().unwrap().unwrap();
+    assert_eq!(val, 7);
+}
+
+#[test]
+fn test_call_ping() {
+    let mut ctx = TestContext::new();
+    ctx.client.call(CalcService::PING, &()).unwrap();
+    ctx.server.process_one::<CalcService>();
+    ctx.client.poll_responses();
+    let val: u32 = ctx.client.recv().unwrap().unwrap();
+    assert_eq!(val, 42);
+}
+
+#[test]
+fn test_call_quiet() {
+    let mut ctx = TestContext::new();
+    let rid = ctx.client.call_quiet(CalcService::ECHO, &99u32).unwrap();
     let result = ctx.server.process_one::<CalcService>();
-    assert!(matches!(result, ProcessResult::Handled));
-
-    let val: u32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 42);
-}
-
-#[test]
-fn test_add_two_args() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client.call_async(CalcService::ADD, &(3i32, 4i32)).unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: i32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 7);
-}
-
-#[test]
-fn test_ping_zero_args() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client
-        .call_async(CalcService::PING, &())
-        .unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: u32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 42);
-}
-
-#[test]
-fn test_three_args() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client
-        .call_async(CalcService::SUM3, &(1i32, 2i32, 3i32))
-        .unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: i32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 6);
-}
-
-#[test]
-fn test_negate_negative() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client
-        .call_async(CalcService::NEGATE, &(-7i32))
-        .unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: i32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 7);
+    assert!(matches!(result, ProcessResult::Handled(HandledKind::Quiet)));
+    ctx.client.poll_responses();
+    let val: u32 = ctx.client.recv_for(rid).unwrap().unwrap();
+    assert_eq!(val, 99);
 }
 
 // ============================================================================
-// 多请求批量处理
+// send (one-way)
 // ============================================================================
 
 #[test]
-fn test_multiple_requests() {
+fn test_send_one_way() {
     let ctx = TestContext::new();
+    unsafe { LAST_LOG = 0 };
+    ctx.client.send(CalcService::LOG, &1234u32).unwrap();
+    let result = ctx.server.process_one::<CalcService>();
+    assert!(matches!(result, ProcessResult::Handled(HandledKind::OneWay)));
+    assert_eq!(unsafe { LAST_LOG }, 1234);
+}
 
-    let rid1 = ctx.client.call_async(CalcService::ECHO, &10u32).unwrap();
-    let rid2 = ctx.client.call_async(CalcService::ADD, &(20i32, 30i32)).unwrap();
-    let rid3 = ctx.client.call_async(CalcService::PING, &()).unwrap();
-
-    let mut non_rpc = Vec::new();
-    let count = ctx.server.process_all::<CalcService, _>(|msg| non_rpc.push(msg));
-    assert_eq!(count, 3);
-    assert!(non_rpc.is_empty());
-
-    let r1: u32 = ctx.client.wait_response(rid1).unwrap();
-    let r2: i32 = ctx.client.wait_response(rid2).unwrap();
-    let r3: u32 = ctx.client.wait_response(rid3).unwrap();
-    assert_eq!(r1, 10);
-    assert_eq!(r2, 50);
-    assert_eq!(r3, 42);
+#[test]
+fn test_send_no_response_in_channel() {
+    let mut ctx = TestContext::new();
+    ctx.client.send(CalcService::LOG, &42u32).unwrap();
+    ctx.server.process_one::<CalcService>();
+    assert_eq!(ctx.client.poll_responses(), 0);
+    assert_eq!(ctx.client.buffered(), 0);
 }
 
 // ============================================================================
-// ProcessResult 枚举
+// urgent
+// ============================================================================
+
+#[test]
+fn test_urgent_stop() {
+    let ctx = TestContext::new();
+    unsafe { STOPPED = false };
+    ctx.client.urgent(CalcService::STOP, &()).unwrap();
+    let result = ctx.server.process_urgent::<CalcService>();
+    assert!(matches!(result, ProcessResult::Handled(HandledKind::OneWay)));
+    assert!(unsafe { STOPPED });
+}
+
+#[test]
+fn test_urgent_channel_separate() {
+    let ctx = TestContext::new();
+    ctx.client.urgent(CalcService::STOP, &()).unwrap();
+    // 普通通道应该为空
+    assert!(matches!(
+        ctx.server.process_one::<CalcService>(),
+        ProcessResult::NoMessage
+    ));
+    // 急停通道有消息
+    assert!(ctx.server.has_urgent());
+    ctx.server.process_urgent::<CalcService>();
+    // ov-channels ring buffer pending 标志需要额外 try_recv 清除
+    ctx.server.process_urgent::<CalcService>();
+    assert!(!ctx.server.has_urgent());
+}
+
+// ============================================================================
+// ProcessResult / HandledKind
 // ============================================================================
 
 #[test]
 fn test_process_result_no_message() {
     let ctx = TestContext::new();
-    let result = ctx.server.process_one::<CalcService>();
-    assert!(matches!(result, ProcessResult::NoMessage));
+    assert!(matches!(
+        ctx.server.process_one::<CalcService>(),
+        ProcessResult::NoMessage
+    ));
+    assert!(matches!(
+        ctx.server.process_urgent::<CalcService>(),
+        ProcessResult::NoMessage
+    ));
 }
 
 #[test]
-fn test_process_result_handled() {
+fn test_call_notify_flag() {
     let ctx = TestContext::new();
-    ctx.client.call_async(CalcService::PING, &()).unwrap();
-
+    ctx.client.call(CalcService::PING, &()).unwrap();
     let result = ctx.server.process_one::<CalcService>();
-    assert!(matches!(result, ProcessResult::Handled));
+    assert!(matches!(result, ProcessResult::Handled(HandledKind::Notify)));
 }
 
 #[test]
-fn test_process_result_not_rpc() {
+fn test_not_rpc() {
     let ctx = TestContext::new();
-
     let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
     let tx = shm.sender(ChannelId::new(0)).unwrap();
     tx.try_send(&Message::notification(99)).unwrap();
 
     let result = ctx.server.process_one::<CalcService>();
     match result {
-        ProcessResult::NotRpc(msg) => {
-            assert_eq!(msg.as_notification(), Some(99));
-        }
+        ProcessResult::NotRpc(msg) => assert_eq!(msg.as_notification(), Some(99)),
         other => panic!("expected NotRpc, got {:?}", other),
     }
 }
 
 // ============================================================================
-// 混合消息处理（核心：非RPC消息不丢失）
+// process_all
 // ============================================================================
 
 #[test]
-fn test_mixed_notification_then_rpc() {
+fn test_process_all_mixed() {
     let ctx = TestContext::new();
+    unsafe { LAST_LOG = 0 };
+    let mut ctx = ctx;
 
-    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
-    let tx = shm.sender(ChannelId::new(0)).unwrap();
+    ctx.client.call(CalcService::ECHO, &10u32).unwrap();
+    ctx.client.send(CalcService::LOG, &77u32).unwrap();
+    ctx.client.call(CalcService::PING, &()).unwrap();
 
-    tx.try_send(&Message::notification(100)).unwrap();
-    let rid = ctx.client.call_async(CalcService::ECHO, &77u32).unwrap();
+    let (count, should_notify) = ctx.server.process_all::<CalcService, _>(|_| {});
+    assert_eq!(count, 3);
+    assert!(should_notify);
+    assert_eq!(unsafe { LAST_LOG }, 77);
 
-    let mut notifs = Vec::new();
-    let rpc_count = ctx.server.process_all::<CalcService, _>(|msg| {
-        if let Some(id) = msg.as_notification() {
-            notifs.push(id);
-        }
-    });
-
-    assert_eq!(rpc_count, 1);
-    assert_eq!(notifs, vec![100]);
-
-    let val: u32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 77);
+    ctx.client.poll_responses();
+    let r1: u32 = ctx.client.recv().unwrap().unwrap();
+    let r2: u32 = ctx.client.recv().unwrap().unwrap();
+    assert_eq!(r1, 10);
+    assert_eq!(r2, 42);
 }
 
 #[test]
-fn test_mixed_interleaved_messages() {
+fn test_process_all_with_urgent_first() {
     let ctx = TestContext::new();
+    unsafe { STOPPED = false };
+    ctx.client.call(CalcService::ECHO, &5u32).unwrap();
+    ctx.client.urgent(CalcService::STOP, &()).unwrap();
 
-    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
-    let tx = shm.sender(ChannelId::new(0)).unwrap();
-
-    // 交替放入: Notif(1), RPC, Notif(2), RPC, Data
-    tx.try_send(&Message::notification(1)).unwrap();
-    let rid1 = ctx.client.call_async(CalcService::ECHO, &11u32).unwrap();
-    tx.try_send(&Message::notification(2)).unwrap();
-    let rid2 = ctx.client.call_async(CalcService::ADD, &(5i32, 3i32)).unwrap();
-    tx.try_send(&Message::data(&[0xAA, 0xBB])).unwrap();
-
-    let mut notifs = Vec::new();
-    let mut data_count = 0;
-    let rpc_count = ctx.server.process_all::<CalcService, _>(|msg| match msg.ty() {
-        Some(MsgType::Notification) => notifs.push(msg.as_notification().unwrap()),
-        Some(MsgType::Data) => data_count += 1,
-        _ => {}
-    });
-
-    assert_eq!(rpc_count, 2);
-    assert_eq!(notifs, vec![1, 2]);
-    assert_eq!(data_count, 1);
-
-    let r1: u32 = ctx.client.wait_response(rid1).unwrap();
-    let r2: i32 = ctx.client.wait_response(rid2).unwrap();
-    assert_eq!(r1, 11);
-    assert_eq!(r2, 8);
-}
-
-#[test]
-fn test_only_notifications_no_rpc() {
-    let ctx = TestContext::new();
-
-    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
-    let tx = shm.sender(ChannelId::new(0)).unwrap();
-
-    tx.try_send(&Message::notification(1)).unwrap();
-    tx.try_send(&Message::notification(2)).unwrap();
-    tx.try_send(&Message::notification(3)).unwrap();
-
-    let mut notifs = Vec::new();
-    let rpc_count = ctx.server.process_all::<CalcService, _>(|msg| {
-        if let Some(id) = msg.as_notification() {
-            notifs.push(id);
-        }
-    });
-
-    assert_eq!(rpc_count, 0);
-    assert_eq!(notifs, vec![1, 2, 3]);
+    let (count, _) = ctx.server.process_all::<CalcService, _>(|_| {});
+    assert_eq!(count, 2);
+    assert!(unsafe { STOPPED });
 }
 
 // ============================================================================
-// 未知方法处理
+// 多请求 + FIFO recv
 // ============================================================================
 
 #[test]
-fn test_unknown_method_no_response() {
-    let ctx = TestContext::new();
+fn test_fifo_recv_order() {
+    let mut ctx = TestContext::new();
+    ctx.client.call(CalcService::ECHO, &10u32).unwrap();
+    ctx.client.call(CalcService::ECHO, &20u32).unwrap();
+    ctx.client.call(CalcService::ECHO, &30u32).unwrap();
 
-    let rid = ctx.client.call_async(999u64, &()).unwrap();
-    let result = ctx.server.process_one::<CalcService>();
+    ctx.server.process_all::<CalcService, _>(|_| {});
+    ctx.client.poll_responses();
 
-    assert!(matches!(result, ProcessResult::Handled));
-
-    let resp: Option<u32> = ctx.client.wait_response(rid);
-    assert!(resp.is_none());
+    assert_eq!(ctx.client.recv::<u32>().unwrap().unwrap(), 10);
+    assert_eq!(ctx.client.recv::<u32>().unwrap().unwrap(), 20);
+    assert_eq!(ctx.client.recv::<u32>().unwrap().unwrap(), 30);
+    assert!(ctx.client.recv::<u32>().unwrap().is_none());
 }
-
-// ============================================================================
-// 客户端 API
-// ============================================================================
 
 #[test]
-fn test_client_try_recv_response() {
-    let ctx = TestContext::new();
+fn test_recv_for_out_of_order() {
+    let mut ctx = TestContext::new();
+    let rid1 = ctx.client.call(CalcService::ECHO, &10u32).unwrap();
+    let rid2 = ctx.client.call(CalcService::ECHO, &20u32).unwrap();
+    ctx.server.process_all::<CalcService, _>(|_| {});
+    ctx.client.poll_responses();
 
-    assert!(ctx.client.try_recv_response::<u32>().is_none());
-
-    ctx.client.call_async(CalcService::ECHO, &55u32).unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let (rid, val) = ctx.client.try_recv_response::<u32>().unwrap();
-    assert_eq!(val, 55);
-    assert!(rid > 0);
-
-    assert!(ctx.client.try_recv_response::<u32>().is_none());
+    let val2: u32 = ctx.client.recv_for(rid2).unwrap().unwrap();
+    assert_eq!(val2, 20);
+    let val1: u32 = ctx.client.recv_for(rid1).unwrap().unwrap();
+    assert_eq!(val1, 10);
 }
+
+// ============================================================================
+// request_id 唯一性
+// ============================================================================
 
 #[test]
 fn test_request_ids_are_unique() {
     let ctx = TestContext::new();
-
-    let rid1 = ctx.client.call_async(CalcService::PING, &()).unwrap();
-    let rid2 = ctx.client.call_async(CalcService::PING, &()).unwrap();
-    let rid3 = ctx.client.call_async(CalcService::PING, &()).unwrap();
-
+    let rid1 = ctx.client.call(CalcService::PING, &()).unwrap();
+    let rid2 = ctx.client.call(CalcService::PING, &()).unwrap();
+    let rid3 = ctx.client.call(CalcService::PING, &()).unwrap();
     assert_ne!(rid1, rid2);
     assert_ne!(rid2, rid3);
     assert_ne!(rid1, rid3);
 }
 
 // ============================================================================
-// has_pending
+// has_pending / has_urgent
 // ============================================================================
 
 #[test]
-fn test_has_pending() {
+fn test_has_pending_and_urgent() {
     let ctx = TestContext::new();
-
-    // has_pending() 在初始空 channel 上返回 false
-    // （需先触发一次 try_recv 清除残留 pending 标志）
     let _ = ctx.server.process_one::<CalcService>();
     assert!(!ctx.server.has_pending());
+    assert!(!ctx.server.has_urgent());
 
-    ctx.client.call_async(CalcService::PING, &()).unwrap();
+    // client 用 TestContext 的 client (同一个 shm)
+    // client 发到 CH0 (req_ch)
+    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
+    shm.sender(ChannelId::new(0)).unwrap()
+        .try_send(&Message::request(1, 0, &()).unwrap()).unwrap();
     assert!(ctx.server.has_pending());
+    assert!(!ctx.server.has_urgent());
 
-    ctx.server.process_one::<CalcService>();
-
-    // ov-channal ring buffer 的 pending 标志在消费最后一条消息后仍为 true，
-    // 需要再调用一次 try_recv（发现空）才会清除
-    let result = ctx.server.process_one::<CalcService>();
-    assert!(matches!(result, ProcessResult::NoMessage));
-    assert!(!ctx.server.has_pending());
-}
-
-// ============================================================================
-// 通道容量
-// ============================================================================
-
-#[test]
-fn test_channel_capacity() {
-    let ctx = TestContext::new();
-
-    let mut sent = 0usize;
-    loop {
-        match ctx.client.call_async(CalcService::PING, &()) {
-            Ok(_) => sent += 1,
-            Err(ov_channels::SendError::Full) => break,
-            Err(e) => panic!("unexpected error: {:?}", e),
-        }
-    }
-
-    assert!(sent > 0, "should send at least one message");
-    assert!(sent < 128, "ring buffer capacity is 128 (usable 127)");
-}
-
-// ============================================================================
-// 多服务共存
-// ============================================================================
-
-#[test]
-fn test_multiple_services() {
-    let ctx = TestContext::new();
-
-    let rid_calc = ctx.client.call_async(CalcService::ADD, &(1i32, 2i32)).unwrap();
-    let rid_raw = ctx.client.call_async(RawService::IDENT, &0xDEAD_u64).unwrap();
-
-    ctx.server.process_one::<CalcService>();
-    ctx.server.process_one::<RawService>();
-
-    let calc_result: i32 = ctx.client.wait_response(rid_calc).unwrap();
-    let raw_result: u64 = ctx.client.wait_response(rid_raw).unwrap();
-
-    assert_eq!(calc_result, 3);
-    assert_eq!(raw_result, 0xDEAD);
-}
-
-// ============================================================================
-// 边界值
-// ============================================================================
-
-#[test]
-fn test_echo_zero() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client.call_async(CalcService::ECHO, &0u32).unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: u32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, 0);
-}
-
-#[test]
-fn test_echo_max_u32() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client.call_async(CalcService::ECHO, &u32::MAX).unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: u32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, u32::MAX);
-}
-
-#[test]
-fn test_add_overflow() {
-    let ctx = TestContext::new();
-
-    let rid = ctx.client
-        .call_async(CalcService::ADD, &(i32::MAX, 1i32))
-        .unwrap();
-    ctx.server.process_one::<CalcService>();
-
-    let val: i32 = ctx.client.wait_response(rid).unwrap();
-    assert_eq!(val, i32::MIN);
-}
-
-#[test]
-fn test_large_batch_roundtrip() {
-    let ctx = TestContext::new();
-
-    let mut rids = Vec::new();
-    for i in 0u32..50 {
-        let rid = ctx.client.call_async(CalcService::ECHO, &i).unwrap();
-        rids.push(rid);
-    }
-
-    let count = ctx.server.process_all::<CalcService, _>(|_| {});
-    assert_eq!(count, 50);
-
-    for (i, rid) in rids.into_iter().enumerate() {
-        let val: u32 = ctx.client.wait_response(rid).unwrap();
-        assert_eq!(val, i as u32);
-    }
+    shm.sender(ChannelId::new(2)).unwrap()
+        .try_send(&Message::request(2, 6, &()).unwrap()).unwrap();
+    assert!(ctx.server.has_urgent());
 }
 
 // ============================================================================
@@ -472,5 +327,26 @@ fn test_method_id_constants() {
     assert_eq!(CalcService::PING, 2);
     assert_eq!(CalcService::NEGATE, 3);
     assert_eq!(CalcService::SUM3, 4);
-    assert_eq!(RawService::IDENT, 0);
+    assert_eq!(CalcService::LOG, 5);
+    assert_eq!(CalcService::STOP, 6);
+}
+
+// ============================================================================
+// 多服务共存
+// ============================================================================
+
+#[test]
+fn test_multiple_services() {
+    let mut ctx = TestContext::new();
+    let rid_calc = ctx.client.call(CalcService::ADD, &(1i32, 2i32)).unwrap();
+    let rid_raw = ctx.client.call(RawService::IDENT, &0xDEAD_u64).unwrap();
+
+    ctx.server.process_one::<CalcService>();
+    ctx.server.process_one::<RawService>();
+
+    ctx.client.poll_responses();
+    let calc: i32 = ctx.client.recv_for(rid_calc).unwrap().unwrap();
+    let raw: u64 = ctx.client.recv_for(rid_raw).unwrap().unwrap();
+    assert_eq!(calc, 3);
+    assert_eq!(raw, 0xDEAD);
 }

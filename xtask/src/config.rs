@@ -113,8 +113,11 @@ pub fn generate_amp_rs(config: &HashMap<String, String>, out_dir: &Path) {
 
 pub fn parse_size(s: &str) -> u64 {
     let s = s.trim();
-    if let Ok(v) = u64::from_str_radix(s.trim_start_matches("0x"), 16) {
-        return v;
+    if s.is_empty() {
+        panic!("empty size string");
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u64::from_str_radix(hex, 16).expect("invalid hex size");
     }
     let (num, unit) = s.split_at(s.len() - 1);
     let n: u64 = num.parse().expect("invalid size number");

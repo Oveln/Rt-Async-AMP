@@ -18,8 +18,8 @@ use ov_rpc::{define_service, RpcServer};
 define_service! {
     /// rt-async 侧的 RPC 服务
     RtAsyncRpc {
-        ECHO: 0 => fn echo(val: u32) -> u32;
-        ADD: 1 => fn add(a: i32, b: i32) -> i32;
+        ECHO: 0 => call echo(val: u32) -> u32;
+        ADD:  1 => call add(a: i32, b: i32) -> i32;
     }
 }
 
@@ -36,11 +36,14 @@ impl RtAsyncRpc {
 // RPC Server 实例
 // ============================================================================
 
-static SERVER: RpcServer = RpcServer::new(
-    chip_qemu_virt_rt::SHMBASE,
-    ChannelId::new(0),
-    ChannelId::new(1),
-);
+// SAFETY: `RpcServer::new` is `const fn` and stores only the base address;
+// no shared-memory access occurs at construction time.  However, **all**
+// public functions below (except `init`) dereference this address via
+// `SharedMemory::at()`.  Therefore `init()` *must* be called before any
+// other `intercom` function.  Calling `has_pending()`, `process_pending()`,
+// `send_message()`, or `server()` before `init()` will read from
+// uninitialized shared memory.
+static SERVER: RpcServer = RpcServer::new(chip_qemu_virt_rt::SHMBASE);
 
 // ============================================================================
 // 公共 API
@@ -56,21 +59,24 @@ pub fn init() {
 }
 
 /// 检查是否有待处理消息
+///
+/// # Preconditions
+///
+/// `init()` must have been called before this function, otherwise this will
+/// read from uninitialized shared memory.
 pub fn has_pending() -> bool {
     SERVER.has_pending()
 }
 
 /// 处理所有待处理消息（RPC + 通知），返回是否有工作
+///
+/// # Preconditions
+///
+/// `init()` must have been called before this function, otherwise this will
+/// read from uninitialized shared memory.
 pub fn process_pending() -> bool {
-    let mut n = 0;
-    loop {
-        match SERVER.process_one::<RtAsyncRpc>() {
-            ov_rpc::ProcessResult::NoMessage => break,
-            ov_rpc::ProcessResult::Handled => n += 1,
-            ov_rpc::ProcessResult::NotRpc(msg) => handle_non_rpc(msg),
-        }
-    }
-    if n > 0 {
+    let (n, should_notify) = SERVER.process_all::<RtAsyncRpc, _>(|msg| handle_non_rpc(msg));
+    if should_notify {
         unsafe { chip_qemu_virt_rt::send_ipi_to_linux() };
     }
     n > 0
@@ -94,13 +100,25 @@ fn handle_non_rpc(msg: Message) {
 }
 
 /// 向 StarryOS 发送消息
+///
+/// # Preconditions
+///
+/// `init()` must have been called before this function, otherwise this will
+/// access uninitialized shared memory.
 pub fn send_message(msg: Message) {
     unsafe {
         let shm = SharedMemory::at(chip_qemu_virt_rt::SHMBASE);
-        if let Ok(tx) = shm.sender(ChannelId::new(1))
-            && tx.try_send(&msg).is_ok()
-        {
-            chip_qemu_virt_rt::send_ipi_to_linux();
+        match shm.sender(ChannelId::new(1)) {
+            Ok(tx) => {
+                if let Err(e) = tx.try_send(&msg) {
+                    log::warn!("[InterCom] send failed: {:?}", e);
+                } else {
+                    chip_qemu_virt_rt::send_ipi_to_linux();
+                }
+            }
+            Err(e) => {
+                log::warn!("[InterCom] sender acquisition failed: {:?}", e);
+            }
         }
     }
 }
@@ -112,6 +130,11 @@ pub fn send_notification(id: u32) {
 }
 
 /// 获取 RPC Server 引用（供外部使用）
+///
+/// # Preconditions
+///
+/// `init()` must have been called before using the returned server to
+/// process messages, otherwise shared memory will be uninitialized.
 pub fn server() -> &'static RpcServer {
     &SERVER
 }

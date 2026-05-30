@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::util;
@@ -6,8 +6,8 @@ use crate::util;
 const DEBUGFS: &str = "/opt/homebrew/opt/e2fsprogs/sbin/debugfs";
 
 pub fn run(root: &Path, file: &str, dst: &str) {
-    let file_path = if file.starts_with('/') || file.starts_with('.') {
-        root.join(file.strip_prefix('.').unwrap_or(file))
+    let file_path = if Path::new(file).is_absolute() {
+        PathBuf::from(file)
     } else {
         root.join(file)
     };

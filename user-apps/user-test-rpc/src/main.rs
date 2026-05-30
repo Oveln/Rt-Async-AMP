@@ -2,7 +2,6 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::IntoRawFd;
 
-use ov_channels::ChannelId;
 use ov_rpc::{define_service, RpcClient};
 
 #[allow(dead_code)]
@@ -17,8 +16,8 @@ const SHM_SIZE: usize = amp::SHMSIZE;
 
 define_service! {
     RtAsyncRpc {
-        ECHO: 0 => fn echo(val: u32) -> u32;
-        ADD: 1 => fn add(a: i32, b: i32) -> i32;
+        ECHO: 0 => call echo(val: u32) -> u32;
+        ADD:  1 => call add(a: i32, b: i32) -> i32;
     }
 }
 
@@ -108,7 +107,7 @@ fn main() {
     let rt = RtShm::open().expect("failed to open /dev/rt_shm");
     rt.clear_pending().expect("CLR_PENDING failed");
 
-    let client = RpcClient::new(rt.shm_addr(), ChannelId::new(0), ChannelId::new(1));
+    let mut client = RpcClient::new(rt.shm_addr());
 
     for i in 0..count {
         println!("\n=== round {} ===", i + 1);
@@ -116,11 +115,12 @@ fn main() {
         let val = 42 + i as u32;
         print!("[test_rpc] ECHO({}) ... ", val);
         let rid = client
-            .call_async(RtAsyncRpc::ECHO, &val)
+            .call(RtAsyncRpc::ECHO, &val)
             .expect("ECHO send failed");
         rt.notify().expect("NOTIFY failed");
         rt.await_ipi().expect("AWAIT failed");
-        let result: u32 = client.wait_response(rid).expect("ECHO no response");
+        client.poll_responses();
+        let result: u32 = client.recv_for(rid).expect("ECHO recv error").expect("ECHO no response");
         assert_eq!(result, val);
         println!("= {} OK", result);
 
@@ -129,11 +129,12 @@ fn main() {
         let expected = a.wrapping_add(b);
         print!("[test_rpc] ADD({}, {}) ... ", a, b);
         let rid = client
-            .call_async(RtAsyncRpc::ADD, &(a, b))
+            .call(RtAsyncRpc::ADD, &(a, b))
             .expect("ADD send failed");
         rt.notify().expect("NOTIFY failed");
         rt.await_ipi().expect("AWAIT failed");
-        let result: i32 = client.wait_response(rid).expect("ADD no response");
+        client.poll_responses();
+        let result: i32 = client.recv_for(rid).expect("ADD recv error").expect("ADD no response");
         assert_eq!(result, expected);
         println!("= {} OK", result);
     }
