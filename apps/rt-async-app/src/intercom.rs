@@ -6,10 +6,16 @@
 //! - Channel 0: StarryOS -> rt-async (请求/通知)
 //! - Channel 1: rt-async -> StarryOS (响应/通知)
 //!
+//! 弹性忙等: 处理完消息后，服务端会在一段弹性时间内忙等，
+//! 期间设置 BUSY 标志，客户端据此跳过不必要的 IPI。
+//!
 //! 约定地址来自 amp.config (通过 chip-qemu_virt_rt 重导出).
+
+use core::sync::atomic::Ordering;
 
 use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
 use ov_rpc::{define_service, RpcServer};
+use platform::{TimerChip, TimerChipImpl};
 
 // ============================================================================
 // RPC 服务定义
@@ -18,8 +24,9 @@ use ov_rpc::{define_service, RpcServer};
 define_service! {
     /// rt-async 侧的 RPC 服务
     RtAsyncRpc {
-        ECHO: 0 => call echo(val: u32) -> u32;
-        ADD:  1 => call add(a: i32, b: i32) -> i32;
+        ECHO:  0 => call echo(val: u32) -> u32;
+        ADD:   1 => call add(a: i32, b: i32) -> i32;
+        DELAY: 2 => send delay(us: u32);
     }
 }
 
@@ -29,6 +36,15 @@ impl RtAsyncRpc {
     }
     fn add(a: i32, b: i32) -> i32 {
         a.wrapping_add(b)
+    }
+    /// 精确延时（busy-wait）：在 process_all 中顺序执行，
+    /// 保证前后 RPC 指令之间的时序精度。
+    fn delay(us: u32) {
+        let freq = TimerChipImpl::freq_hz() as u64;
+        let target = TimerChipImpl::now_ticks() + (us as u64) * freq / 1_000_000;
+        while TimerChipImpl::now_ticks() < target {
+            core::hint::spin_loop();
+        }
     }
 }
 
@@ -40,10 +56,17 @@ impl RtAsyncRpc {
 // no shared-memory access occurs at construction time.  However, **all**
 // public functions below (except `init`) dereference this address via
 // `SharedMemory::at()`.  Therefore `init()` *must* be called before any
-// other `intercom` function.  Calling `has_pending()`, `process_pending()`,
+// other `intercom` function.  Calling `has_pending()`, `process_elastic()`,
 // `send_message()`, or `server()` before `init()` will read from
 // uninitialized shared memory.
 static SERVER: RpcServer = RpcServer::new(chip_qemu_virt_rt::SHMBASE);
+
+/// 弹性忙等自旋上限。
+///
+/// 每次无消息后自旋此次数；若期间收到新消息则重新处理。
+/// 在 QEMU virt 平台 (~10 MHz 有效频率) 下，1000 次约 10–50 µs，
+/// 足以覆盖连续 RPC 调用的间隔。
+const ELASTIC_SPIN_LIMIT: u32 = 1000;
 
 // ============================================================================
 // 公共 API
@@ -68,18 +91,83 @@ pub fn has_pending() -> bool {
     SERVER.has_pending()
 }
 
-/// 处理所有待处理消息（RPC + 通知），返回是否有工作
+/// 弹性忙等处理：处理所有消息并在弹性窗口内自旋等待更多请求。
+///
+/// 工作流程:
+/// 1. 设置 BUSY 标志
+/// 2. 循环处理所有待处理消息（每个 Notify 请求立即回 IPI）
+/// 3. 无消息时自旋等待 `ELASTIC_SPIN_LIMIT` 次
+/// 4. 自旋期间若收到新消息，立即重新处理
+/// 5. 弹性窗口过期后，清除 BUSY 并做最终竞争检查
+///
+/// 返回已处理的消息数量。
 ///
 /// # Preconditions
 ///
 /// `init()` must have been called before this function, otherwise this will
-/// read from uninitialized shared memory.
-pub fn process_pending() -> bool {
-    let (n, should_notify) = SERVER.process_all::<RtAsyncRpc, _>(|msg| handle_non_rpc(msg));
-    if should_notify {
-        unsafe { chip_qemu_virt_rt::send_ipi_to_linux() };
+/// access uninitialized shared memory.
+pub fn process_elastic() -> usize {
+    let shm = unsafe { SharedMemory::at(chip_qemu_virt_rt::SHMBASE) };
+
+    // 1. 标记忙等
+    shm.set_busy();
+
+    let mut total_count = 0;
+    let notify = || unsafe { chip_qemu_virt_rt::send_ipi_to_linux() };
+
+    loop {
+        // 2. 处理所有待处理消息，每个 Notify 请求立即回 IPI
+        let n = SERVER.process_all::<RtAsyncRpc, _, _>(
+            |msg| handle_non_rpc(msg),
+            notify,
+        );
+        total_count += n;
+
+        if n > 0 {
+            // 有工作完成，立即检查更多（不休旋）
+            continue;
+        }
+
+        // 3. 无消息，弹性自旋
+        let mut spun = 0u32;
+        while spun < ELASTIC_SPIN_LIMIT {
+            if SERVER.has_pending() || SERVER.has_urgent() {
+                break;
+            }
+            spun += 1;
+            core::hint::spin_loop();
+        }
+
+        if spun < ELASTIC_SPIN_LIMIT {
+            // 自旋期间收到新消息，重新处理
+            continue;
+        }
+
+        // 4. 弹性窗口过期，准备睡眠
+        break;
     }
-    n > 0
+
+    // 5. 清除 BUSY 标志（Release 语义）
+    shm.clear_busy();
+
+    // 6. 全内存屏障 + 最终竞争检查
+    //    防止客户端写请求与清除 BUSY 之间的竞争：
+    //    如果客户端在 clear_busy() 之后才读到 BUSY=0，则客户端会发 IPI；
+    //    如果客户端在 clear_busy() 之前读了 BUSY=1（跳过 IPI），
+    //    则此处的 fence 保证我们能看到客户端的请求。
+    core::sync::atomic::fence(Ordering::SeqCst);
+
+    if SERVER.has_pending() || SERVER.has_urgent() {
+        // 竞争窗口内收到请求，重新处理。
+        // 不再设置 BUSY：服务端即将睡眠，客户端看到 BUSY=0 后会发 IPI 唤醒。
+        let n = SERVER.process_all::<RtAsyncRpc, _, _>(
+            |msg| handle_non_rpc(msg),
+            notify,
+        );
+        total_count += n;
+    }
+
+    total_count
 }
 
 fn handle_non_rpc(msg: Message) {

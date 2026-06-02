@@ -41,7 +41,7 @@ pub mod channel {
 
 /// RPC 客户端。
 ///
-/// 支持四种调用模式：`call` / `call_quiet` / `send` / `urgent`。
+/// 支持四种调用模式：`call` / `call_poll` / `send` / `urgent`。
 pub struct RpcClient {
     shm_addr: usize,
     req_ch: ChannelId,
@@ -96,41 +96,80 @@ impl RpcClient {
         Ok(rid)
     }
 
-    /// 请求-响应 (interrupt)：发送后 IPI 回复。
-    pub fn call<Args: serde::Serialize>(
+    /// 写入请求后检查 BUSY 标志，若服务端不在忙等则自动调用 `notify` 发 IPI。
+    fn call_inner<N: FnOnce()>(
         &self,
         method_id: u64,
-        args: &Args,
+        args: &impl serde::Serialize,
+        notify: N,
     ) -> Result<RequestId, ov_channels::SendError> {
-        self.send_request(method_id | NOTIFY_FLAG, args, self.req_ch)
+        let rid = self.send_request(method_id, args, self.req_ch)?;
+        // Full fence: guarantee the request write is visible before reading BUSY.
+        // This prevents a lost-wakeup race between client write and server sleep.
+        core::sync::atomic::fence(Ordering::SeqCst);
+        if !self.shm().is_busy() {
+            notify();
+        }
+        Ok(rid)
     }
 
-    /// 请求-响应 (busy-poll)：不回 IPI。
-    pub fn call_quiet<Args: serde::Serialize>(
+    /// 请求-响应：写入请求后检查 BUSY 标志，**服务端回 IPI**。
+    ///
+    /// 若 BUSY=0（服务端可能在睡眠），自动调用 `notify` 发送 IPI 唤醒服务端。
+    /// 调用者在收到 IPI back 后调用 `poll_responses()` 读取响应。
+    pub fn call<Args: serde::Serialize, N: FnOnce()>(
         &self,
         method_id: u64,
         args: &Args,
+        notify: N,
     ) -> Result<RequestId, ov_channels::SendError> {
-        self.send_request(method_id, args, self.req_ch)
+        self.call_inner(method_id | NOTIFY_FLAG, args, notify)
+    }
+
+    /// 请求-响应：写入请求后检查 BUSY 标志，**服务端不回 IPI**。
+    ///
+    /// 若 BUSY=0（服务端可能在睡眠），自动调用 `notify` 发送 IPI 唤醒服务端。
+    /// 调用者需要自行 busy-poll (`poll_responses()`) 读取响应。
+    pub fn call_poll<Args: serde::Serialize, N: FnOnce()>(
+        &self,
+        method_id: u64,
+        args: &Args,
+        notify: N,
+    ) -> Result<RequestId, ov_channels::SendError> {
+        self.call_inner(method_id, args, notify)
     }
 
     /// 单向调用：不期待响应，走普通请求通道。
-    pub fn send<Args: serde::Serialize>(
+    ///
+    /// 若 BUSY=0（服务端可能在睡眠），自动调用 `notify` 发送 IPI 唤醒服务端。
+    pub fn send<Args: serde::Serialize, N: FnOnce()>(
         &self,
         method_id: u64,
         args: &Args,
+        notify: N,
     ) -> Result<(), ov_channels::SendError> {
         self.send_request(method_id | ONE_WAY_FLAG, args, self.req_ch)?;
+        core::sync::atomic::fence(Ordering::SeqCst);
+        if !self.shm().is_busy() {
+            notify();
+        }
         Ok(())
     }
 
     /// 急停：走高优先级通道 (CH2)，不期待响应。
-    pub fn urgent<Args: serde::Serialize>(
+    ///
+    /// 若 BUSY=0（服务端可能在睡眠），自动调用 `notify` 发送 IPI 唤醒服务端。
+    pub fn urgent<Args: serde::Serialize, N: FnOnce()>(
         &self,
         method_id: u64,
         args: &Args,
+        notify: N,
     ) -> Result<(), ov_channels::SendError> {
         self.send_request(method_id | ONE_WAY_FLAG, args, self.urgent_ch)?;
+        core::sync::atomic::fence(Ordering::SeqCst);
+        if !self.shm().is_busy() {
+            notify();
+        }
         Ok(())
     }
 

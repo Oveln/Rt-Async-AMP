@@ -85,6 +85,8 @@ enum BuildTarget {
     UserTest,
     #[value(name = "user-test-rpc")]
     UserTestRpc,
+    #[value(name = "user-test-sched")]
+    UserTestSched,
 }
 
 fn main() {
@@ -101,6 +103,7 @@ fn main() {
                 build::starryos(&root, &cfg);
                 build::user_test(&root, &cfg);
                 build::user_test_rpc(&root, &cfg);
+                build::user_test_sched(&root, &cfg);
                 eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
             }
             BuildTarget::RtAsync => build::rt_async(&root, &cfg),
@@ -108,6 +111,7 @@ fn main() {
             BuildTarget::Starryos => build::starryos(&root, &cfg),
             BuildTarget::UserTest => build::user_test(&root, &cfg),
             BuildTarget::UserTestRpc => build::user_test_rpc(&root, &cfg),
+            BuildTarget::UserTestSched => build::user_test_sched(&root, &cfg),
         },
         Cmd::Run { tmux } => {
             if tmux {
@@ -119,7 +123,7 @@ fn main() {
         Cmd::Log => run::log(&root),
         Cmd::Install { file, dst, all } => {
             if all {
-                for name in ["user-test-ipc", "user-test-rpc"] {
+                for name in ["user-test-ipc", "user-test-rpc", "user-test-sched"] {
                     let src = root.join("build").join(name);
                     if src.exists() {
                         install::run(&root, &src.to_string_lossy(), &format!("/{name}"));

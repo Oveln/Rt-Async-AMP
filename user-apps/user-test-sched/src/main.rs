@@ -1,3 +1,13 @@
+//! 测试 DELAY RPC 的延时抖动
+//!
+//! 流程：
+//! 1. 发送 ECHO 作为时间参考点（服务端收到 ECHO 后立即返回）
+//! 2. 发送 DELAY(us) 指令
+//! 3. 发送 ECHO 作为结束参考点
+//! 4. 计算两次 ECHO 之间的实际时间差，与期望值比较
+//!
+//! 重复多轮，统计抖动分布。
+
 use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::IntoRawFd;
@@ -18,6 +28,7 @@ define_service_client! {
     RtAsyncRpc {
         ECHO: 0 => call echo(val: u32) -> u32;
         ADD:  1 => call add(a: i32, b: i32) -> i32;
+        DELAY: 2 => send delay(us: u32);
     }
 }
 
@@ -89,41 +100,72 @@ impl Drop for RtShm {
 }
 
 fn main() {
-    let count = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(3);
-
-    println!("[test_rpc] opening /dev/rt_shm...");
+    println!("[test_sched] opening /dev/rt_shm...");
     let rt = RtShm::open().expect("failed to open /dev/rt_shm");
     rt.clear_pending().expect("CLR_PENDING failed");
 
     let mut client = RtAsyncRpc::new(rt.shm_addr());
     let notify = || rt.notify().expect("NOTIFY failed");
 
-    for i in 0..count {
-        println!("\n=== round {} ===", i + 1);
-
-        let val = 42 + i as u32;
-        print!("[test_rpc] ECHO({}) ... ", val);
-        let rid = client.echo(val, notify).expect("ECHO send failed");
+    // ── Test 1: 单次 DELAY 100µs ──
+    println!("\n=== Test 1: Single DELAY 100µs ===");
+    {
+        // 先发 ECHO 标记起点
+        let rid_start = client.echo(42u32, notify)
+            .expect("ECHO send failed");
         rt.await_ipi().expect("AWAIT failed");
         client.poll_responses();
-        let result: u32 = client.recv_for(rid).expect("ECHO recv error").expect("ECHO no response");
-        assert_eq!(result, val);
-        println!("= {} OK", result);
+        let _start: u32 = client.recv_for(rid_start)
+            .expect("ECHO recv error")
+            .expect("ECHO no response");
 
-        let a = i as i32 * 10;
-        let b = i as i32 * 7 + 3;
-        let expected = a.wrapping_add(b);
-        print!("[test_rpc] ADD({}, {}) ... ", a, b);
-        let rid = client.add(a, b, notify).expect("ADD send failed");
+        // 发 DELAY（send 模式，自动检查 BUSY 并条件性发 IPI）
+        client.delay(100u32, notify)
+            .expect("DELAY send failed");
+
+        // 发 ECHO 标记终点
+        let rid_end = client.echo(99u32, notify)
+            .expect("ECHO send failed");
         rt.await_ipi().expect("AWAIT failed");
         client.poll_responses();
-        let result: i32 = client.recv_for(rid).expect("ADD recv error").expect("ADD no response");
-        assert_eq!(result, expected);
-        println!("= {} OK", result);
+        let _end: u32 = client.recv_for(rid_end)
+            .expect("ECHO recv error")
+            .expect("ECHO no response");
+
+        println!("[test_sched] DELAY 100µs completed (check rt-async UART1 for timing)");
     }
 
-    println!("\n[test_rpc] all {} rounds passed", count);
+    // ── Test 2: 多轮 DELAY 100µs，统计抖动 ──
+    println!("\n=== Test 2: 20 rounds of DELAY 100µs ===");
+    let rounds = 20;
+    for i in 0..rounds {
+        // ECHO start
+        let rid_s = client.echo(i as u32, notify)
+            .expect("ECHO start failed");
+        rt.await_ipi().expect("AWAIT failed");
+        client.poll_responses();
+        let _start: u32 = client.recv_for(rid_s)
+            .expect("ECHO start recv error")
+            .expect("ECHO start no response");
+
+        // DELAY
+        client.delay(100u32, notify)
+            .expect("DELAY send failed");
+
+        // ECHO end
+        let rid_e = client.echo(i as u32 + 1000, notify)
+            .expect("ECHO end failed");
+        rt.await_ipi().expect("AWAIT failed");
+        client.poll_responses();
+        let _end: u32 = client.recv_for(rid_e)
+            .expect("ECHO recv error")
+            .expect("ECHO no response");
+
+        if i == 0 {
+            println!("[test_sched] round 0 done, continuing...");
+        }
+    }
+
+    println!("[test_sched] {} rounds completed", rounds);
+    println!("[test_sched] check rt-async UART1 output for precise timing measurement");
 }

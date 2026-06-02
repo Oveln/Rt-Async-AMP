@@ -18,13 +18,21 @@ use executor::spawner::Spawner;
 use platform::arch::TrapFrame;
 use platform::{Chip, ChipImpl};
 
+// ============================================================================
+// 任务
+// ============================================================================
+
 #[executor::task]
 async fn task_ipc() {
     rt_async_app::intercom::init();
 
     loop {
+        // 弹性忙等处理：处理所有消息并在弹性窗口内自旋等待更多请求
+        // 每个 Notify 请求处理完后立即回 IPI，无需额外通知
+        let _count = rt_async_app::intercom::process_elastic();
+
+        // 弹性窗口过期，等待新消息唤醒
         rt_async_app::ipc_wait::WaitForMessage.await;
-        while rt_async_app::intercom::process_pending() {}
     }
 }
 

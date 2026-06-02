@@ -5,6 +5,7 @@ members = [
     "apps/rt-async-app",
     "user-apps/user-test-ipc",
     "user-apps/user-test-rpc",
+    "user-apps/user-test-sched",
     "xtask",
 ]
 resolver = "3"

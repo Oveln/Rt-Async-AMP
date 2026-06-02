@@ -9,6 +9,7 @@ description = "Type-safe RPC framework built on ov-channels for AMP systems"
 ov-channels = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
+paste = { version = "1" }
 log = { version = "0.4", default-features = false, optional = true }
 
 [features]

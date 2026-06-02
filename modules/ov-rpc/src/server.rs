@@ -34,9 +34,9 @@ pub trait RpcHandler {
 /// 处理结果的附带信息。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandledKind {
-    /// interrupt 模式，需要回 IPI
+    /// 双向调用，需要回 IPI (call 模式)
     Notify,
-    /// busy-poll 模式，不回 IPI
+    /// 双向调用，不回 IPI (call_poll 模式)
     Quiet,
     /// 单向调用，无响应发送
     OneWay,
@@ -116,7 +116,12 @@ impl RpcServer {
         let resp = match H::handle(method, msg) {
             Ok(Some(resp)) => resp,
             Ok(None) => {
-                // Method matched but was one-way (send/urgent), or method ID unknown.
+                // One-way handlers return Ok(None) by design.
+                // If this was a one-way call, report it as handled.
+                // Otherwise the method ID was unknown.
+                if one_way {
+                    return ProcessResult::Handled(HandledKind::OneWay);
+                }
                 return ProcessResult::Unhandled(method);
             }
             Err(_) => {
@@ -170,23 +175,26 @@ impl RpcServer {
     /// 先处理所有急停，再处理所有普通消息。
     ///
     /// 非 RPC 消息通过 `on_other` 回调。
-    /// 返回 `(handled_count, should_notify)`。
-    pub fn process_all<H: RpcHandler, F: FnMut(Message)>(
+    /// 每处理完一个 Notify 模式的请求，立即调用 `on_notify` 回 IPI，
+    /// 保证客户端延迟最小化。
+    /// 返回已处理的消息数量。
+    pub fn process_all<H: RpcHandler, F: FnMut(Message), N: FnMut()>(
         &self,
         mut on_other: F,
-    ) -> (usize, bool) {
+        mut on_notify: N,
+    ) -> usize {
         let mut count = 0;
-        let mut should_notify = false;
 
         loop {
             match self.process_urgent::<H>() {
                 ProcessResult::NoMessage => break,
                 ProcessResult::Handled(HandledKind::OneWay) => count += 1,
-                ProcessResult::Handled(kind) => {
+                ProcessResult::Handled(HandledKind::Notify) => {
                     count += 1;
-                    if kind == HandledKind::Notify {
-                        should_notify = true;
-                    }
+                    on_notify();
+                }
+                ProcessResult::Handled(HandledKind::Quiet) => {
+                    count += 1;
                 }
                 ProcessResult::Unhandled(_) => {}
                 ProcessResult::NotRpc(msg) => on_other(msg),
@@ -196,18 +204,20 @@ impl RpcServer {
         loop {
             match self.process_one::<H>() {
                 ProcessResult::NoMessage => break,
-                ProcessResult::Handled(kind) => {
+                ProcessResult::Handled(HandledKind::OneWay) => count += 1,
+                ProcessResult::Handled(HandledKind::Notify) => {
                     count += 1;
-                    if kind == HandledKind::Notify {
-                        should_notify = true;
-                    }
+                    on_notify();
+                }
+                ProcessResult::Handled(HandledKind::Quiet) => {
+                    count += 1;
                 }
                 ProcessResult::Unhandled(_) => {}
                 ProcessResult::NotRpc(msg) => on_other(msg),
             }
         }
 
-        (count, should_notify)
+        count
     }
 
     /// 检查急停通道是否有待处理消息。

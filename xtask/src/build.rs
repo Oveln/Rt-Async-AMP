@@ -191,6 +191,27 @@ pub fn user_test_rpc(root: &Path, _cfg: &Config) {
     eprintln!("user-test-rpc → {}", dst.display());
 }
 
+pub fn user_test_sched(root: &Path, _cfg: &Config) {
+    let target = "riscv64gc-unknown-linux-musl";
+    util::run(
+        &root.join("user-apps/user-test-sched"),
+        "cargo",
+        &["build", "--target", target, "--release"],
+    );
+
+    let build_dir = root.join("build");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let src = root
+        .join("target")
+        .join(target)
+        .join("release")
+        .join("user-test-sched");
+    let dst = build_dir.join("user-test-sched");
+    fs::copy(&src, &dst).unwrap();
+    eprintln!("user-test-sched → {}", dst.display());
+}
+
 pub fn qemu(root: &Path, _cfg: &Config) {
     let src_dir = root.join("qemu");
     assert!(

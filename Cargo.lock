@@ -430,6 +430,7 @@ version = "0.1.0"
 dependencies = [
  "log",
  "ov-channels 0.1.0",
+ "paste",
  "postcard",
  "serde",
 ]
@@ -840,6 +841,18 @@ dependencies = [
  "ov-channels 0.1.0",
  "ov-rpc",
  "portable-atomic",
+ "postcard",
+ "serde",
+ "xtask",
+]
+
+[[package]]
+name = "user-test-sched"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ov-channels 0.1.0",
+ "ov-rpc",
  "postcard",
  "serde",
  "xtask",

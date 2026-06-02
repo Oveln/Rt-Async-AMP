@@ -1,0 +1,15 @@
+[package]
+name = "user-test-sched"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ov-channels = { workspace = true, features = ["std"] }
+ov-rpc = { path = "../../modules/ov-rpc" }
+serde = { workspace = true }
+postcard = { workspace = true }
+libc = "0.2"
+
+[build-dependencies]
+xtask = { path = "../../xtask" }
