@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rt-async-amp 架构文档</title>
+<link rel="stylesheet" href="assets/architecture.css">
+</head>
+<body>
+
+<nav>
+  <span class="brand">rt-async-amp</span>
+  <a href="#arch">系统架构</a>
+  <a href="#layout">内存布局</a>
+  <a href="#flow">通讯流程</a>
+  <a href="#shm">SHM 状态机</a>
+  <a href="#rpc">RPC 协议</a>
+  <a href="#executor">执行器</a>
+  <a href="#modules">模块地图</a>
+</nav>
+
+<main>
+<h1>rt-async-amp 架构文档</h1>
+<p>RISC-V 非对称多处理 (AMP) 系统 — 双核实时 + 通用 OS，运行在 QEMU virt 平台</p>
+
+<div class="toc">
+  <div class="toc-title">目录</div>
+  <ul>
+    <li><a href="#arch">1. 系统架构总览</a></li>
+    <li><a href="#layout">2. 内存布局</a></li>
+    <li><a href="#flow">3. 通讯全流程</a></li>
+    <li><a href="#shm">4. SHM 与通道状态机</a></li>
+    <li><a href="#rpc">5. RPC 协议</a></li>
+    <li><a href="#executor">6. rt-async 执行器</a></li>
+    <li><a href="#modules">7. 模块地图</a></li>
+  </ul>
+</div>
+
+<!-- ============================================================ -->
+<section id="arch">
+<h2>1. 系统架构总览</h2>
+<p>系统运行在 <strong>QEMU virt RISC-V</strong> 平台上，两个硬件线程 (hart) 各自运行不同的软件栈。</p>
+
+<img class="dia" src="assets/arch-overview.svg" alt="系统架构总览" />
+
+<h3>核心思想</h3>
+<ul>
+  <li><strong>Hart 0</strong> 运行完整操作系统 (StarryOS)，支持 Linux 系统调用、文件系统、用户进程等。</li>
+  <li><strong>Hart 1</strong> 运行裸金属异步执行器 (rt-async)，具有确定性实时调度能力，<strong>无操作系统</strong>。</li>
+  <li>两者<strong>仅通过共享内存通道</strong>进行数据交换，通过 <strong>IPI（核间中断）</strong>互相通知。</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="layout">
+<h2>2. 内存布局</h2>
+
+<img class="dia" src="assets/memory-layout.svg" alt="内存布局" />
+
+<h3>共享内存 (SHM) 内部结构</h3>
+<img class="dia" src="assets/shm-structure.svg" alt="共享内存结构" />
+<ul>
+  <li><code>BUSY</code> 标志 — 原子字节；1 = rt-async 正在处理中，0 = 睡眠/空闲。</li>
+  <li>每个通道是一个无锁的<strong>单生产者 / 单消费者环形缓冲区</strong>。</li>
+  <li>方向约定："客户端"指 StarryOS 用户应用侧；"服务端"指 rt-async 侧。</li>
+</ul>
+</section>
+
+<!-- ============================================================ -->
+<section id="flow">
+<h2>3. 通讯全流程</h2>
+<p>从 StarryOS 用户应用发起 RPC 调用到 rt-async 处理并返回结果的端到端流程：</p>
+
+<img class="dia" src="assets/comm-flow.svg" alt="通讯全流程" />
+
+<h3>流程概述</h3>
+<div class="card">
+<ol>
+  <li><strong>请求发起</strong>：用户应用序列化参数 → 写入 CH0 → 检查 BUSY 标志 → 若空闲则发送 IPI。</li>
+  <li><strong>唤醒</strong>：CLINT MSI 中断触发 Hart 1 的 MachineSoft 中断处理 → waker 唤醒 IPC 任务。</li>
+  <li><strong>处理</strong>：<code>process_elastic()</code> 设置 BUSY，从 CH0 读取所有请求，分发给 RPC handler，将响应写入 CH1，回复 IPI。</li>
+  <li><strong>弹性自旋</strong>：处理完毕后短暂自旋 (ELASTIC_SPIN_LIMIT 次迭代) 等待更多工作。</li>
+  <li><strong>睡眠</strong>：清除 BUSY，执行最终竞争检查，然后 await <code>WaitForMessage</code>（挂起直到下一次 IPI）。</li>
+  <li><strong>响应接收</strong>：用户应用收到 IPI → 轮询 CH1 → 反序列化响应。</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="shm">
+<h2>4. SHM 与通道状态机</h2>
+
+<h3>4.1 BUSY 标志状态机</h3>
+<p>BUSY 标志协调两个核心之间"服务端是否在忙碌"的判断，避免不必要的中断：</p>
+
+<img class="dia" src="assets/busy-state-machine.svg" alt="BUSY 标志状态机" />
+
+<h3>4.2 通道消息状态</h3>
+
+<img class="dia" src="assets/channel-state.svg" alt="通道消息状态" />
+<ul>
+  <li>每个通道槽位循环：空 → 已写入 → 已读取 → 回收为空。</li>
+  <li>缓冲区满时，<code>try_send()</code> 返回 <code>SendError::Full</code>。</li>
+</ul>
+
+<h3>4.3 防丢失唤醒协议</h3>
+<div class="note">
+<strong>关键竞争条件：</strong>如果客户端正在写入请求的瞬间，服务端正好在清除 BUSY 准备睡眠，怎么办？<br/><br/>
+<strong>解决方案（双屏障协议）：</strong>
+<ol>
+  <li><strong>客户端侧</strong>：写入 CH0 后 → <code>fence(SeqCst)</code> → 读取 BUSY。若 BUSY=0，发送 IPI。</li>
+  <li><strong>服务端侧</strong>：清除 BUSY 后 → <code>fence(SeqCst)</code> → 重新检查 <code>has_pending()</code>。若有新请求，立即处理。</li>
+  <li>两侧的 <code>SeqCst</code> 内存屏障保证<strong>至少一方能看到另一方的写入</strong> — 请求不会丢失。</li>
+</ol>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="rpc">
+<h2>5. RPC 协议</h2>
+
+<h3>5.1 通道布局</h3>
+<img class="dia" src="assets/rpc-channels.svg" alt="RPC 通道布局" />
+
+<h3>5.2 四种调用模式</h3>
+<img class="dia" src="assets/rpc-modes.svg" alt="RPC 四种调用模式" />
+
+<h3>5.3 消息格式</h3>
+<div class="card">
+<p>通道中的每条 <code>Message</code> 包含：</p>
+<ul>
+  <li><code>type</code> — <code>Request</code>、<code>Response</code>、<code>Notification</code>、<code>Data</code></li>
+  <li><code>request_id</code> — 唯一请求 ID，匹配请求与响应</li>
+  <li><code>method_id</code> — 方法标识，高位编码标志 (NOTIFY_FLAG, ONE_WAY_FLAG)</li>
+  <li><code>payload</code> — 序列化参数/响应 (bincode)</li>
+</ul>
+</div>
+
+<h3>5.4 ProcessResult 分发流程</h3>
+<img class="dia" src="assets/process-result.svg" alt="ProcessResult 分发流程" />
+</section>
+
+<!-- ============================================================ -->
+<section id="executor">
+<h2>6. rt-async 执行器</h2>
+
+<p>实时执行器运行在 Hart 1 的 M 特权级，采用优先级抢占调度策略：</p>
+
+<img class="dia" src="assets/executor-flow.svg" alt="执行器流程" />
+
+<h3>任务状态机</h3>
+<img class="dia" src="assets/task-state-machine.svg" alt="任务状态机" />
+<img class="dia" src="assets/executor-2.svg" alt="执行器详细" />
+
+<h3>优先级抢占机制</h3>
+<div class="card">
+<ul>
+  <li>数值越小 = 优先级越高（优先级 0 为最高）。</li>
+  <li><code>Spawner::spawn()</code> 检查新任务优先级是否高于当前 → 触发 <code>platform::pend()</code>（软件中断）。</li>
+  <li><code>try_preempt()</code> 使用<strong>优先级栈</strong>追踪嵌套抢占 — 每次抢占压栈，完成时弹出。</li>
+  <li><code>PriorityBitmap</code> 通过 <code>trailing_zeros()</code> 实现 O(1) <code>highest()</code> — 快速找到有工作的最高优先级执行器。</li>
+</ul>
+</div>
+</section>
+
+<!-- ============================================================ -->
+<section id="modules">
+<h2>7. 模块地图</h2>
+
+<div class="ftree">
+<span class="d">rt-async-amp/</span>
+├── <span class="d">apps/</span>
+│   └── <span class="d">rt-async-app/</span>           <span class="f">← Hart 1 固件 (M 特权级)</span>
+│       └── <span class="d">src/</span>
+│           ├── bin/demo.rs        <span class="f">← 入口: __rust_main → spawn 任务</span>
+│           ├── intercom.rs        <span class="f">← SHM 桥接: init, process_elastic, send_message</span>
+│           ├── ipc_wait.rs        <span class="f">← WaitForMessage future + ISR 通知</span>
+│           └── lib.rs
+├── <span class="d">modules/</span>
+│   ├── <span class="d">ov-rpc/</span>                <span class="f">← RPC 框架 (RpcClient / RpcServer)</span>
+│   │   └── <span class="d">src/</span>
+│   │       ├── client.rs          <span class="f">← RpcClient: call, call_poll, send, urgent</span>
+│   │       ├── server.rs          <span class="f">← RpcServer: process_channel, process_all</span>
+│   │       └── lib.rs             <span class="f">← define_service!, define_service_client! 宏</span>
+│   └── <span class="d">chip-qemu-virt-rt/</span>    <span class="f">← Hart 1 硬件抽象层</span>
+│       └── <span class="d">src/</span>
+│           └── lib.rs             <span class="f">← send_ipi_to_linux, SHMBASE, CLINT 操作</span>
+├── <span class="d">rt-async/</span>                 <span class="f">← 异步执行器库</span>
+│   └── <span class="d">modules/</span>
+│       ├── <span class="d">executor/</span>            <span class="f">← 优先级抢占异步执行器</span>
+│       │   └── <span class="d">src/</span>
+│       │       ├── executor.rs    <span class="f">← Executor: 运行队列, poll 循环</span>
+│       │       ├── spawner.rs     <span class="f">← Spawner: spawn, try_preempt, run</span>
+│       │       ├── priority.rs    <span class="f">← Priority 类型（值越小优先级越高）</span>
+│       │       └── <span class="d">task/</span>
+│       │           ├── state.rs   <span class="f">← 任务状态: SPAWNED, RUN_QUEUED 原子位</span>
+│       │           ├── header.rs  <span class="f">← TaskInfo, TaskRef</span>
+│       │           └── storage.rs <span class="f">← TaskStorage: 静态任务内存分配</span>
+│       ├── <span class="d">futures/</span>             <span class="f">← Future 工具 + 定时器</span>
+│       ├── <span class="d">platform/</span>            <span class="f">← Chip/TimerChip extern trait</span>
+│       └── <span class="d">timer/</span>               <span class="f">← Timer wheel 定时器实现</span>
+├── <span class="d">StarryOS/</span>                 <span class="f">← Hart 0 操作系统 (S 特权级), 兼容 Linux 内核</span>
+│   └── <span class="d">kernel/src/</span>
+│       ├── <span class="d">syscall/ipc/</span>        <span class="f">← shmget/shmat/shmdt, msgsnd/msgrcv 系统调用</span>
+│       └── <span class="d">pseudofs/dev/</span>       <span class="f">← /dev/ipi-rt-async 设备驱动</span>
+├── <span class="d">user-apps/</span>                <span class="f">← StarryOS 用户态测试程序</span>
+│   ├── user-test-ipc/            <span class="f">← IPC 共享内存测试</span>
+│   ├── user-test-rpc/            <span class="f">← RPC 调用测试</span>
+│   └── user-test-sched/          <span class="f">← 调度延迟测试</span>
+├── <span class="d">xtask/</span>                    <span class="f">← 构建系统 (cargo xtask)</span>
+│   └── <span class="d">src/</span>
+│       ├── main.rs               <span class="f">← CLI: build, run, setup 命令</span>
+│       ├── build.rs              <span class="f">← 构建: rt-async, StarryOS, OpenSBI, 用户程序</span>
+│       ├── config.rs             <span class="f">← amp.toml 配置加载器</span>
+│       └── run.rs                <span class="f">← QEMU 启动（-smp 2 双核）</span>
+└── amp.toml                      <span class="f">← 中央配置: 地址、大小、工具路径</span>
+</div>
+
+<h3>模块依赖关系</h3>
+<img class="dia" src="assets/module-deps.svg" alt="模块依赖关系" />
+</section>
+
+</main>
+
+</body>
+</html>

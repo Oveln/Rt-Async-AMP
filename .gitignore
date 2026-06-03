@@ -6,3 +6,5 @@
 *.bin
 *.elf
 apps/user-test-ipc/target/
+node_modules
+.claude
