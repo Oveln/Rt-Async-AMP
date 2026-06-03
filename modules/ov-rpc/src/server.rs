@@ -91,8 +91,8 @@ impl RpcServer {
     }
 
     #[inline]
-    fn shm(&self) -> &'static SharedMemory {
-        unsafe { SharedMemory::at(self.shm_addr) }
+    fn shm(&self) -> &'static SharedMemory<3> {
+        unsafe { SharedMemory::<3>::at(self.shm_addr) }
     }
 
     fn process_channel<H: RpcHandler>(&self, ch: ChannelId) -> ProcessResult {

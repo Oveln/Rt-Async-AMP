@@ -161,7 +161,7 @@ pub fn user_test(root: &Path, _cfg: &Config) {
     fs::create_dir_all(&build_dir).unwrap();
 
     let src = root
-        .join("user-apps/user-test-ipc/target")
+        .join("target")
         .join(target)
         .join("release")
         .join("user-test-ipc");

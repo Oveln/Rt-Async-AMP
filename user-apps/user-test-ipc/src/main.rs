@@ -53,8 +53,8 @@ impl RtShm {
         Ok(Self { fd, ptr })
     }
 
-    fn shm(&self) -> &SharedMemory {
-        unsafe { &*(self.ptr as *const SharedMemory) }
+    fn shm(&self) -> &SharedMemory<3> {
+        unsafe { &*(self.ptr as *const SharedMemory<3>) }
     }
 
     fn notify(&self) -> io::Result<()> {

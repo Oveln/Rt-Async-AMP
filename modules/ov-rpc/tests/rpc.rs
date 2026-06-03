@@ -49,14 +49,14 @@ impl RawService {
 // ============================================================================
 
 struct TestContext {
-    _shm: &'static SharedMemory,
+    _shm: &'static SharedMemory<3>,
     server: RpcServer,
     client: RpcClient,
 }
 
 impl TestContext {
     fn new() -> Self {
-        let shm = Box::leak(Box::new(SharedMemory::new()));
+        let shm = Box::leak(Box::new(SharedMemory::<3>::new()));
         shm.init();
         let addr = shm as *const _ as usize;
         Self {
@@ -264,7 +264,7 @@ fn test_process_result_no_message() {
 #[test]
 fn test_not_rpc() {
     let ctx = TestContext::new();
-    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
+    let shm = unsafe { SharedMemory::<3>::at(ctx._shm as *const _ as usize) };
     let tx = shm.sender(ChannelId::new(0)).unwrap();
     tx.try_send(&Message::notification(99)).unwrap();
 
@@ -398,7 +398,7 @@ fn test_has_pending_and_urgent() {
 
     // client 用 TestContext 的 client (同一个 shm)
     // client 发到 CH0 (req_ch)
-    let shm = unsafe { SharedMemory::at(ctx._shm as *const _ as usize) };
+    let shm = unsafe { SharedMemory::<3>::at(ctx._shm as *const _ as usize) };
     shm.sender(ChannelId::new(0)).unwrap()
         .try_send(&Message::request(1, 0, &()).unwrap()).unwrap();
     assert!(ctx.server.has_pending());

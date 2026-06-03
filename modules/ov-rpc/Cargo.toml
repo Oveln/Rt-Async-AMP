@@ -17,4 +17,4 @@ default = []
 logging = ["dep:log"]
 
 [dev-dependencies]
-ov-channels = { workspace = true, features = ["std"] }
+ov-channels = { workspace = true, features = ["std", "flags"] }

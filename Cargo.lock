@@ -404,19 +404,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "ov-channels"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "portable-atomic",
- "postcard",
- "serde",
-]
-
-[[package]]
-name = "ov-channels"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6ccb846c5ad7d3a378a6713d86f8f7c04ec3e8778bd5ef0a223e40c4d0a9024"
+checksum = "32c5cf43ed982e0e83a358dbc615a3c2af509bc060c7aa97f5ddf9020b51e7bf"
 dependencies = [
  "critical-section",
  "portable-atomic",
@@ -429,7 +419,7 @@ name = "ov-rpc"
 version = "0.1.0"
 dependencies = [
  "log",
- "ov-channels 0.1.0",
+ "ov-channels",
  "paste",
  "postcard",
  "serde",
@@ -559,7 +549,7 @@ dependencies = [
  "fugit",
  "futures",
  "log",
- "ov-channels 0.1.0",
+ "ov-channels",
  "ov-rpc",
  "platform",
  "portable-atomic",
@@ -827,7 +817,7 @@ name = "user-test-ipc"
 version = "0.1.0"
 dependencies = [
  "libc",
- "ov-channels 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ov-channels",
  "postcard",
  "serde",
  "xtask",
@@ -838,7 +828,7 @@ name = "user-test-rpc"
 version = "0.1.0"
 dependencies = [
  "libc",
- "ov-channels 0.1.0",
+ "ov-channels",
  "ov-rpc",
  "portable-atomic",
  "postcard",
@@ -851,7 +841,7 @@ name = "user-test-sched"
 version = "0.1.0"
 dependencies = [
  "libc",
- "ov-channels 0.1.0",
+ "ov-channels",
  "ov-rpc",
  "postcard",
  "serde",

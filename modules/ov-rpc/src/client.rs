@@ -75,8 +75,8 @@ impl RpcClient {
     }
 
     #[inline]
-    fn shm(&self) -> &'static SharedMemory {
-        unsafe { SharedMemory::at(self.shm_addr) }
+    fn shm(&self) -> &'static SharedMemory<3> {
+        unsafe { SharedMemory::<3>::at(self.shm_addr) }
     }
 
     fn send_request(

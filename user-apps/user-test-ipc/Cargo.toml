@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ov-channels = { version = "0.1.0", features = ["std"] }
+ov-channels = { workspace = true, features = ["std"] }
 serde = { workspace = true }
 postcard = { workspace = true }
 libc = "0.2"
