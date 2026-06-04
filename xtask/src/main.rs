@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 
 mod build;
 mod install;
@@ -35,11 +35,7 @@ enum Cmd {
     Setup,
     #[command(about = "Build one or all targets")]
     Build {
-        #[arg(
-            default_value = "all",
-            help = "Target to build",
-            value_name = "TARGET"
-        )]
+        #[arg(default_value = "all", help = "Target to build", value_name = "TARGET")]
         target: BuildTarget,
     },
     #[command(about = "Launch QEMU with dual-core AMP image")]
@@ -54,7 +50,11 @@ enum Cmd {
     Install {
         #[arg(help = "Path to the file to install (e.g. build/user-test-ipc)")]
         file: Option<String>,
-        #[arg(short, long, help = "Destination path inside rootfs (default: /<filename>)")]
+        #[arg(
+            short,
+            long,
+            help = "Destination path inside rootfs (default: /<filename>)"
+        )]
         dst: Option<String>,
         #[arg(long, help = "Install all user-apps")]
         all: bool,
@@ -128,7 +128,10 @@ fn main() {
                     if src.exists() {
                         install::run(&root, &src.to_string_lossy(), &format!("/{name}"));
                     } else {
-                        eprintln!("{} not found in build/. Run 'cargo xtask build' first.", name);
+                        eprintln!(
+                            "{} not found in build/. Run 'cargo xtask build' first.",
+                            name
+                        );
                     }
                 }
             } else {
@@ -142,10 +145,7 @@ fn main() {
                 let dst = dst.unwrap_or_else(|| {
                     format!(
                         "/{}",
-                        Path::new(&file)
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
+                        Path::new(&file).file_name().unwrap().to_string_lossy()
                     )
                 });
                 install::run(&root, &file, &dst);

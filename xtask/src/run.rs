@@ -19,10 +19,7 @@ pub fn run(root: &Path, cfg: &Config) {
         opensbi_fw.exists(),
         "Run 'cargo xtask build opensbi' first."
     );
-    assert!(
-        app_bin.exists(),
-        "Run 'cargo xtask build rt-async' first."
-    );
+    assert!(app_bin.exists(), "Run 'cargo xtask build rt-async' first.");
     if !starryos_bin.exists() {
         eprintln!("Warning: no StarryOS binary.");
     }
@@ -56,10 +53,7 @@ pub fn run(root: &Path, cfg: &Config) {
             "-device",
             &format!("loader,addr={rtasync_base},file={}", app_bin.display()),
             "-drive",
-            &format!(
-                "file={},format=raw,if=none,id=hd0",
-                rootfs.display()
-            ),
+            &format!("file={},format=raw,if=none,id=hd0", rootfs.display()),
             "-device",
             "virtio-blk-pci,drive=hd0",
         ])

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use xtask::config::{Config, RepoSource};
+
 use crate::util;
 
 pub fn run(root: &Path, cfg: &Config) {

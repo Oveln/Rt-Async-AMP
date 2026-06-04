@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::config::{self as amp_config, Config};
+
 use crate::util;
 
 pub fn rt_async(root: &Path, _cfg: &Config) {
@@ -10,7 +11,14 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
     util::run(
         &root.join("apps/rt-async-app"),
         "cargo",
-        &["build", "--target", target, "--release", "-p", "rt-async-app"],
+        &[
+            "build",
+            "--target",
+            target,
+            "--release",
+            "-p",
+            "rt-async-app",
+        ],
     );
 
     let build_dir = root.join("build");
@@ -25,7 +33,12 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
     util::run(
         root,
         "riscv64-elf-objcopy",
-        &["-O", "binary", &elf.to_string_lossy(), &bin.to_string_lossy()],
+        &[
+            "-O",
+            "binary",
+            &elf.to_string_lossy(),
+            &bin.to_string_lossy(),
+        ],
     );
     eprintln!("rt-async → {}", bin.display());
 }
@@ -78,9 +91,12 @@ pub fn starryos(root: &Path, cfg: &Config) {
     let plat_config = generate_axconfig(root, cfg);
     let defconfig = dir.join("make/defconfig.toml");
     if !axconfig.exists()
-        || fs::metadata(&plat_config)
-            .ok()
-            .map_or(true, |m| fs::metadata(&axconfig).ok().map_or(true, |a| m.modified().unwrap() > a.modified().unwrap()))
+        || fs::metadata(&plat_config).ok().map_or(true, |m| {
+            fs::metadata(&axconfig).ok().map_or(true, |a| {
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                    > a.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            })
+        })
     {
         util::run(
             &dir,
@@ -144,72 +160,45 @@ pub fn starryos(root: &Path, cfg: &Config) {
     util::run(
         root,
         "riscv64-elf-objcopy",
-        &["-O", "binary", &elf.to_string_lossy(), &bin.to_string_lossy()],
+        &[
+            "-O",
+            "binary",
+            &elf.to_string_lossy(),
+            &bin.to_string_lossy(),
+        ],
     );
     eprintln!("StarryOS → {}", bin.display());
 }
 
 pub fn user_test(root: &Path, _cfg: &Config) {
-    let target = "riscv64gc-unknown-linux-musl";
-    util::run(
-        &root.join("user-apps/user-test-ipc"),
-        "cargo",
-        &["build", "--target", target, "--release"],
-    );
-
-    let build_dir = root.join("build");
-    fs::create_dir_all(&build_dir).unwrap();
-
-    let src = root
-        .join("target")
-        .join(target)
-        .join("release")
-        .join("user-test-ipc");
-    let dst = build_dir.join("user-test-ipc");
-    fs::copy(&src, &dst).unwrap();
-    eprintln!("user-test-ipc → {}", dst.display());
+    build_user_app(root, "user-apps/user-test-ipc", "user-test-ipc");
 }
 
 pub fn user_test_rpc(root: &Path, _cfg: &Config) {
-    let target = "riscv64gc-unknown-linux-musl";
-    util::run(
-        &root.join("user-apps/user-test-rpc"),
-        "cargo",
-        &["build", "--target", target, "--release"],
-    );
-
-    let build_dir = root.join("build");
-    fs::create_dir_all(&build_dir).unwrap();
-
-    let src = root
-        .join("target")
-        .join(target)
-        .join("release")
-        .join("user-test-rpc");
-    let dst = build_dir.join("user-test-rpc");
-    fs::copy(&src, &dst).unwrap();
-    eprintln!("user-test-rpc → {}", dst.display());
+    build_user_app(root, "user-apps/user-test-rpc", "user-test-rpc");
 }
 
 pub fn user_test_sched(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/user-test-sched", "user-test-sched");
+}
+
+fn build_user_app(root: &Path, app_dir: &str, bin_name: &str) {
     let target = "riscv64gc-unknown-linux-musl";
     util::run(
-        &root.join("user-apps/user-test-sched"),
+        &root.join(app_dir),
         "cargo",
         &["build", "--target", target, "--release"],
     );
-
     let build_dir = root.join("build");
     fs::create_dir_all(&build_dir).unwrap();
-
     let src = root
         .join("target")
         .join(target)
         .join("release")
-        .join("user-test-sched");
-    let dst = build_dir.join("user-test-sched");
+        .join(bin_name);
+    let dst = build_dir.join(bin_name);
     fs::copy(&src, &dst).unwrap();
-    eprintln!("user-test-sched → {}", dst.display());
+    eprintln!("{bin_name} → {}", dst.display());
 }
 
 pub fn qemu(root: &Path, _cfg: &Config) {
@@ -271,7 +260,10 @@ fn generate_axconfig(root: &Path, cfg: &Config) -> PathBuf {
         .expect("invalid STARRYOSBASE");
     let phys_virt_offset: u64 = 0xffff_ffc0_0000_0000;
     let kernel_base_vaddr = phys_virt_offset + starryos_base;
-    vars.insert("KERNEL_BASE_VADDR".into(), format!("0x{kernel_base_vaddr:x}"));
+    vars.insert(
+        "KERNEL_BASE_VADDR".into(),
+        format!("0x{kernel_base_vaddr:x}"),
+    );
 
     let rendered = substitute(&template, &vars);
     std::fs::write(&output_path, &rendered)
