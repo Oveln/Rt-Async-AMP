@@ -36,7 +36,7 @@ async fn task_ipc() {
     }
 }
 
-#[executor::main]
+#[executor::main(info)]
 fn main(spawner: Pin<&'static Spawner<4>>) {
     ChipImpl::put_str("rt-async-amp: rt-async started\n");
     log::info!("rt-async-amp: hart 1 (rt-async) started");

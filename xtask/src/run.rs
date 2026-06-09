@@ -4,14 +4,16 @@ use std::process::{Command, Stdio};
 
 use xtask::config::Config;
 
-const TMUX_SESSION: &str = "rt-async-amp";
+use crate::build::RtAsyncBin;
 
-pub fn run(root: &Path, cfg: &Config) {
+const TMUX_SESSION: &str = "rt-async-amp";
+const UART_SOCK: &str = "/tmp/rt-async-uart.sock";
+
+pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let build = root.join("build");
     let opensbi_fw = build.join("fw_dynamic.bin");
-    let app_bin = build.join("rt-async.bin");
+    let app_bin = build.join(bin.out);
     let starryos_bin = build.join("starryos.bin");
-    let uart_log = build.join("rt-async-uart.log");
     let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
     let rootfs = root.join("StarryOS/rootfs-riscv64.img");
 
@@ -19,7 +21,11 @@ pub fn run(root: &Path, cfg: &Config) {
         opensbi_fw.exists(),
         "Run 'cargo xtask build opensbi' first."
     );
-    assert!(app_bin.exists(), "Run 'cargo xtask build rt-async' first.");
+    assert!(
+        app_bin.exists(),
+        "Run 'cargo xtask build {}' first.",
+        bin.name
+    );
     if !starryos_bin.exists() {
         eprintln!("Warning: no StarryOS binary.");
     }
@@ -28,9 +34,15 @@ pub fn run(root: &Path, cfg: &Config) {
     let smp = cfg.get("QEMUSMP");
     let ram = cfg.get("QEMURAM");
 
-    eprintln!("Starting QEMU ({smp} cores, {ram} RAM)...");
+    let _ = std::fs::remove_file(UART_SOCK);
+
+    eprintln!("Starting QEMU ({smp} cores, {ram} RAM) [bin={}]...", bin.name);
     eprintln!("  UART0 → stdio (OpenSBI/StarryOS)");
-    eprintln!("  UART1 → {} (rt-async)", uart_log.display());
+    eprintln!(
+        "  UART1 → unix socket {} (rt-async, bidirectional)",
+        UART_SOCK
+    );
+    eprintln!("  Connect with: socat - UNIX-CONNECT:{}", UART_SOCK);
 
     let st = Command::new(&qemu_bin)
         .args([
@@ -40,8 +52,10 @@ pub fn run(root: &Path, cfg: &Config) {
             "none",
             "-serial",
             "mon:stdio",
+            "-chardev",
+            &format!("socket,id=uart1,path={UART_SOCK},server=on,wait=off"),
             "-serial",
-            &format!("file:{}", uart_log.display()),
+            "chardev:uart1",
             "-smp",
             smp,
             "-m",
@@ -65,7 +79,7 @@ pub fn run(root: &Path, cfg: &Config) {
     }
 }
 
-pub fn run_tmux(root: &Path, _cfg: &Config) {
+pub fn run_tmux_bin(root: &Path, _cfg: &Config, bin: &RtAsyncBin) {
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", TMUX_SESSION])
         .status();
@@ -74,14 +88,16 @@ pub fn run_tmux(root: &Path, _cfg: &Config) {
 
     let st = Command::new("tmux")
         .args(["new-session", "-d", "-s", TMUX_SESSION, "-c", &root_str])
-        .args(["cargo", "xtask", "run"])
+        .args(["cargo", "xtask", "run", "--bin", bin.name])
         .status()
         .expect("tmux not found. Install with: brew install tmux");
     assert!(st.success(), "tmux new-session failed");
 
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
     let st = Command::new("tmux")
         .args(["split-window", "-h", "-t", TMUX_SESSION, "-c", &root_str])
-        .args(["cargo", "xtask", "log"])
+        .args(["socat", "-", &format!("UNIX-CONNECT:{UART_SOCK}")])
         .status()
         .expect("tmux not found");
     assert!(st.success(), "tmux split-window failed");

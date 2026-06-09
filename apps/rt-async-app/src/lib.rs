@@ -8,3 +8,4 @@
 
 pub mod intercom;
 pub mod ipc_wait;
+pub mod uart_wait;

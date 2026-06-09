@@ -25,6 +25,8 @@ CLINTBASE = "0x2000000"
 # ── Peripherals ─────────────────────────────────────────────────────────────
 UART0BASE = "0x10000000"
 UART1BASE = "0x10002000"
+PLICBASE  = "0x0C000000"
+UART1IRQ  = 12
 
 # ── ioctl (rt_shm device) ──────────────────────────────────────────────────
 RTSHM_IOC_NOTIFY       = "0x735001"

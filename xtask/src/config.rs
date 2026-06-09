@@ -98,8 +98,10 @@ pub fn generate_amp_rs(config: &HashMap<String, String>, out_dir: &Path) {
     for key in keys {
         let value = &config[key];
         let const_name = key.to_uppercase();
-        if let Ok(addr) = u64::from_str_radix(value.trim_start_matches("0x"), 16) {
-            buf.push_str(&format!("pub const {const_name}: usize = 0x{addr:x};\n"));
+        if value.starts_with("0x") || value.starts_with("0X") {
+            if let Ok(addr) = u64::from_str_radix(&value[2..], 16) {
+                buf.push_str(&format!("pub const {const_name}: usize = 0x{addr:x};\n"));
+            }
         } else if let Ok(int) = value.parse::<u64>() {
             buf.push_str(&format!("pub const {const_name}: usize = {int};\n"));
         } else {

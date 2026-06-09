@@ -6,7 +6,27 @@ use xtask::config::{self as amp_config, Config};
 
 use crate::util;
 
-pub fn rt_async(root: &Path, _cfg: &Config) {
+pub struct RtAsyncBin {
+    pub name: &'static str,
+    pub out: &'static str,
+}
+
+pub const RTASYNC_BINS: &[RtAsyncBin] = &[
+    RtAsyncBin { name: "demo", out: "rt-async.bin" },
+    RtAsyncBin { name: "console", out: "rt-async-console.bin" },
+    RtAsyncBin { name: "console_interrupt", out: "rt-async-console-interrupt.bin" },
+];
+
+pub fn find_rt_async_bin(name: &str) -> Option<&'static RtAsyncBin> {
+    RTASYNC_BINS.iter().find(|b| b.name == name)
+}
+
+pub fn build_rt_async(root: &Path, _cfg: &Config, bin: &RtAsyncBin) {
+    rt_async_bin(root, bin.name, bin.out);
+    eprintln!("rt-async ({}) → build/{}", bin.name, bin.out);
+}
+
+fn rt_async_bin(root: &Path, bin_name: &str, out_name: &str) {
     let target = "riscv64imac-unknown-none-elf";
     util::run(
         &root.join("apps/rt-async-app"),
@@ -18,6 +38,8 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
             "--release",
             "-p",
             "rt-async-app",
+            "--bin",
+            bin_name,
         ],
     );
 
@@ -28,8 +50,8 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
         .join("target")
         .join(target)
         .join("release")
-        .join("demo");
-    let bin = build_dir.join("rt-async.bin");
+        .join(bin_name);
+    let bin = build_dir.join(out_name);
     util::run(
         root,
         "riscv64-elf-objcopy",
@@ -40,7 +62,6 @@ pub fn rt_async(root: &Path, _cfg: &Config) {
             &bin.to_string_lossy(),
         ],
     );
-    eprintln!("rt-async → {}", bin.display());
 }
 
 pub fn opensbi(root: &Path, cfg: &Config) {

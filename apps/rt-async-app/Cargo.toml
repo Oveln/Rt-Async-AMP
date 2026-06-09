@@ -16,6 +16,7 @@ postcard = { workspace = true }
 fugit = "0.4"
 log = { version = "0.4", default-features = false }
 portable-atomic = { version = "1", default-features = false }
+heapless = "0.9"
 
 [build-dependencies]
 xtask = { path = "../../xtask" }
@@ -26,6 +27,9 @@ riscv64 = ["platform/riscv64"]
 
 [[bin]]
 name = "demo"
+
+[[bin]]
+name = "console"
 
 [profile.dev]
 panic = "abort"

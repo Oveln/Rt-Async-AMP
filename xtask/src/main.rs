@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use clap::{ArgGroup, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 
 mod build;
@@ -36,12 +36,14 @@ enum Cmd {
     #[command(about = "Build one or all targets")]
     Build {
         #[arg(default_value = "all", help = "Target to build", value_name = "TARGET")]
-        target: BuildTarget,
+        target: String,
     },
     #[command(about = "Launch QEMU with dual-core AMP image")]
     Run {
-        #[arg(long, help = "Run inside a tmux split (left: QEMU, right: UART1 log)")]
+        #[arg(long, help = "Run inside a tmux split (left: QEMU, right: UART1)")]
         tmux: bool,
+        #[arg(long, default_value = "demo", help = "rt-async binary to load")]
+        bin: String,
     },
     #[command(about = "Tail the rt-async UART1 log with colored prefix")]
     Log,
@@ -75,20 +77,6 @@ enum Cmd {
     },
 }
 
-#[derive(Clone, ValueEnum)]
-enum BuildTarget {
-    All,
-    RtAsync,
-    Opensbi,
-    Starryos,
-    #[value(name = "user-test-ipc")]
-    UserTest,
-    #[value(name = "user-test-rpc")]
-    UserTestRpc,
-    #[value(name = "user-test-sched")]
-    UserTestSched,
-}
-
 fn main() {
     let cli = Cli::parse();
     let root = project_root();
@@ -96,28 +84,51 @@ fn main() {
 
     match cli.cmd {
         Cmd::Setup => setup::run(&root, &cfg),
-        Cmd::Build { target } => match target {
-            BuildTarget::All => {
-                build::rt_async(&root, &cfg);
-                build::opensbi(&root, &cfg);
-                build::starryos(&root, &cfg);
-                build::user_test(&root, &cfg);
-                build::user_test_rpc(&root, &cfg);
-                build::user_test_sched(&root, &cfg);
-                eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
+        Cmd::Build { target } => {
+            match target.as_str() {
+                "all" => {
+                    build::opensbi(&root, &cfg);
+                    build::starryos(&root, &cfg);
+                    for bin in build::RTASYNC_BINS {
+                        build::build_rt_async(&root, &cfg, bin);
+                    }
+                    build::user_test(&root, &cfg);
+                    build::user_test_rpc(&root, &cfg);
+                    build::user_test_sched(&root, &cfg);
+                    eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
+                }
+                "opensbi" => build::opensbi(&root, &cfg),
+                "starryos" => build::starryos(&root, &cfg),
+                "user-test-ipc" => build::user_test(&root, &cfg),
+                "user-test-rpc" => build::user_test_rpc(&root, &cfg),
+                "user-test-sched" => build::user_test_sched(&root, &cfg),
+                name => {
+                    let bin = build::find_rt_async_bin(name).unwrap_or_else(|| {
+                        eprintln!("unknown target: {name}");
+                        eprintln!("\nrt-async bins:");
+                        for b in build::RTASYNC_BINS {
+                            eprintln!("  {}", b.name);
+                        }
+                        eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-rpc, user-test-sched");
+                        std::process::exit(1);
+                    });
+                    build::build_rt_async(&root, &cfg, bin);
+                }
             }
-            BuildTarget::RtAsync => build::rt_async(&root, &cfg),
-            BuildTarget::Opensbi => build::opensbi(&root, &cfg),
-            BuildTarget::Starryos => build::starryos(&root, &cfg),
-            BuildTarget::UserTest => build::user_test(&root, &cfg),
-            BuildTarget::UserTestRpc => build::user_test_rpc(&root, &cfg),
-            BuildTarget::UserTestSched => build::user_test_sched(&root, &cfg),
-        },
-        Cmd::Run { tmux } => {
+        }
+        Cmd::Run { tmux, bin } => {
+            let bin_def = build::find_rt_async_bin(&bin).unwrap_or_else(|| {
+                eprintln!("unknown rt-async bin: {bin}");
+                eprintln!("\navailable bins:");
+                for b in build::RTASYNC_BINS {
+                    eprintln!("  {}", b.name);
+                }
+                std::process::exit(1);
+            });
             if tmux {
-                run::run_tmux(&root, &cfg);
+                run::run_tmux_bin(&root, &cfg, bin_def);
             } else {
-                run::run(&root, &cfg);
+                run::run_bin(&root, &cfg, bin_def);
             }
         }
         Cmd::Log => run::log(&root),
