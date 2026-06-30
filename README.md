@@ -8,6 +8,7 @@
 - **文档网站**：<https://rtos.oveln.icu>　·　**开发周报**：<https://rtos.oveln.icu/周报-Oveln/>
 - **技术报告**：<https://rtos.oveln.icu/技术报告/>　·　**项目计划**：<https://rtos.oveln.icu/项目计划/>
 - **rt-async 内核**：<https://github.com/Oveln/rt-async>　·　**StarryOS**：<https://github.com/Oveln/StarryOS>
+- **演示视频**: <https://wwbcs.lanzoub.com/ider63tqxjcd 密码:bxh3>
 
 ---
 
