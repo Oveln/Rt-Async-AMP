@@ -1,6 +1,6 @@
 # rt-async-amp —— 异构多核实时双内核 AMP 系统
 
-> **全国大学生计算机系统能力大赛 · 操作系统设计赛道（2026）proj53 异步操作系统**
+> **全国大学生计算机系统能力大赛 · OS功能挑战赛道（2026）proj53 异步操作系统**
 > 团队编号：T2026104169910100
 
 在异构多核平台上构建 **StarryOS（通用）+ rt-async（实时）双内核** 系统：通用大核跑 Linux 兼容内核处理 AI 推理与复杂计算，实时小核跑自研 Rust async RTOS 处理电机/传感器等微秒级实时任务，两核通过共享内存 + 核间中断（IPI）低延迟协作，互不干扰。
@@ -353,18 +353,35 @@ rt-async-amp/
 
 ### 前置依赖
 
-- `rustup target add riscv64imac-unknown-none-elf`
+- **Rust 工具链**：`rustup`（安装见 [rustup.rs](https://rustup.rs)）+ `rustup target add riscv64imac-unknown-none-elf`
 - `riscv64-elf-gcc`（Homebrew：`brew install riscv64-elf-gcc`）
-- `riscv64-linux-musl-objcopy`（StarryOS 用，见下注）
+- **Musl 工具链**：交叉编译 `user-apps` 所需（StarryOS 用），安装见下方
 - Ninja / Meson（构建定制 QEMU：`brew install ninja meson`）、Python 3
+
+#### 安装 Musl 工具链
+
+参照 [StarryOS](https://github.com/Starry-OS/StarryOS) 的做法，使用预编译包（而非手动 `musl cross-make`）：
+
+1. 从 [setup-musl releases](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 下载 `riscv64-linux-musl-cross`；
+2. 解压到某路径，例如 `/opt/riscv64-linux-musl-cross`；
+3. 将 `bin` 目录加入 `PATH`，例如：
+
+   ```bash
+   export PATH=/opt/riscv64-linux-musl-cross/bin:$PATH
+   ```
+
+安装后即可获得 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等工具。
 
 ### 一键构建运行
 
 ```bash
 git submodule update --init --recursive   # 1. 初始化子模块
 cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU
-cargo xtask build                          # 3. 构建全部组件（等同 build all）
-cargo xtask run                            # 4. 启动双核 AMP（可选 --tmux 同时观察 UART1）
+cargo xtask qemu                           # 3. 构建运行环境qemu
+cargo xtask build                          # 4. 构建全部组件（等同 build all）
+cd StarryOS && make rootfs && cd ..       # 5. 下载并准备 StarryOS rootfs 镜像
+cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS rootfs
+cargo xtask run                            # 7. 启动双核 AMP（可选 --tmux 同时观察 UART1）
 ```
 
 ### 常用子命令
@@ -382,5 +399,5 @@ cargo xtask completions fish # 生成 shell 补全脚本（bash/zsh/fish/...）
 
 ### 说明
 
-- `riscv64-linux-musl-objcopy`：通过 musl cross-make 安装；
+- Musl 工具链（提供 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等）：从 [setup-musl](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 预编译包安装，详见上方「安装 Musl 工具链」；
 - `amp.toml` 是所有地址常量的单一真相源，xtask 读取它驱动地址/layout 生成与 patch 模板渲染。
