@@ -56,28 +56,26 @@
 1. **TimerChip 用 stub（方案 A）**：minimal 无定时器任务，rtimer 寄存器映射留给后续。stub 的 `enable_timer_irq()` 为空操作，不产生中断。
 2. **platform 提供两个 init 钩子**，合进 `platform::init()`：
    - **arch 钩子**：在 `riscv64-rt`（arch）定义 `pub fn arch_init()`，platform 内 `arch::arch_init()` 直接调用（platform 已 `pub use riscv64_rt as arch`，依赖方向 platform→arch，**无环**）。
-   - **chip 钩子**：用 **`.weak` 弱符号机制**（而非 `extern_trait`、也不走 link.x `PROVIDE` 别名）。符号名 `_board_init`：arch crate 用 `global_asm!` 的 `.weak _board_init` 定义一个**原生弱符号**（空函数体）；chip crate 用 `#[unsafe(no_mangle)] pub extern "C" fn _board_init()` 提供强定义覆盖。理由见下"为什么不用 extern_trait / PROVIDE"。**K3 的握手+时钟+pinmux+UUE 全部放这里**。
+   - **chip 钩子**：用 **link.x `PROVIDE` 弱别名机制**（详见下文）。arch crate 提供命名默认符号 `_default_board_init`（空），link.x `PROVIDE(_board_init = _default_board_init)` 给出默认；chip crate 用 `#[unsafe(no_mangle)] pub extern "C" fn _board_init()` 强定义覆盖。**K3 的握手+时钟+pinmux+UUE 全部放这里**。
 3. **调用时机**：两个钩子都合进 `platform::init()`（已被宏调用，无需 app bin 显式调用，也不改宏）。顺序：logger → `arch::arch_init()` → `_board_init()`。
-4. **构建组织**：新建独立 K3 app crate `apps/rt-async-k3` + chip crate `modules/chip-k3-rt24`，各自 memory.x（基址 `0x100804000`）；与 QEMU app 完全隔离。
+4. **构建组织**：新建独立 K3 app crate `apps/rt-async-k3` + chip crate `modules/chip-k3-rt24`，各自 memory.x（基址 `0x100804000`）；与 QEMU app 完全隔离。app bin 需显式 `#[used] static` 引用 chip crate 的类型（如 `K3Rt24`），否则 rustc 死码消除不会把 chip rlib 拉入链接集 → `extern_trait` 注册与 `_board_init` 强定义丢失。
 5. **目标 triple**：`riscv64imac-unknown-none-elf`（复用 toolchain；RT24 CVA6 实为 RV64GC，但 minimal 无 FPU 代码，imac 可正确运行）。
 
-### 为什么 chip 钩子用 `.weak` 弱符号而非 extern_trait
+### 为什么 chip 钩子用 link.x PROVIDE 弱别名（而非 extern_trait / 原生 .weak）
 
-`extern_trait`（0.4.3）的派发是**强符号**：proxy 方法经 `#[link_name]` extern 引用实现侧的 `#[export_name]` 符号（见 `extern-trait-impl/src/decl/mod.rs:74-78` 的 `emit_method`）。这意味着**只要 platform 调了 `BoardInitImpl::board_init()`，最终链接的每个二进制都必须注册一个实现，否则链接报"undefined symbol"**。但本项目里：
-- QEMU app（`rt-async-app`）只注册 `Chip`/`TimerChip`，不注册任何 board init；
-- std-chip（非 riscv64）同理。
+**为何不用 extern_trait**：`extern_trait`（0.4.3）的派发是**强符号**——proxy 方法经 `#[link_name]` extern 引用实现侧的 `#[export_name]` 符号（见 `extern-trait-impl/src/decl/mod.rs:74-78` 的 `emit_method`）。只要 platform 调了 `BoardInitImpl::board_init()`，最终链接的每个二进制都必须注册一个实现，否则报 "undefined symbol"。但 QEMU app / std-chip 都不注册 board init，会链接失败。
 
-它们都会因强符号未定义而链接失败。
+**为何不用原生 `.weak`（设计演进）**：初版设计用 `global_asm!(".weak _board_init")`（arch 原生弱符号）+ chip `#[no_mangle] _board_init` 强覆盖，并经独立 `riscv64-elf-ld` 实测通过。但**实际经 rustc 1.97（nightly-2026-04-25）链接失败**：rustc 的符号合并器拒绝「同名符号既被 `.weak`（asm）又被 `#[no_mangle]`（rust）定义」，报 `_board_init changed binding to STB_GLOBAL`。独立 ld 的行为与 rustc 驱动的链接行为不同——这是设计阶段用裸 ld 验证未覆盖到的盲区。
 
-**弱符号 `.weak` 是唯一不引入依赖环、又不强制所有 bin 注册的机制**（platform 不依赖 chip crate，无法直接调其函数）。实现方式上，`.weak _board_init` 直接在 arch crate 用 `global_asm!` 定义一个**原生弱符号**（比 `PROVIDE(_board_init = _default_board_init)` + 多一个 `_default_board_init` 别名更直接——少一个符号、不动 link.x）。
+**最终采用 link.x PROVIDE 弱别名**（与 link.x 现有的 `PROVIDE(abort = _default_abort)` / 异常处理器完全一致的标准机制）：arch 提供命名默认符号 `_default_board_init`（真实空函数），link.x 用 `PROVIDE(_board_init = _default_board_init)` 给出默认；chip crate 的强 `#[no_mangle] _board_init` 走 **strong-over-PROVIDE** 覆盖。arch crate **不直接定义** `_board_init`（仅 platform 侧 `extern` 引用），故不触发 rustc 的符号绑定校验。
 
-链接行为已实测验证（riscv64-elf-ld）：
-- 链入 chip crate 的强 `#[no_mangle] _board_init` 时 → `nm` 显示 `T _board_init`（强），调用解析到 chip 实现；
-- 不链入时 → `nm` 显示 `W _board_init`（弱），仍链接成功，调用解析到 arch 的空实现。
+实测（rustc 1.97 真实产物，`riscv64-elf-nm`）：
+- K3 minimal（链入 chip crate 强定义）→ `_board_init` = `T`（强），解析到 chip 的 `clock::early_init`+`uart::init`；entry = `0x100804000` ✅
+- QEMU demo（无 chip 覆盖）→ `_board_init` = `T` 且与 `_default_board_init` 同地址（回退 PROVIDE 默认空实现），行为不变 ✅
 
 arch 钩子因 platform→arch 是真实依赖，直接 `arch::arch_init()` 调用即可，连弱符号都不需要。
 
-> 一句话：arch 钩子 = 直接函数调用（有真实依赖）；chip 钩子 = `.weak` 原生弱符号（platform 不依赖 chip crate；arch 提供弱空定义，chip 提供强覆盖）。
+> 一句话：arch 钩子 = 直接函数调用（有真实依赖）；chip 钩子 = link.x PROVIDE 弱别名（platform 不依赖 chip crate；arch 提供 `_default_board_init` 空实现，chip 提供强覆盖）。
 
 ---
 
@@ -91,7 +89,8 @@ rt-async-amp/                              (根 workspace)
 ├── amp.toml                               【改】加 K3 地址段常量
 ├── rt-async/modules/platform/
 │   ├── src/lib.rs                         【改】init() 内调两钩子（extern _board_init + arch::arch_init）
-│   └── archs/riscv64-rt/src/lib.rs        【改】加 pub fn arch_init() + .weak _board_init 空定义
+│   └── archs/riscv64-rt/src/lib.rs        【改】加 pub fn arch_init() + _default_board_init 空实现
+│   └── archs/riscv64-rt/link.x            【改】加 PROVIDE(_board_init = _default_board_init)
 ├── modules/chip-k3-rt24/                  【新建】K3 芯片实现 crate
 │   ├── Cargo.toml
 │   ├── build.rs                           生成 memory.x + amp_gen.rs
@@ -111,8 +110,8 @@ rt-async-amp/                              (根 workspace)
 **`rt-async/modules/platform/src/lib.rs`** — 在 `init()` 内调两个钩子：
 
 ```rust
-extern "C" {
-    fn _board_init();   // 弱符号：arch 提供 .weak 空定义，chip crate 可用强 #[no_mangle] 覆盖
+unsafe extern "C" {
+    fn _board_init();   // link.x PROVIDE 默认指向 _default_board_init（空）；chip crate 强 #[no_mangle] 覆盖
 }
 
 pub fn init(max_level: log::LevelFilter) {
@@ -122,32 +121,35 @@ pub fn init(max_level: log::LevelFilter) {
     arch::arch_init();          // arch 钩子：直接函数调用（platform→arch 真实依赖）
 
     #[cfg(feature = "riscv64")]
-    unsafe { _board_init(); }   // chip 钩子：弱符号，K3 在此做 握手+时钟+pinmux+UUE；其他平台为空
+    unsafe { _board_init(); }   // chip 钩子：PROVIDE 默认空 / chip 强覆盖，K3 在此做 握手+时钟+pinmux+UUE
 }
 ```
 
-> `#[cfg(feature="riscv64")]` 守卫使 std-chip（非 riscv64）路径完全不受影响。
+> `#[cfg(feature="riscv64")]` 守卫使 std-chip（非 riscv64）路径完全不受影响。`unsafe extern`（edition 2024）。
 
-**`rt-async/modules/platform/archs/riscv64-rt/src/lib.rs`** — 新增 arch 钩子 + chip 弱符号空定义：
+**`rt-async/modules/platform/archs/riscv64-rt/src/lib.rs`** — arch 钩子 + 默认 board init 实现：
 
 ```rust
 /// arch 级早期初始化钩子。默认空实现；arch crate 可按需扩展。
 /// （mtvec 已在 __start_rust 中设置，故此处不重复。）
 pub fn arch_init() {}
 
-// chip 板级初始化钩子：原生弱符号（空函数体）。
-// platform 不依赖任何 chip crate，故无法直接调用其函数；改用弱符号，
-// chip crate（如 chip-k3-rt24）用 #[no_mangle] extern "C" fn _board_init() 强定义覆盖。
-// 不覆盖时（QEMU/std-chip）调用落到此空实现，无副作用。
-core::arch::global_asm!(
-    ".section .text",
-    ".weak _board_init",
-    "_board_init:",
-    "ret",
-);
+/// chip 板级初始化钩子的默认（空）实现。
+/// link.x 用 `PROVIDE(_board_init = _default_board_init)` 暴露；
+/// chip crate（如 chip-k3-rt24）用 `#[no_mangle] extern "C" fn _board_init()` 强定义覆盖。
+/// 不覆盖时（QEMU/std-chip）`_board_init` 解析到此空实现，无副作用。
+#[no_mangle]
+pub extern "C" fn _default_board_init() {}
 ```
 
-> 不改 link.x、不引入 `_default_board_init` 别名：`.weak _board_init` 直接定义原生弱符号，少一个符号、机制最直接。链接行为见 §2 实测。arch 钩子用直接函数调用（有真实依赖）；chip 钩子用弱符号（platform 不依赖 chip crate，弱符号是唯一不引入环且不强制所有 bin 注册的机制）。二者风格不同是有意为之，对应各自的依赖拓扑。
+**`rt-async/modules/platform/archs/riscv64-rt/link.x`** — PROVIDE 弱别名（仿现有 `PROVIDE(abort = _default_abort)`）：
+
+```ld
+EXTERN(_default_board_init);
+PROVIDE(_board_init = _default_board_init);
+```
+
+> 这是与现有 `abort`/异常处理器一致的标准机制（strong-over-PROVIDE）。曾尝试用 `global_asm!(".weak _board_init")` 原生弱符号，但 rustc 1.97 符号合并器拒绝 `.weak`+`#[no_mangle]` 同名定义（"changed binding to STB_GLOBAL"），见 §2 演进说明。arch 钩子用直接函数调用（有真实依赖）；chip 钩子用 PROVIDE 弱别名（platform 不依赖 chip crate，无法直接调其函数）。
 
 ### 3.3 chip-k3-rt24（核心移植）
 
@@ -327,8 +329,9 @@ SPL 加载 ELF@0x100804000 → k3_rproc 解复位 → 跳 entry
 
 | 风险 | 缓解 |
 |------|------|
-| extern_trait 强符号导致 QEMU/std-chip 链接失败 | **已在设计层规避**：chip 钩子不用 extern_trait，改用 `.weak` 原生弱符号，未覆盖时为 arch 的空实现。QEMU/std-chip 不受影响（已验证 extern_trait-impl 0.4.3 派发是强符号 `#[link_name]`/`#[export_name]`，故弃用该方案）。 |
-| 钩子改动破坏 QEMU/std-chip 路径 | 所有钩子调用均 `#[cfg(feature="riscv64")]` 守卫；std-chip 不开 riscv64 feature。`.weak _board_init` 默认空函数体保证不覆盖时无副作用。 |
-| 弱符号 `_board_init` 被 chip 强定义覆盖时符号冲突 | `.weak` 为弱定义、`#[no_mangle] extern "C" fn` 为强定义，链接器选强定义，无冲突。**已用 riscv64-elf-ld 实测**：链入强定义时 `nm` 显示 `T`（强）并解析到 chip 实现；不链入时显示 `W`（弱）仍链接成功。实现阶段再在真实产物上用 `nm` 复核。 |
+| extern_trait 强符号导致 QEMU/std-chip 链接失败 | **已规避**：chip 钩子不用 extern_trait，改用 link.x PROVIDE 弱别名，未覆盖时回退 arch 空实现。QEMU/std-chip 不受影响（已回归验证 demo 仍构建）。 |
+| 钩子改动破坏 QEMU/std-chip 路径 | 所有钩子调用均 `#[cfg(feature="riscv64")]` 守卫；std-chip 不开 riscv64 feature。`_default_board_init` 空实现保证不覆盖时无副作用。 |
+| rustc 1.97 拒绝 `.weak`+`#[no_mangle]` 同名定义 | **实现中发现并修复**：原设计用 `global_asm!(".weak _board_init")`（仅经独立 `riscv64-elf-ld` 验证），但 rustc 1.97-nightly 符号合并器报 `_board_init changed binding to STB_GLOBAL`。改用 link.x `PROVIDE(_board_init = _default_board_init)` + 命名默认符号（与现有 `abort`/异常处理器一致）。**实测（rustc 真实产物）**：K3 minimal `_board_init`=`T`（强，chip 覆盖）+ entry=`0x100804000`；QEMU demo `_board_init`=`T` 同址于 `_default_board_init`（PROVIDE 默认）。教训：链接机制须在目标工具链（rustc 驱动）上验证，不能只靠裸 ld。 |
+| chip crate 被 rustc 死码消除 | app bin 不直接引用 chip crate 符号时，rlib 不进链接集 → extern_trait 注册与 `_board_init` 强定义丢失。**已规避**：app bin 加 `#[used] static _FORCE_LINK_CHIP_K3_RT24: K3Rt24 = K3Rt24;` 锚点（与 `rt-async-app` 引用 `chip_qemu_virt_rt::SHMBASE` 同理）。 |
 | RT24 实际 RV64GC，imac triple 缺 FPU 指令 | minimal 无 FPU 代码；release `opt-level="s"` 也不引入硬件浮点。仅当链接器报 float ABI 相关错误才切 gc。 |
 | 握手在 `platform::init()` 内，rt-async 启动栈在 init 前已跑（清 bss/设 mtvec） | 这些是纯寄存器/内存操作，无 K3 无效 MMIO 访问；6s 握手超时足够覆盖 rt-async 冷启动。已在 §1.2 分析。 |
