@@ -6,6 +6,7 @@
 //! 初始化序列移植自 esos 的 `os1_rcpu/baremetal/main.c`（已验证）。
 
 #![no_std]
+#![allow(unreachable_code)]
 
 pub mod clock;
 pub mod uart;
