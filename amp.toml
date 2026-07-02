@@ -41,6 +41,10 @@ SBI_FUNC_SEND_IPI = "0x00"
 QEMUSMP = 2
 QEMURAM = "256M"
 
+# ── K3 RT24 rcpu1 ───────────────────────────────────────────────────────────
+RT24RCPU1BASE = "0x100804000"
+RT24RCPU1SIZE = "0x300000"     # 3M，与 esos baremetal.ld 一致
+
 # ── Upstream repos ──────────────────────────────────────────────────────────
 
 [opensbi]
