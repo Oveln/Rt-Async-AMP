@@ -5,7 +5,6 @@
 
 #![no_std]
 #![no_main]
-#![feature(impl_trait_in_assoc_type)]
 
 // ── 强制链接 chip crate ──────────────────────────────────────────────────
 // chip-k3-rt24 的对外符号有两类，均以 `export_name`/`#[unsafe(no_mangle)]`
@@ -22,7 +21,6 @@ static _FORCE_LINK_CHIP_K3_RT24: K3Rt24 = K3Rt24;
 
 use core::pin::Pin;
 
-use executor::priority::Priority;
 use executor::spawner::Spawner;
 use platform::{Chip, ChipImpl};
 
