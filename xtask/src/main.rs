@@ -90,7 +90,7 @@ fn main() {
                     build::opensbi(&root, &cfg);
                     build::starryos(&root, &cfg);
                     for bin in build::RTASYNC_BINS {
-                        build::build_rt_async(&root, &cfg, bin);
+                        build::build_rt_async(&root, bin);
                     }
                     build::user_test(&root, &cfg);
                     build::user_test_rpc(&root, &cfg);
@@ -102,25 +102,42 @@ fn main() {
                 "user-test-ipc" => build::user_test(&root, &cfg),
                 "user-test-rpc" => build::user_test_rpc(&root, &cfg),
                 "user-test-sched" => build::user_test_sched(&root, &cfg),
+                // 平台聚合：构建该平台所有 rt-async bin
+                "qemu" => {
+                    for bin in build::RTASYNC_BINS
+                        .iter()
+                        .filter(|b| b.platform == "qemu")
+                    {
+                        build::build_rt_async(&root, bin);
+                    }
+                }
+                "k3" => {
+                    for bin in build::RTASYNC_BINS.iter().filter(|b| b.platform == "k3") {
+                        build::build_rt_async(&root, bin);
+                    }
+                }
+                // 单个 rt-async bin：按 target_name（带平台前缀，如 qemu-demo/k3-minimal）
                 name => {
-                    let bin = build::find_rt_async_bin(name).unwrap_or_else(|| {
+                    let bin = build::find_by_target(name).unwrap_or_else(|| {
                         eprintln!("unknown target: {name}");
-                        eprintln!("\nrt-async bins:");
+                        eprintln!("\nrt-async bins (target name):");
                         for b in build::RTASYNC_BINS {
-                            eprintln!("  {}", b.name);
+                            eprintln!("  {}", b.target_name);
                         }
+                        eprintln!("\nplatform aggregates: qemu, k3");
                         eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-rpc, user-test-sched");
                         std::process::exit(1);
                     });
-                    build::build_rt_async(&root, &cfg, bin);
+                    build::build_rt_async(&root, bin);
                 }
             }
         }
         Cmd::Run { tmux, bin } => {
-            let bin_def = build::find_rt_async_bin(&bin).unwrap_or_else(|| {
+            // run 仅服务 QEMU；--bin 用 cargo 短名（demo/console/...），不带平台前缀
+            let bin_def = build::find_by_name(&bin).unwrap_or_else(|| {
                 eprintln!("unknown rt-async bin: {bin}");
-                eprintln!("\navailable bins:");
-                for b in build::RTASYNC_BINS {
+                eprintln!("\navailable bins (run uses short name):");
+                for b in build::RTASYNC_BINS.iter().filter(|b| b.platform == "qemu") {
                     eprintln!("  {}", b.name);
                 }
                 std::process::exit(1);

@@ -369,9 +369,13 @@ cargo xtask run                            # 4. 启动双核 AMP（可选 --tmux
 ### 常用子命令
 
 ```bash
-cargo xtask build <target>   # 构建单个目标：opensbi / starryos /
-                             #   user-test-ipc / user-test-rpc / user-test-sched / <rt-async bin>
-cargo xtask run --bin demo   # 指定 rt-async bin 启动（默认 demo）
+# 构建单个目标：组件（opensbi / starryos / user-test-*）或 rt-async bin
+cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名：
+                             #     qemu-demo / qemu-console / qemu-console-interrupt → flat bin（QEMU loader）
+                             #     k3-minimal → ELF（esos 脚本整合进 itb）
+cargo xtask build qemu       # 构建全部 QEMU rt-async bin
+cargo xtask build k3         # 构建全部 K3 rt-async bin
+cargo xtask run --bin demo   # 指定 rt-async bin 启动（默认 demo；run 用短名）
 cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志
 cargo xtask install --all    # 将 user-apps 安装进 StarryOS rootfs
 cargo xtask qemu             # 从源码构建带 UART1 的定制 QEMU

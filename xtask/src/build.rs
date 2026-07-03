@@ -6,40 +6,105 @@ use xtask::config::{self as amp_config, Config};
 
 use crate::util;
 
-pub struct RtAsyncBin {
-    pub name: &'static str,
-    pub out: &'static str,
+/// 产物类型：`Bin` = objcopy 成 flat binary（供 QEMU loader 加载）；
+/// `Elf` = 直接复制 ELF（如 K3，由 esos 脚本整合进 itb）。
+pub enum Artifact {
+    Bin,
+    Elf,
 }
 
+/// 一个 rt-async 应用 bin 的完整自描述。
+///
+/// 命名约定：`build` 用 `target_name`（带 `<platform>-` 前缀，如 `qemu-demo`/`k3-minimal`）；
+/// `run --bin` 用 `name`（短名，如 `demo`，因 run 仅服务 QEMU）。
+pub struct RtAsyncBin {
+    /// cargo `--bin` 名（源码里的 bin 名，如 "demo"、"minimal"）。
+    pub name: &'static str,
+    /// xtask `build` 的 target 名（带平台前缀，如 "qemu-demo"、"k3-minimal"）。
+    pub target_name: &'static str,
+    /// 平台："qemu" / "k3"。用于 `build qemu` / `build k3` 聚合。
+    pub platform: &'static str,
+    /// `build/` 下产物文件名（如 "rt-async.bin"、"rt-async-k3-minimal.elf"）。
+    pub out: &'static str,
+    /// app crate 目录（如 "apps/rt-async-app"、"apps/rt-async-k3"）。
+    pub app_dir: &'static str,
+    /// cargo `-p` 包名（如 "rt-async-app"、"rt-async-k3"）。
+    pub package: &'static str,
+    /// 目标 triple（均为 "riscv64imac-unknown-none-elf"）。
+    pub target: &'static str,
+    /// 产物类型。
+    pub artifact: Artifact,
+}
+
+/// 所有 rt-async bin 的统一注册表（QEMU + K3）。
+/// 加新 bin 只需在此追加一行，自动获得 `build <target_name>` 与纳入 `build <platform>`。
 pub const RTASYNC_BINS: &[RtAsyncBin] = &[
-    RtAsyncBin { name: "demo", out: "rt-async.bin" },
-    RtAsyncBin { name: "console", out: "rt-async-console.bin" },
-    RtAsyncBin { name: "console_interrupt", out: "rt-async-console-interrupt.bin" },
+    RtAsyncBin {
+        name: "demo",
+        target_name: "qemu-demo",
+        platform: "qemu",
+        out: "rt-async.bin",
+        app_dir: "apps/rt-async-app",
+        package: "rt-async-app",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Bin,
+    },
+    RtAsyncBin {
+        name: "console",
+        target_name: "qemu-console",
+        platform: "qemu",
+        out: "rt-async-console.bin",
+        app_dir: "apps/rt-async-app",
+        package: "rt-async-app",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Bin,
+    },
+    RtAsyncBin {
+        name: "console_interrupt",
+        target_name: "qemu-console-interrupt",
+        platform: "qemu",
+        out: "rt-async-console-interrupt.bin",
+        app_dir: "apps/rt-async-app",
+        package: "rt-async-app",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Bin,
+    },
+    RtAsyncBin {
+        name: "minimal",
+        target_name: "k3-minimal",
+        platform: "k3",
+        out: "rt-async-k3-minimal.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Elf,
+    },
 ];
 
-pub fn find_rt_async_bin(name: &str) -> Option<&'static RtAsyncBin> {
+/// 按 xtask build target 名查找（带平台前缀，如 "qemu-demo"）。
+pub fn find_by_target(target_name: &str) -> Option<&'static RtAsyncBin> {
+    RTASYNC_BINS.iter().find(|b| b.target_name == target_name)
+}
+
+/// 按 cargo bin 短名查找（如 "demo"）。`run --bin` 用此（run 仅服务 QEMU）。
+pub fn find_by_name(name: &str) -> Option<&'static RtAsyncBin> {
     RTASYNC_BINS.iter().find(|b| b.name == name)
 }
 
-pub fn build_rt_async(root: &Path, _cfg: &Config, bin: &RtAsyncBin) {
-    rt_async_bin(root, bin.name, bin.out);
-    eprintln!("rt-async ({}) → build/{}", bin.name, bin.out);
-}
-
-fn rt_async_bin(root: &Path, bin_name: &str, out_name: &str) {
-    let target = "riscv64imac-unknown-none-elf";
+/// 构建一个 rt-async bin：cargo build 后按 artifact 类型产出。
+pub fn build_rt_async(root: &Path, bin: &RtAsyncBin) {
     util::run(
-        &root.join("apps/rt-async-app"),
+        &root.join(bin.app_dir),
         "cargo",
         &[
             "build",
             "--target",
-            target,
+            bin.target,
             "--release",
             "-p",
-            "rt-async-app",
+            bin.package,
             "--bin",
-            bin_name,
+            bin.name,
         ],
     );
 
@@ -48,20 +113,23 @@ fn rt_async_bin(root: &Path, bin_name: &str, out_name: &str) {
 
     let elf = root
         .join("target")
-        .join(target)
+        .join(bin.target)
         .join("release")
-        .join(bin_name);
-    let bin = build_dir.join(out_name);
-    util::run(
-        root,
-        "riscv64-elf-objcopy",
-        &[
-            "-O",
-            "binary",
-            &elf.to_string_lossy(),
-            &bin.to_string_lossy(),
-        ],
-    );
+        .join(bin.name);
+    let out = build_dir.join(bin.out);
+
+    match bin.artifact {
+        Artifact::Bin => util::run(
+            root,
+            "riscv64-elf-objcopy",
+            &["-O", "binary", &elf.to_string_lossy(), &out.to_string_lossy()],
+        ),
+        Artifact::Elf => {
+            fs::copy(&elf, &out).unwrap();
+        }
+    }
+
+    eprintln!("rt-async ({}) → build/{}", bin.target_name, bin.out);
 }
 
 pub fn opensbi(root: &Path, cfg: &Config) {
