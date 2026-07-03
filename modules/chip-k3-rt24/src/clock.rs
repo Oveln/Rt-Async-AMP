@@ -48,7 +48,7 @@ pub(crate) fn read32(addr: usize) -> u32 {
 
 /// 握手回写 + 上游 ruart_14 gate + UART0 末端 gate + pinmux（步骤 1-4）。
 ///
-/// `_board_init()` 第一步调用。握手必须最先（解锁 AP 的 6s 轮询）。
+/// `Chip::board_init()` 第一步。握手必须最先（解锁 AP 的 6s 轮询）。
 pub fn early_init() {
     // 1. SPL 握手回写（最先，解锁 AP）
     write32(RCPU_CORE0_BOOT_ENTRY_LO, 1);

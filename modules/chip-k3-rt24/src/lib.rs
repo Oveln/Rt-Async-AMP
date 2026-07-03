@@ -17,17 +17,13 @@ use platform::{Chip, TimerChip};
 /// K3 RT24 rcpu1 芯片类型（零大小，仅作 trait impl 载体）。
 pub struct K3Rt24;
 
-/// chip 钩子：覆盖 arch 的 `.weak _board_init` 弱符号。
-/// K3 全部硬件初始化在此：握手+时钟链+pinmux（步骤1-4）+ 波特率/UUE（步骤5-6）。
-/// 由 `platform::init()` 经弱符号调用（早于用户 main）。
-#[unsafe(no_mangle)]
-pub extern "C" fn _board_init() {
-    clock::early_init(); // 步骤 1-4（含握手回写，最先 → 解锁 AP）
-    uart::init(); // 步骤 5-6（波特率/8N1/FCR + UUE⭐）
-}
-
 #[extern_trait]
 impl Chip for K3Rt24 {
+    fn board_init() {
+        clock::early_init(); // 步骤 1-4（握手回写+时钟链+pinmux）
+        uart::init();        // 步骤 5-6（波特率/8N1/FCR+UUE）
+    }
+
     fn shutdown() -> ! {
         loop {}
     }

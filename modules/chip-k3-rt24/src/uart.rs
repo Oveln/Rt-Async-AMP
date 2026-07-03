@@ -41,7 +41,7 @@ fn read32(addr: usize) -> u32 {
 
 /// 配置波特率/FIFO/帧格式 + UUE 单元使能（步骤 5-6）。
 ///
-/// `_board_init()` 第二步调用（在 `clock::early_init()` 之后）。
+/// `Chip::board_init()` 第二步（在 `clock::early_init()` 之后）。
 /// 步骤6（UUE）是 PXA-uart 最易漏的关键位。
 pub fn init() {
     // 5. 波特率：设 DLAB → DLL/DLH → 清 DLAB 设 8N1 → FCR
