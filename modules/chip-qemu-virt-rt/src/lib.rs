@@ -48,6 +48,8 @@ pub struct QemuVirtRt;
 
 #[extern_trait]
 impl Chip for QemuVirtRt {
+    fn board_init() {}
+
     fn shutdown() -> ! {
         unsafe {
             core::ptr::write_volatile(0x100_000 as *mut u32, 0x5555);
