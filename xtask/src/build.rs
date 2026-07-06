@@ -1,8 +1,8 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-use xtask::config::{self as amp_config, Config};
+use xtask::config::Config;
 
 use crate::util;
 
@@ -167,95 +167,134 @@ pub fn opensbi(root: &Path, cfg: &Config) {
 }
 
 pub fn starryos(root: &Path, cfg: &Config) {
-    let dir = root.join("StarryOS");
+    let dir = root.join("tgoskits/os/StarryOS");
     assert!(
         dir.is_dir(),
-        "StarryOS not found. Run 'git submodule update --init StarryOS'."
+        "tgoskits/os/StarryOS not found. Run 'git submodule update --init tgoskits'."
     );
 
-    let target = "riscv64gc-unknown-none-elf";
-    let features = "axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu";
-    let axconfig = dir.join(".axconfig.toml");
+    // Read board-level features from the virt-rt-async config file.
+    let board_config = root.join("tgoskits/os/StarryOS/configs/board/virt-rt-async.toml");
+    let (board_features, plat_dyn): (Vec<String>, bool) = if board_config.exists() {
+        let content = std::fs::read_to_string(&board_config).unwrap_or_default();
+        let v: toml::Value = content.parse().unwrap_or(toml::Value::Table(Default::default()));
+        let features = v
+            .get("features")
+            .and_then(|f| f.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let plat_dyn = v
+            .get("plat_dyn")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        (features, plat_dyn)
+    } else {
+        (vec!["qemu".to_string()], false)
+    };
+    let app_features = board_features.join(" ");
 
-    let plat_config = generate_axconfig(root, cfg);
-    let defconfig = dir.join("make/defconfig.toml");
-    if !axconfig.exists()
-        || fs::metadata(&plat_config).ok().map_or(true, |m| {
-            fs::metadata(&axconfig).ok().map_or(true, |a| {
-                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                    > a.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    // For plat-dyn builds, resolve the PLAT_CONFIG via tg-xtask.
+    let tgoskits_root = root.join("tgoskits");
+    let plat_config: String = if plat_dyn {
+        let output = Command::new("cargo")
+            .args([
+                "run", "--release", "-p", "tg-xtask", "--",
+                "config", "inspect", "--makefile",
+                "--manifest-dir", "os/StarryOS/starryos",
+                "--package", "axplat-dyn",
+            ])
+            .current_dir(&tgoskits_root)
+            .output()
+            .expect("failed to run tg-xtask config inspect");
+        if !output.status.success() {
+            panic!(
+                "tg-xtask config inspect failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout
+            .split_whitespace()
+            .find_map(|pair| {
+                let (k, v) = pair.split_once('=')?;
+                if k == "PLAT_CONFIG" { Some(v.to_string()) } else { None }
             })
-        })
-    {
-        util::run(
-            &dir,
-            "axconfig-gen",
-            &[
-                &defconfig.to_string_lossy(),
-                &plat_config.to_string_lossy(),
-                "-w",
-                "arch=\"riscv64\"",
-                "-w",
-                "platform=\"riscv64-qemu-virt\"",
-                "-o",
-                &axconfig.to_string_lossy(),
-            ],
+            .unwrap_or_else(|| panic!("PLAT_CONFIG not found in tg-xtask output: {}", stdout))
+    } else {
+        String::new()
+    };
+
+    // Read QEMU memory size from amp.toml (must match what QEMU gets at runtime).
+    let qemu_ram = cfg.get("QEMURAM");
+
+    // lwprintf-rs (a starry-kernel hard-dep via kmod/printk) compiles a C
+    // library with the cc crate. Point per-target CC/AR at the musl toolchain.
+    let musl_cross = std::env::var("RISCV64_MUSL_CROSS")
+        .map(std::path::PathBuf::from)
+        .ok()
+        .or_else(|| home::home_dir().map(|h| h.join("bin/riscv64-linux-musl-cross")));
+    let target = "riscv64gc-unknown-none-elf";
+    let cc_key = format!("CC_{target}");
+    let ar_key = format!("AR_{target}");
+    let make_env: Vec<(String, std::ffi::OsString)> = {
+        let mut env: Vec<(String, std::ffi::OsString)> = Vec::new();
+        env.push((
+            "AMP_TOML_PATH".to_string(),
+            root.join("amp.toml").into_os_string(),
+        ));
+        if let Some(ref cross) = musl_cross {
+            let bin = cross.join("bin");
+            let mut path = bin.clone().into_os_string();
+            path.push(":");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            env.push(("PATH".to_string(), path));
+            env.push((cc_key.clone(), bin.join("riscv64-linux-musl-gcc").into_os_string()));
+            env.push((ar_key.clone(), bin.join("riscv64-linux-musl-ar").into_os_string()));
+        }
+        env.push(("APP_FEATURES".to_string(), app_features.clone().into()));
+        env
+    };
+
+    let mut make_args: Vec<String> = vec![
+        "ARCH=riscv64".into(),
+        format!("MEM={qemu_ram}"),
+        "LOG=info".into(),
+        "build".into(),
+    ];
+    if plat_dyn {
+        make_args.push(format!("PLAT_CONFIG={plat_config}"));
+        make_args.push("PLAT_DYN=y".into());
+        eprintln!(
+            "cd {} && APP_FEATURES='{app_features}' make ARCH=riscv64 PLAT_DYN=y PLAT_CONFIG={plat_config} MEM={qemu_ram} LOG=info build",
+            dir.display(),
+        );
+    } else {
+        make_args.push("MYPLAT=ax-plat-riscv64-qemu-virt".into());
+        eprintln!(
+            "cd {} && APP_FEATURES='{app_features}' make ARCH=riscv64 MYPLAT=ax-plat-riscv64-qemu-virt MEM={qemu_ram} LOG=info build",
+            dir.display(),
         );
     }
 
-    let rustflags = format!(
-        "-C link-arg=-Ttarget/{target}/release/linker_riscv64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc"
-    );
-
-    let toolchain = read_toolchain(&dir.join("rust-toolchain.toml"));
-
-    eprintln!(
-        "cd {} && AX_CONFIG_PATH={} RUSTFLAGS='{}' RUSTUP_TOOLCHAIN={toolchain} cargo build -Z unstable-options --target {target} --target-dir target --release --features '{features}'",
-        dir.display(),
-        axconfig.display(),
-        rustflags,
-    );
-
-    let st = Command::new("cargo")
-        .args([
-            "build",
-            "-Z",
-            "unstable-options",
-            "--target",
-            target,
-            "--target-dir",
-            "target",
-            "--release",
-            "--features",
-            features,
-        ])
-        .env("AX_CONFIG_PATH", axconfig.to_string_lossy().to_string())
-        .env("RUSTFLAGS", &rustflags)
-        .env("RUSTUP_TOOLCHAIN", &toolchain)
+    let make_args_ref: Vec<&str> = make_args.iter().map(|s| s.as_str()).collect();
+    let st = Command::new("make")
+        .args(&make_args_ref)
+        .envs(make_env.iter().map(|(k, v)| (k.as_str(), v.clone())))
         .current_dir(&dir)
         .status()
-        .expect("cargo not found");
+        .expect("make not found");
     assert!(st.success(), "StarryOS build failed");
 
     let build_dir = root.join("build");
     fs::create_dir_all(&build_dir).unwrap();
 
-    let elf = dir
-        .join("target")
-        .join(target)
-        .join("release")
-        .join("starryos");
+    // The Makeflow emits starryos_qemu-rt-async.{elf,bin} next to the
+    // starryos crate; copy the flat binary into build/ for the QEMU loader.
+    let bin_src = dir
+        .join("starryos")
+        .join("starryos_qemu-rt-async.bin");
     let bin = build_dir.join("starryos.bin");
-    util::run(
-        root,
-        "riscv64-elf-objcopy",
-        &[
-            "-O",
-            "binary",
-            &elf.to_string_lossy(),
-            &bin.to_string_lossy(),
-        ],
-    );
+    fs::copy(&bin_src, &bin).unwrap();
     eprintln!("StarryOS → {}", bin.display());
 }
 
@@ -318,53 +357,4 @@ pub fn qemu(root: &Path, _cfg: &Config) {
         .unwrap_or_else(|_| "4".into());
     util::run(&build_dir, "make", &["-j", &nproc]);
     eprintln!("QEMU → {}", bin.display());
-}
-
-fn read_toolchain(path: &Path) -> String {
-    let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
-    let doc: toml::Value = content
-        .parse()
-        .unwrap_or_else(|e| panic!("failed to parse {}: {}", path.display(), e));
-    doc.get("toolchain")
-        .and_then(|t| t.get("channel"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("no toolchain.channel found in {}", path.display()))
-        .to_string()
-}
-
-fn generate_axconfig(root: &Path, cfg: &Config) -> PathBuf {
-    let template_path = root.join("modules/axplat-riscv64-qemu-virt/axconfig.toml.in");
-    let output_path = root.join("modules/axplat-riscv64-qemu-virt/axconfig.toml");
-
-    let template = std::fs::read_to_string(&template_path)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", template_path.display(), e));
-
-    let mut vars = cfg.template_vars().clone();
-
-    let qemu_ram = amp_config::parse_size(cfg.get("QEMURAM"));
-    vars.insert("QEMURAM_HEX".into(), format!("0x{qemu_ram:x}"));
-
-    let starryos_base = u64::from_str_radix(cfg.get("STARRYOSBASE").trim_start_matches("0x"), 16)
-        .expect("invalid STARRYOSBASE");
-    let phys_virt_offset: u64 = 0xffff_ffc0_0000_0000;
-    let kernel_base_vaddr = phys_virt_offset + starryos_base;
-    vars.insert(
-        "KERNEL_BASE_VADDR".into(),
-        format!("0x{kernel_base_vaddr:x}"),
-    );
-
-    let rendered = substitute(&template, &vars);
-    std::fs::write(&output_path, &rendered)
-        .unwrap_or_else(|e| panic!("failed to write {}: {}", output_path.display(), e));
-
-    output_path
-}
-
-fn substitute(content: &str, vars: &std::collections::HashMap<String, String>) -> String {
-    let mut out = content.to_string();
-    for (key, value) in vars {
-        out = out.replace(&format!("{{{key}}}"), value);
-    }
-    out
 }

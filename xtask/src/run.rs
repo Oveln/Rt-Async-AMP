@@ -15,7 +15,7 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let app_bin = build.join(bin.out);
     let starryos_bin = build.join("starryos.bin");
     let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
-    let rootfs = root.join("StarryOS/rootfs-riscv64.img");
+    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
 
     assert!(
         opensbi_fw.exists(),
@@ -79,28 +79,69 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     }
 }
 
-pub fn run_tmux_bin(root: &Path, _cfg: &Config, bin: &RtAsyncBin) {
+pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", TMUX_SESSION])
         .status();
 
+    let _ = std::fs::remove_file(UART_SOCK);
+
+    let build = root.join("build");
+    let opensbi_fw = build.join("fw_dynamic.bin");
+    let app_bin = build.join(bin.out);
+    let starryos_bin = build.join("starryos.bin");
+    let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
+    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
+
+    assert!(opensbi_fw.exists(), "Run 'cargo xtask build opensbi' first.");
+    assert!(app_bin.exists(), "Run 'cargo xtask build {}' first.", bin.name);
+    if !starryos_bin.exists() {
+        eprintln!("Warning: no StarryOS binary.");
+    }
+
+    let rtasync_base = cfg.get("RTASYNCBASE");
+    let smp = cfg.get("QEMUSMP");
+    let ram = cfg.get("QEMURAM");
     let root_str = root.to_string_lossy().to_string();
 
+    // Pane 2 (right): socat listens on the Unix socket so it's ready
+    // BEFORE QEMU starts.  QEMU connects as a client, so no data is lost.
     let st = Command::new("tmux")
-        .args(["new-session", "-d", "-s", TMUX_SESSION, "-c", &root_str])
-        .args(["cargo", "xtask", "run", "--bin", bin.name])
+        .args([
+            "new-session", "-d", "-s", TMUX_SESSION, "-c", &root_str,
+            "socat", "-", &format!("UNIX-LISTEN:{UART_SOCK},reuseaddr,fork"),
+        ])
         .status()
         .expect("tmux not found. Install with: brew install tmux");
-    assert!(st.success(), "tmux new-session failed");
+    assert!(st.success(), "tmux new-session (socat) failed");
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    // Pane 1 (left): QEMU with UART1 connecting to socat's socket.
+    let qemu_cmd = format!(
+        "{} -machine virt -display none \
+         -serial mon:stdio \
+         -chardev socket,id=uart1,path={},server=off \
+         -serial chardev:uart1 \
+         -smp {} -m {} \
+         -bios {} -kernel {} \
+         -device loader,addr={},file={} \
+         -drive file={},format=raw,if=none,id=hd0 \
+         -device virtio-blk-pci,drive=hd0 \
+         -nographic",
+        qemu_bin.display(),
+        UART_SOCK, smp, ram,
+        opensbi_fw.display(), starryos_bin.display(),
+        rtasync_base, app_bin.display(),
+        rootfs.display(),
+    );
 
     let st = Command::new("tmux")
-        .args(["split-window", "-h", "-t", TMUX_SESSION, "-c", &root_str])
-        .args(["socat", "-", &format!("UNIX-CONNECT:{UART_SOCK}")])
+        .args([
+            "split-window", "-h", "-t", TMUX_SESSION, "-c", &root_str,
+            "sh", "-c", &qemu_cmd,
+        ])
         .status()
         .expect("tmux not found");
-    assert!(st.success(), "tmux split-window failed");
+    assert!(st.success(), "tmux split-window (QEMU) failed");
 
     let _ = Command::new("tmux")
         .args(["attach", "-t", TMUX_SESSION])
