@@ -34,10 +34,8 @@ APP_BIN      := $(BUILD_DIR)/rt-async.bin
 OPENSBI_DIR  := opensbi
 OPENSBI_FW   := $(BUILD_DIR)/fw_dynamic.bin
 
-STARRYOS_DIR   := StarryOS
+STARRYOS_DIR   := tgoskits/os/StarryOS
 STARRYOS_BIN   := $(BUILD_DIR)/starryos.bin
-STARRYOS_TARGET := riscv64gc-unknown-none-elf
-STARRYOS_FEATURES := axfeat/myplat axfeat/bus-pci axfeat/display axfeat/fs-ng-times starry-kernel/input starry-kernel/vsock starry-kernel/dev-log qemu
 
 QEMU_SRC_DIR := qemu
 QEMU_BUILD   := $(QEMU_SRC_DIR)/build
@@ -110,23 +108,13 @@ $(OPENSBI_FW): $(OPENSBI_DIR)/.patched
 	cp $(OPENSBI_DIR)/build/platform/generic/firmware/fw_dynamic.bin $@
 	@echo "OpenSBI → $@"
 
-# ── Build: StarryOS ─────────────────────────────────────────────────────────
-starryos: $(STARRYOS_BIN)
-
-$(STARRYOS_BIN):
+# ── Build: StarryOS (delegates to xtask build starryos) ─────────────────────
+starryos:
 	@if [ ! -d "$(STARRYOS_DIR)" ]; then \
-		echo "StarryOS not found. Run 'git submodule update --init StarryOS'."; \
+		echo "tgoskits/os/StarryOS not found. Run 'git submodule update --init tgoskits'."; \
 		exit 1; \
 	fi
-	@mkdir -p $(BUILD_DIR)
-	cd $(STARRYOS_DIR) && AX_CONFIG_PATH=$$PWD/.axconfig.toml \
-		RUSTFLAGS='-C link-arg=-Ttarget/$(STARRYOS_TARGET)/release/linker_riscv64-qemu-virt.lds -C link-arg=-no-pie -C link-arg=-znostart-stop-gc' \
-		cargo build -Z unstable-options \
-		--target $(STARRYOS_TARGET) --target-dir target --release \
-		--features '$(STARRYOS_FEATURES)'
-	riscv64-elf-objcopy -O binary \
-		$(STARRYOS_DIR)/target/$(STARRYOS_TARGET)/release/starryos $@
-	@echo "StarryOS → $@"
+	cargo xtask build starryos
 
 # ── Build: userspace programs ────────────────────────────────────────────────
 USER_TEST_TARGET := riscv64gc-unknown-linux-musl

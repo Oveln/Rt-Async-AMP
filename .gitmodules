@@ -1,6 +1,7 @@
 [submodule "rt-async"]
 	path = rt-async
 	url = git@github.com:Oveln/rt-async.git
-[submodule "StarryOS"]
-	path = StarryOS
-	url = git@github.com:Oveln/StarryOS.git
+[submodule "tgoskits"]
+	path = tgoskits
+	url = https://github.com/Oveln/tgoskits.git
+	branch = dev

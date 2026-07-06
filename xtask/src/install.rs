@@ -9,7 +9,7 @@ pub fn run(root: &Path, file: &str, dst: &str) {
     } else {
         root.join(file)
     };
-    let rootfs = root.join("StarryOS/rootfs-riscv64.img");
+    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
 
     assert!(
         file_path.exists(),
