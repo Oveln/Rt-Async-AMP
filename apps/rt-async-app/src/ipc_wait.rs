@@ -30,6 +30,10 @@ pub fn notify_from_isr() {
             let waker = (*INNER.waker.get()).assume_init_read();
             waker.wake();
         }
+        // Signal to the MachineSoft handler that a task is ready to run.
+        // Without this, clear_pend() returns false for external IPIs and
+        // the scheduler never gets to execute the woken task.
+        platform::PEND_MARKER.store(true, Ordering::Release);
     }
 }
 
