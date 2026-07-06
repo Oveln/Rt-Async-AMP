@@ -1,8 +1,16 @@
 diff --git a/hw/riscv/virt.c b/hw/riscv/virt.c
-index 315049bc86..4a0141bc72 100644
+index 315049bc86..7d4ec6e556 100644
 --- a/hw/riscv/virt.c
 +++ b/hw/riscv/virt.c
-@@ -93,6 +93,7 @@ static const MemMapEntry virt_memmap[] = {
+@@ -30,6 +30,7 @@
+ #include "hw/char/serial-mm.h"
+ #include "target/riscv/cpu.h"
+ #include "hw/core/sysbus-fdt.h"
++#include <libfdt.h>
+ #include "target/riscv/pmu.h"
+ #include "hw/riscv/riscv_hart.h"
+ #include "hw/riscv/iommu.h"
+@@ -93,6 +94,7 @@ static const MemMapEntry virt_memmap[] = {
      [VIRT_APLIC_M] =      {  0xc000000, APLIC_SIZE(VIRT_CPUS_MAX) },
      [VIRT_APLIC_S] =      {  0xd000000, APLIC_SIZE(VIRT_CPUS_MAX) },
      [VIRT_UART0] =        { 0x10000000,         0x100 },
@@ -10,7 +18,7 @@ index 315049bc86..4a0141bc72 100644
      [VIRT_VIRTIO] =       { 0x10001000,        0x1000 },
      [VIRT_FW_CFG] =       { 0x10100000,          0x18 },
      [VIRT_FLASH] =        { 0x20000000,     0x4000000 },
-@@ -970,6 +971,24 @@ static void create_fdt_uart(RISCVVirtState *s,
+@@ -970,6 +972,24 @@ static void create_fdt_uart(RISCVVirtState *s,
  
      qemu_fdt_setprop_string(ms->fdt, "/chosen", "stdout-path", name);
      qemu_fdt_setprop_string(ms->fdt, "/aliases", "serial0", name);
@@ -35,7 +43,17 @@ index 315049bc86..4a0141bc72 100644
  }
  
  static void create_fdt_rtc(RISCVVirtState *s,
-@@ -1696,6 +1715,9 @@ static void virt_machine_init(MachineState *machine)
+@@ -1142,6 +1162,9 @@ static void finalize_fdt(RISCVVirtState *s)
+     create_fdt_uart(s, irq_mmio_phandle);
+ 
+     create_fdt_rtc(s, irq_mmio_phandle);
++
++    /* Reserve AMP shared-memory region so StarryOS won't allocate it */
++    fdt_add_mem_rsv(MACHINE(s)->fdt, {SHMBASE}, {SHMSIZE});
+ }
+ 
+ static void create_fdt(RISCVVirtState *s)
+@@ -1696,6 +1719,9 @@ static void virt_machine_init(MachineState *machine)
      serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
          0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
          serial_hd(0), DEVICE_LITTLE_ENDIAN);
