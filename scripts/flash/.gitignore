@@ -1,0 +1,13 @@
+# 生成物 —— 由 k3-pack-itb.sh 每次生成，不入库
+esos.itb
+
+# rcpu1 固件每次从本仓库 build/ 拷入并压缩
+payloads/rt24_os1_rcpu.elf
+payloads/rt24_os1_rcpu.elf.lzo
+
+# lzo 压缩副产物（固定 payload 的源文件入库，.lzo 副本不入库）
+payloads/*.lzo
+
+# 固定 payload 需显式取消忽略：仓库根 .gitignore 有全局 *.elf 规则，
+# 会误伤 payloads/rt24_os0_rcpu.elf（这是要入库的固定 rcpu0 esos 固件）。
+!payloads/rt24_os0_rcpu.elf

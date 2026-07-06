@@ -1,0 +1,99 @@
+/*
+ * 精简版 ITS 模板 —— 仅保留 k3_com260_ifx 板型所需节点。
+ *
+ * 由 rt-async-amp/scripts/flash/ 自包含使用，不再依赖 esos 仓库或 output/esos/。
+ * 节点的 load/entry 地址与原 esos_rt24.its 完全一致（这些是 RT24 SRAM 里
+ * 固件/dtb 的硬编码地址，不可改动）。
+ *
+ * mkimage 须在本文件所在目录（scripts/flash/）执行，incbin 路径相对于该目录。
+ * payloads/ 下放固定文件（rcpu0 ELF + com260_ifx dtb + null.spacemit）；
+ * rcpu1 ELF（rt24_os1_rcpu.elf）由 k3-pack-itb.sh 每次从本仓库 build/ 拷入 payloads/。
+ */
+/dts-v1/;
+
+/ {
+	description = "ESOS dual-core image for K3 (com260_ifx only)";
+	#address-cells = <2>;
+
+	images {
+		rcpu-data-null {
+			description = "Using data interaction with AP";
+			type = "standalone";
+			os = "esos";
+			arch = "riscv";
+			compression = "lzo";
+			load = <0x1 0xe04000>;
+			entry = <0x1 0xe04000>;
+			data = /incbin/("payloads/null.spacemit.lzo");
+			hash {
+				algo = "crc32";
+			};
+		};
+
+		rcpu0-dtb-com260_ifx {
+			description = "ESOS Core0 Com260 IFX dtb";
+			type = "standalone";
+			os = "esos";
+			arch = "riscv";
+			compression = "none";
+			load = <0x1 0xf18000>;
+			entry = <0x1 0xf18000>;
+			data = /incbin/("payloads/k3_rt240_com260_ifx.dtb");
+			hash {
+				algo = "crc32";
+			};
+		};
+
+		rcpu1-dtb-com260_ifx {
+			description = "ESOS Core1 Com260 IFX dtb";
+			type = "standalone";
+			os = "esos";
+			arch = "riscv";
+			compression = "none";
+			load = <0x1 0xf24800>;
+			entry = <0x1 0xf24800>;
+			data = /incbin/("payloads/k3_rt241_com260_ifx.dtb");
+			hash {
+				algo = "crc32";
+			};
+		};
+
+		rcpu0-fw {
+			description = "ESOS Core0";
+			type = "standalone";
+			os = "esos";
+			arch = "riscv";
+			compression = "lzo";
+			load = <0x1 0x200000>;
+			entry = <0x1 0x200000>;
+			data = /incbin/("payloads/rt24_os0_rcpu.elf.lzo");
+			hash {
+				algo = "crc32";
+			};
+		};
+
+		rcpu1-fw {
+			description = "ESOS Core1";
+			type = "standalone";
+			os = "esos";
+			arch = "riscv";
+			compression = "lzo";
+			load = <0x1 0x804000>;
+			entry = <0x1 0x804000>;
+			data = /incbin/("payloads/rt24_os1_rcpu.elf.lzo");
+			hash {
+				algo = "crc32";
+			};
+		};
+	};
+
+	configurations {
+		default = "conf_dual";
+		conf_dual {
+			description = "ESOS Dual Core Configuration (com260_ifx)";
+			loadables = "rcpu-data-null",
+				"rcpu0-dtb-com260_ifx", "rcpu1-dtb-com260_ifx",
+				"rcpu0-fw", "rcpu1-fw";
+		};
+	};
+};
