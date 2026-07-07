@@ -14,7 +14,7 @@ ov-rpc = { path = "../../modules/ov-rpc" }
 serde = { workspace = true }
 postcard = { workspace = true }
 fugit = "0.4"
-log = { version = "0.4", default-features = false }
+log = { version = "0.4", default-features = false, features = ["max_level_trace"] }
 portable-atomic = { version = "1", default-features = false }
 heapless = "0.9"
 

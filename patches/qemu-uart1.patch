@@ -1,5 +1,5 @@
 diff --git a/hw/riscv/virt.c b/hw/riscv/virt.c
-index 315049bc86..4a0141bc72 100644
+index 315049bc86..7d4ec6e556 100644
 --- a/hw/riscv/virt.c
 +++ b/hw/riscv/virt.c
 @@ -93,6 +93,7 @@ static const MemMapEntry virt_memmap[] = {
@@ -10,32 +10,7 @@ index 315049bc86..4a0141bc72 100644
      [VIRT_VIRTIO] =       { 0x10001000,        0x1000 },
      [VIRT_FW_CFG] =       { 0x10100000,          0x18 },
      [VIRT_FLASH] =        { 0x20000000,     0x4000000 },
-@@ -970,6 +971,24 @@ static void create_fdt_uart(RISCVVirtState *s,
- 
-     qemu_fdt_setprop_string(ms->fdt, "/chosen", "stdout-path", name);
-     qemu_fdt_setprop_string(ms->fdt, "/aliases", "serial0", name);
-+
-+    name = g_strdup_printf("/soc/serial@%"HWADDR_PRIx,
-+                           s->memmap[VIRT_UART1].base);
-+    qemu_fdt_add_subnode(ms->fdt, name);
-+    qemu_fdt_setprop_string(ms->fdt, name, "compatible", "ns16550a");
-+    qemu_fdt_setprop_sized_cells(ms->fdt, name, "reg",
-+                                 2, s->memmap[VIRT_UART1].base,
-+                                 2, s->memmap[VIRT_UART1].size);
-+    qemu_fdt_setprop_cell(ms->fdt, name, "clock-frequency", 3686400);
-+    qemu_fdt_setprop_cell(ms->fdt, name, "interrupt-parent",
-+                          irq_mmio_phandle);
-+    if (s->aia_type == VIRT_AIA_TYPE_NONE) {
-+        qemu_fdt_setprop_cell(ms->fdt, name, "interrupts", UART1_IRQ);
-+    } else {
-+        qemu_fdt_setprop_cells(ms->fdt, name, "interrupts", UART1_IRQ,
-+                               0x4);
-+    }
-+    qemu_fdt_setprop_string(ms->fdt, "/aliases", "serial1", name);
- }
- 
- static void create_fdt_rtc(RISCVVirtState *s,
-@@ -1696,6 +1715,9 @@ static void virt_machine_init(MachineState *machine)
+@@ -1696,6 +1697,9 @@ static void virt_machine_init(MachineState *machine)
      serial_mm_init(system_memory, s->memmap[VIRT_UART0].base,
          0, qdev_get_gpio_in(mmio_irqchip, UART0_IRQ), 399193,
          serial_hd(0), DEVICE_LITTLE_ENDIAN);
@@ -57,7 +32,7 @@ index 18a2a323a3..a1ad6dbf2c 100644
      VIRT_VIRTIO,
      VIRT_FW_CFG,
      VIRT_IMSIC_M,
-@@ -93,6 +94,7 @@ enum {
+@@ -93,6 +93,7 @@ enum {
  enum {
      UART0_IRQ = 10,
      RTC_IRQ = 11,
