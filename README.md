@@ -317,18 +317,19 @@ rt-async-amp/
 │   ├── modules/executor-macro/   #   过程宏 #[task] #[main] #[interrupt]
 │   ├── modules/platform*/        #   Chip / TimerChip trait + 平台实现
 │   └── apps/test/                #   14 个 QEMU 集成测试
-├── StarryOS/                     # 【submodule】StarryOS 通用内核 (github.com/Oveln/StarryOS)
-│                                 #   （本项目在其 kernel/src/pseudofs/dev/rt_shm.rs 新增 IPC 设备）
+├── tgoskits/                     # 【submodule】集成构建框架（含 os/StarryOS 通用内核、os/arceos、os/axvisor）
+│   └── os/StarryOS/              #   StarryOS 通用内核（本项目在其 kernel/src/pseudofs/dev/rt_shm.rs 新增 IPC 设备）
 ├── apps/
-│   └── rt-async-app/             # rt-async 侧应用
-│       └── src/                  #   intercom.rs(IPI 策略) ipc_wait.rs uart_wait.rs bin/(console/demo)
+│   ├── rt-async-app/             # rt-async 侧应用（QEMU virt）
+│   │   └── src/                  #   intercom.rs(IPI 策略) ipc_wait.rs uart_wait.rs bin/(console/demo)
+│   └── rt-async-k3/              # rt-async 侧应用（K3 RT24）
 ├── user-apps/                    # StarryOS 用户态测试程序（musl 交叉编译）
 │   ├── user-test-ipc/            #   基础 IPC 收发
 │   ├── user-test-rpc/            #   RPC 四种调用模式
 │   └── user-test-sched/          #   三明治计时（端到端延迟 / 死锁复现用例）
 ├── modules/
 │   ├── chip-qemu-virt-rt/        # QEMU virt 平台支持（UART1 / CLINT / IPI / PLIC）
-│   ├── axplat-riscv64-qemu-virt/ # axplat 平台配置
+│   ├── chip-k3-rt24/             # K3 RT24 平台支持
 │   └── ov-rpc/                   # RPC 框架（postcard 序列化，call/send/urgent）
 ├── patches/
 │   ├── opensbi-amp.patch         # OpenSBI：hart 路由 + PIE 修复 + IPI 转发
