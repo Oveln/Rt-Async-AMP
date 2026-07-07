@@ -252,5 +252,17 @@
 	rt-async@88000000 {
 		compatible = "ov,rt-async-amp";
 		reg = <0x00 0x88000000 0x00 0x11000>;
+		// 显式声明子节点的 cell 尺寸，避免 fdt-parser 解析 notifier.reg
+		// 时回退到默认值（默认 #size-cells=1）导致 reg 错位/panic。
+		#address-cells = <0x02>;
+		#size-cells = <0x02>;
+
+		notifier@2000004 {
+			compatible = "ov,clint-msip-notifier";
+			// MSIP1 物理地址 = CLINTBASE(0x2000000) + 0x4
+			reg = <0x00 0x2000004 0x00 0x4>;
+			// SSI cause 号 (riscv64 软中断 = 1)
+			ov,ipi-irq = <0x1>;
+		};
 	};
 };
