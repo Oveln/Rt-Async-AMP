@@ -338,7 +338,6 @@ rt-async-amp/
 │   ├── architecture.html         # 交互式架构文档（7 节图表，README §3 引用）
 │   └── assets/                   # 架构图 SVG / excalidraw 源文件
 ├── amp.toml                      # 地址布局/构建参数/仓库 pin 的单一真相源
-├── Makefile                      # （legacy）旧顶层 Makefile，构建入口已迁移至 xtask
 ├── Cargo.toml                    # workspace 定义（ov-channels v0.2.0 等依赖）
 └── README.md                     # 本文件
 ```

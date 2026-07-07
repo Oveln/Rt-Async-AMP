@@ -9,6 +9,39 @@ use crate::build::RtAsyncBin;
 const TMUX_SESSION: &str = "rt-async-amp";
 const UART_SOCK: &str = "/tmp/rt-async-uart.sock";
 
+/// Path to the DTS source and the compiled DTB inside build/.
+const QEMU_DTS: &str = "its/qemu-virt-amp.dts";
+const QEMU_DTB: &str = "qemu-virt-amp.dtb";
+
+/// Compile the QEMU AMP device-tree source to DTB (uses `dtc`).
+fn ensure_dtb(root: &Path) -> std::path::PathBuf {
+    let dts = root.join(QEMU_DTS);
+    let dtb = root.join("build").join(QEMU_DTB);
+
+    let dts_mtime = std::fs::metadata(&dts).ok().and_then(|m| m.modified().ok());
+    let dtb_mtime = std::fs::metadata(&dtb).ok().and_then(|m| m.modified().ok());
+
+    let stale = match (dts_mtime, dtb_mtime) {
+        (_, None) => true,
+        (Some(dts_ts), Some(dtb_ts)) => dts_ts > dtb_ts,
+        (None, Some(_)) => false,
+    };
+
+    if stale {
+        eprintln!("DTB: compiling {} -> {}", dts.display(), dtb.display());
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let out = Command::new("dtc")
+            .args(["-I", "dts", "-O", "dtb", "-o", &dtb.to_string_lossy(), &dts.to_string_lossy()])
+            .output()
+            .expect("dtc not found. Install device-tree-compiler (dtc) via your system package manager");
+        if !out.status.success() {
+            eprintln!("dtc failed:\n{}", String::from_utf8_lossy(&out.stderr));
+            panic!("DTB compilation failed");
+        }
+    }
+    dtb
+}
+
 pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let build = root.join("build");
     let opensbi_fw = build.join("fw_dynamic.bin");
@@ -33,6 +66,7 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let rtasync_base = cfg.get("RTASYNCBASE");
     let smp = cfg.get("QEMUSMP");
     let ram = cfg.get("QEMURAM");
+    let dtb = ensure_dtb(root);
 
     let _ = std::fs::remove_file(UART_SOCK);
 
@@ -60,6 +94,8 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
             smp,
             "-m",
             ram,
+            "-dtb",
+            &dtb.to_string_lossy(),
             "-bios",
             &opensbi_fw.to_string_lossy(),
             "-kernel",
@@ -102,6 +138,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     let rtasync_base = cfg.get("RTASYNCBASE");
     let smp = cfg.get("QEMUSMP");
     let ram = cfg.get("QEMURAM");
+    let dtb = ensure_dtb(root);
     let root_str = root.to_string_lossy().to_string();
 
     // Pane 2 (right): socat listens on the Unix socket so it's ready
@@ -122,6 +159,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
          -chardev socket,id=uart1,path={},server=off \
          -serial chardev:uart1 \
          -smp {} -m {} \
+         -dtb {} \
          -bios {} -kernel {} \
          -device loader,addr={},file={} \
          -drive file={},format=raw,if=none,id=hd0 \
@@ -129,6 +167,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
          -nographic",
         qemu_bin.display(),
         UART_SOCK, smp, ram,
+        dtb.display(),
         opensbi_fw.display(), starryos_bin.display(),
         rtasync_base, app_bin.display(),
         rootfs.display(),
