@@ -11,6 +11,10 @@ OPENSBISIZE  = "0x80000"
 STARRYOSBASE = "0x80200000"
 RTASYNCBASE  = "0x82800000"
 RTASYNCSIZE  = "0x800000"
+# rt-async 专属 DTB 加载地址（esos 同款 handoff：QEMU loader 把 dtb 摆这里，
+# board_init 从此地址扫描认领 compatible="ov,rt-async" 的 DTB）。
+# 摆在 rt-async 8MB 区结束处，4KB 对齐，与 SHMBASE 不冲突。
+RTASYNCDTBBASE = "0x83000000"
 
 # ── IPC shared memory ───────────────────────────────────────────────────────
 SHMBASE = "0x88000000"

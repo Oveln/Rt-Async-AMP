@@ -98,6 +98,7 @@ name = "chip-qemu-virt-rt"
 version = "0.1.0"
 dependencies = [
  "extern-trait",
+ "fdt-parser",
  "platform",
  "riscv",
  "xtask",
@@ -250,6 +251,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "fdt-parser"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e175b7c46c98b80c8130665802cb3d5407fb6042b70a3d25f1b6edcb8f3de41"
 
 [[package]]
 name = "find-msvc-tools"
@@ -461,6 +468,7 @@ name = "platform"
 version = "0.1.0"
 dependencies = [
  "extern-trait",
+ "fdt-parser",
  "log",
  "portable-atomic",
  "riscv64-rt",

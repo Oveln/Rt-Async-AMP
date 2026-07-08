@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: MIT
+//
+// rt-async-amp 主仓库专属 DTB（hart1 + UART1 视角）
+//
+// 与子模块的 rt-async-qemu-virt.dts 区别：
+//   - 跑在 QEMU hart1（M-mode RTOS），不是 hart0
+//   - console 用 UART1 (0x10002000)，不是 UART0
+//   - cpus 只描述本 hart (cpu@1)；FDT header 的 boot_cpuid_phys 由 dtc
+//     推导为 1，CLINT timer/msip driver 据此计算 hart 偏移
+//     (mtimecmp = base + 0x4000 + hart*8, msip = base + hart*4)
+//
+// 经 xtask 用 `-device loader,addr=0x83000000,file=rt-async.dtb` 摆进内存，
+// board_init 的 esos 同款扫描从此地址认领（root compatible 含 "ov,rt-async"）。
+/dts-v1/;
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    model = "ov,rt-async-qemu-virt-amp";
+    compatible = "ov,rt-async";
+
+    chosen {
+        stdout-path = "/serial@10002000";
+    };
+
+    cpus {
+        #address-cells = <1>;
+        #size-cells = <0>;
+        timebase-frequency = <10000000>;
+        cpu@1 {
+            device_type = "cpu";
+            reg = <1>;
+            compatible = "riscv";
+        };
+    };
+
+    serial@10002000 {
+        compatible = "ns16550a";
+        reg = <0 0x10002000 0 0x100>;
+        clock-frequency = <3686400>;
+        interrupts = <12>;       /* UART1IRQ via PLIC, 留作 driver 用 */
+    };
+
+    /* CLINT: timer + ipi 共享同一 reg 区，driver 按 compatible 区分 */
+    timer@2000000 {
+        compatible = "riscv,clint0";
+        reg = <0 0x02000000 0 0x10000>;
+        /* hart1: mtimecmp 在 base+0x4008，driver 内部按 boot_cpuid_phys 计算偏移 */
+    };
+
+    ipi@2000000 {
+        compatible = "riscv,clint0-msip";
+        reg = <0 0x02000000 0 0x10000>;
+        /* hart1: msip 在 base+0x4，driver 内部按 boot_cpuid_phys 计算偏移 */
+    };
+
+    reset@100000 {
+        compatible = "sifive,test1";
+        reg = <0 0x0100000 0 0x1000>;
+    };
+
+    shm@88000000 {
+        compatible = "ov,rt-async-shm";
+        reg = <0 0x88000000 0 0x11000>;
+    };
+};
