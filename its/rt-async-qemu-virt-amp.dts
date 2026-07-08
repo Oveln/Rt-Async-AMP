@@ -66,4 +66,10 @@
         compatible = "ov,rt-async-shm";
         reg = <0 0x88000000 0 0x11000>;
     };
+
+    plic@c000000 {
+        compatible = "riscv,plic0";
+        reg = <0 0x0C000000 0 0x4000000>;
+        riscv,ndev = <53>;
+    };
 };

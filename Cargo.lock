@@ -84,16 +84,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
-name = "chip-k3-rt24"
-version = "0.1.0"
-dependencies = [
- "extern-trait",
- "platform",
- "riscv",
- "xtask",
-]
-
-[[package]]
 name = "chip-qemu-virt-rt"
 version = "0.1.0"
 dependencies = [
@@ -471,6 +461,7 @@ dependencies = [
  "fdt-parser",
  "log",
  "portable-atomic",
+ "riscv",
  "riscv64-rt",
 ]
 
@@ -583,17 +574,6 @@ dependencies = [
  "portable-atomic",
  "postcard",
  "serde",
- "xtask",
-]
-
-[[package]]
-name = "rt-async-k3"
-version = "0.1.0"
-dependencies = [
- "chip-k3-rt24",
- "executor",
- "log",
- "platform",
  "xtask",
 ]
 

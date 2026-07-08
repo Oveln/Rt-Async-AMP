@@ -17,7 +17,6 @@ use executor::priority::Priority;
 use executor::spawner::Spawner;
 use fugit::ExtU64;
 use platform::arch::TrapFrame;
-use platform::{Chip, ChipImpl};
 
 // ============================================================================
 // 任务
