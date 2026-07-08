@@ -6,8 +6,6 @@ members = [
     "user-apps/user-test-ipc",
     "user-apps/user-test-rpc",
     "user-apps/user-test-sched",
-    "modules/chip-k3-rt24",
-    "apps/rt-async-k3",
     "xtask",
 ]
 resolver = "3"
