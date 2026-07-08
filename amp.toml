@@ -14,6 +14,8 @@ RTASYNCSIZE  = "0x800000"
 # rt-async 专属 DTB 加载地址（esos 同款 handoff：QEMU loader 把 dtb 摆这里，
 # board_init 从此地址扫描认领 compatible="ov,rt-async" 的 DTB）。
 # 摆在 rt-async 8MB 区结束处，4KB 对齐，与 SHMBASE 不冲突。
+# 不变式：board_init 从此地址裸读 16 页(64KB) 扫描 DTB，故该区间必须落在
+# QEMU virt RAM（0x80000000..0x90000000）内，否则裸读会 bus fault。
 RTASYNCDTBBASE = "0x83000000"
 
 # ── IPC shared memory ───────────────────────────────────────────────────────

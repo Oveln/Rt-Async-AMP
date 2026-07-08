@@ -9,6 +9,10 @@
 //     推导为 1，CLINT timer/msip driver 据此计算 hart 偏移
 //     (mtimecmp = base + 0x4000 + hart*8, msip = base + hart*4)
 //
+// boot_cpuid_phys 推导规则：dtc 在 /cpus 下仅有唯一 cpu 节点时取其 reg。
+// 保持 /cpus 下仅一个 cpu 节点；若新增 cpu 节点，需用 `dtc -b <hart>` 显式
+// 指定 boot_cpuid_phys，否则 dtc 默认取 0，CLINT 偏移会算错。
+//
 // 经 xtask 用 `-device loader,addr=0x83000000,file=rt-async.dtb` 摆进内存，
 // board_init 的 esos 同款扫描从此地址认领（root compatible 含 "ov,rt-async"）。
 /dts-v1/;

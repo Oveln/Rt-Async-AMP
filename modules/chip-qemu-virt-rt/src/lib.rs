@@ -31,6 +31,9 @@ mod amp {
 pub use amp::{PLICBASE, SHMBASE, SHMSIZE, UART1IRQ};
 
 // ── NS16550A UART 寄存器偏移 ──────────────────────────────────────────────
+// 部分常量（RBR_THR/LCR/LSR_THRE）当前未用（driver model 下输出走 platform::console，
+// QEMU 即写即收无需查 LSR），但移植真板时需要，故保留。
+#[allow(dead_code)]
 mod uart {
     pub const RBR_THR: usize = 0;
     pub const IER: usize = 1;
@@ -83,9 +86,11 @@ fn locate_rtasync_dtb() -> &'static [u8] {
     let base = amp::RTASYNCDTBBASE;
     for i in 0..SCAN_PAGES {
         let addr = base + i * SCAN_STEP;
-        // SAFETY: 该地址由 QEMU loader 写入 DTB（或为 RAM 空洞）。读 FDT header
-        // 大小（40 字节）的裸内存是安全的：QEMU virt 的 RAM 覆盖该区域，
-        // 不会触发 fault；非 DTB 地址 from_bytes 返回 Err，跳过即可。
+        // SAFETY: 扫描区间 [base, base + SCAN_PAGES*SCAN_STEP) = [0x83000000, 0x83010000)
+        // 完整落在 QEMU virt 256M RAM（0x80000000..0x90000000）内，故裸读不会触发
+        // bus fault。该区域由 QEMU loader 写入 DTB（或为未写 RAM）；非 DTB 地址
+        // from_bytes 仅校验 header magic，失败返回 Err，跳过即可。
+        // 不变式：RTASYNCDTBBASE 必须保证扫描区间在 RAM 内（见 amp.toml 注释）。
         let probe: &[u8] =
             unsafe { core::slice::from_raw_parts(addr as *const u8, PROBE_LEN) };
 
@@ -130,8 +135,7 @@ impl Chip for QemuVirtRt {
 
         // 2. 注册板级 driver 列表（用 platform 内置默认列表）。
         let drivers = platform::drivers::default_drivers();
-        // SAFETY: drivers 是 'static 切片；board_init 在调度器启动前串行调用一次。
-        unsafe { platform::driver::set_drivers(drivers) };
+        platform::driver::set_drivers(drivers);
 
         // 3. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
         platform::driver::boot();
