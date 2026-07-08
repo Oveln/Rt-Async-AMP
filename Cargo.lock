@@ -89,6 +89,7 @@ version = "0.1.0"
 dependencies = [
  "extern-trait",
  "fdt-parser",
+ "log",
  "platform",
  "riscv",
  "xtask",

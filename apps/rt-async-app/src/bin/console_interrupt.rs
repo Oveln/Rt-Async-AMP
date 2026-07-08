@@ -3,7 +3,10 @@
 //! hart 1 (M-mode): rt-async priority-preemptive scheduler, UART1 interactive shell
 //! hart 0 (S-mode): StarryOS, output to UART0
 //!
-//! RX strategy: UART1 RX interrupt → NS16550A driver ring buffer → SerialRx Future
+//! RX strategy: UART1 RX interrupt → NS16550A driver ring buffer → SerialRx Future.
+//! Board (`chip-qemu-virt-rt`) registers the RX IRQ handler during `Board::init()`;
+//! PLIC enable/priority is configured here (after StarryOS finishes its shared
+//! PLIC init) via [`chip_qemu_virt_rt::setup_console_irq`].
 
 #![no_std]
 #![no_main]
@@ -16,6 +19,7 @@ use core::pin::Pin;
 
 use executor::priority::Priority;
 use executor::spawner::Spawner;
+use futures::serial::SerialRx;
 use platform::arch::TrapFrame;
 
 const LINE_BUF_SIZE: usize = 128;
@@ -54,7 +58,7 @@ async fn task_console() {
     uprintln!("\r\nrt-async console ready (interrupt-driven). Type 'help' for commands.\r\n");
 
     loop {
-        let byte = futures::serial::SerialRx::new().await;
+        let byte = SerialRx::new().await;
 
         match byte {
             0x7f | 0x08 => {

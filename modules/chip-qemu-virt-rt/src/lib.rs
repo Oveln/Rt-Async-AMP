@@ -77,14 +77,60 @@ impl Board for QemuVirtRt {
         // 3. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
         platform::driver::boot();
 
-        // 4. 注册 UART1 RX 中断 handler。
+        // 4. 注册 UART1 RX 中断 handler（仅写 IRQ_TABLE，无 PLIC 竞争）。
+        //    PLIC enable/priority 推迟到 [`Board::late_init`]，避免被 hart0
+        //    (StarryOS) 较晚的 PLIC 初始化覆盖。
         platform::register_irq(
             UART1IRQ as u32,
             platform::drivers::serial_ns16550a::rx_handler,
         );
-        platform::intctl().enable_irq(UART1IRQ as u32);
-        platform::intctl().set_priority(UART1IRQ as u32, 2);
     }
+
+    fn late_init() {
+        // 配置 UART1 的 PLIC 中断。必须在开全局中断前、hart0 完成其 PLIC
+        // 初始化后进行：本板 PLIC 与 hart0 (StarryOS) 共享，priority 寄存器
+        // 全局唯一，StarryOS 的 disable_all_sources 会批量清零所有 source
+        // priority。hart1 启动远早于 hart0，Board::init/main 里配的优先级会
+        // 被覆盖为 0（priority=0 即禁能），导致 RX 中断永不触发。
+        setup_console_irq();
+    }
+}
+
+/// 配置 UART1 的 PLIC 中断（使能 + 优先级）。
+///
+/// 策略：先基于 CLINT `mtime` 忙等 hart0 (StarryOS) 的启动窗口（其 PLIC
+/// 初始化会调 `disable_all_sources` 批量清零所有 source priority），过了
+/// 这个窗口再配置并读回确认。读回失败则重试，但设有上限避免死循环。
+///
+/// 此函数在 `Board::late_init`（`platform::start()` 之前、全局中断关闭）
+/// 调用，忙等不影响系统响应。
+fn setup_console_irq() {
+    const TARGET_PRIO: u32 = 2;
+    // 等 hart0 启动窗口（含 PLIC 初始化）。3 秒留足裕量。
+    const HART0_BOOT_SECS: u64 = 3;
+    // 配置后读回确认的重试上限。
+    const MAX_CONFIRM_RETRIES: u32 = 20;
+    let freq = platform::timer().freq_hz() as u64;
+    let start = platform::timer().now();
+    let wait_ticks = freq.saturating_mul(HART0_BOOT_SECS);
+    while platform::timer().now().wrapping_sub(start) < wait_ticks {
+        core::hint::spin_loop();
+    }
+
+    platform::intctl().enable_irq(UART1IRQ as u32);
+    // 配置并读回确认（裸读 PLIC priority 寄存器，板级自查，不走通用 trait）；
+    // hart0 偶发的延迟写需要重试，但有上限。
+    let prio_addr = (amp::PLICBASE + 4 * UART1IRQ as usize) as *const u32;
+    for _ in 0..MAX_CONFIRM_RETRIES {
+        platform::intctl().set_priority(UART1IRQ as u32, TARGET_PRIO);
+        if unsafe { core::ptr::read_volatile(prio_addr) } == TARGET_PRIO {
+            return;
+        }
+        for _ in 0..50_000 {
+            core::hint::spin_loop();
+        }
+    }
+    log::warn!("setup_console_irq: priority not stable after retries, forcing enable");
 }
 
 // ── AMP 专用：向 hart 0 (StarryOS) 发送 IPI ───────────────────────────
