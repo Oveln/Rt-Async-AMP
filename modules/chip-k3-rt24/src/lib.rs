@@ -57,8 +57,10 @@ impl Board for K3Rt24 {
         clock::early_init();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
-        //    include_bytes! 把 .dtb 编进 .rodata，作为 PT_LOAD 段随 ELF 加载。
-        platform::dtb::init_dtb(include_bytes!("../../../its/rt-async-k3.dtb"));
+        //    .dtb 由 build.rs 在编译期用 dtc 从 .dts 生成到 OUT_DIR，路径经
+        //    cargo:rustc-env=K3_DTB_PATH 传入；include_bytes! 把 .dtb 编进 .rodata，
+        //    作为 PT_LOAD 段随 ELF 加载（不再追踪 .dtb 产物）。
+        platform::dtb::init_dtb(include_bytes!(env!("K3_DTB_PATH")));
 
         // 3. 注册 K3 专属 driver 列表。
         platform::driver::DRIVERS.set(K3_DRIVERS);
