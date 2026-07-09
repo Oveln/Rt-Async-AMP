@@ -178,7 +178,7 @@ rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
 | 启动 | OpenSBI mret 分流 | U-Boot SPL `rproc_load` + `rproc_start`（无 DTB handoff，DTB 内嵌进 ELF） |
 | 板级接入 | `default_drivers()`（ns16550a / CLINT） | 自定义 `K3_DRIVERS`（pxa-uart / SysTimer / PLIC），DTB 经 `include_bytes!` 内嵌 |
 
-K3 的 SysTimer 实为 CLINT 风格的**非标准布局**：per-hart 窗口步长 `hart<<27`（而非 SiFive 的 `hart*8`），MSIP 地址经 `firmware/msip_probe/` 上板实测确定为 `0xec000000`（= `systimer + (rcpu1<<27)`）。
+K3 的 SysTimer 实为 CLINT 风格的**非标准布局**：per-hart 窗口步长 `hart<<27`（而非 SiFive 的 `hart*8`），MSIP 地址经上板实测确定为 `0xec000000`（= `systimer + (rcpu1<<27)`）。
 
 ---
 
@@ -275,8 +275,8 @@ make test
 
 ### 6.4 硬件测试（K3 RT24）
 
-- **msip_probe**（`firmware/msip_probe/`）：一次性诊断固件，上板实测确定 RT24 的 MSIP 地址为 `0xec000000`（= SysTimer `0xe4000000` + `(rcpu1<<27)`），写 1 触发 MachineSoft（mip=0x8）。
 - **sched_demo**（`apps/rt-async-k3/src/bin/sched_demo.rs`）：K3 RT24 真板抢占调度验证。task_high（优先级 3）与 task_low（优先级 1）各每 50ms 输出 `H`/`L`，上板观察到稳定交替（H 出现频率 ≥ L）、计数对等上涨，证明 SysTimer 唤醒 + 优先级抢占 + MSIP 自中断全链路在 K3 真板跑通。
+- **MSIP 地址实测**：RT24 的 MSIP 地址为 `0xec000000`（= SysTimer `0xe4000000` + `(rcpu1<<27)`），写 1 触发 MachineSoft（mip=0x8），已固化进 `clint_k3.rs` 的 K3Msip 驱动。
 
 构建：`cargo xtask build k3-sched-demo` → `build/rt-async-k3-sched-demo.elf`；刷写：`./scripts/flash/k3-flash.sh`（一键编译+打包 itb+fastboot 刷写）；串口观察：R_UART0，115200 8N1。
 
@@ -345,8 +345,6 @@ rt-async-amp/
 ├── its/                          # 设备树源 + 编译产物（内嵌进 ELF .rodata）
 │   ├── rt-async-k3.dts/.dtb      #   K3 RT24 rcpu1 设备树（U-Boot 不 handoff DTB）
 │   └── qemu-virt-amp.dts         #   QEMU virt AMP 设备树
-├── firmware/
-│   └── msip_probe/               # 一次性诊断固件：上板实测 RT24 MSIP 地址
 ├── scripts/flash/                # K3 一键刷写（编译+打包 itb+fastboot）
 ├── xtask/                        # 【构建编排器】setup/build/run/install/clean/qemu 子命令
 ├── docs/

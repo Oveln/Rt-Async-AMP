@@ -1,7 +1,0 @@
-# 构建产物（make clean 可清）—— 只入库源文件 + README + Makefile + ld
-*.o
-*.elf
-*.bin
-*.bin.lzo
-*.asm
-*.map
