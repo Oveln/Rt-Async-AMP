@@ -97,7 +97,7 @@ macOS 自带 python3。
 
 `k3-flash.sh` 编排以下步骤，每步失败即中止并提示卡在哪：
 
-1. **`cargo xtask build k3-minimal`** → `build/rt-async-k3-minimal.elf`
+1. **`cargo xtask build k3-sched-demo`** → `build/rt-async-k3-sched-demo.elf`
 2. **`k3-pack-itb.sh`**（自包含）：
    - cp 新 rcpu1 ELF → `payloads/rt24_os1_rcpu.elf`
    - lzo 压缩 `payloads/` 里的 `*.elf` 和 `null.spacemit`

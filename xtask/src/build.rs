@@ -15,16 +15,16 @@ pub enum Artifact {
 
 /// 一个 rt-async 应用 bin 的完整自描述。
 ///
-/// 命名约定：`build` 用 `target_name`（带 `<platform>-` 前缀，如 `qemu-demo`/`k3-minimal`）；
+/// 命名约定：`build` 用 `target_name`（带 `<platform>-` 前缀，如 `qemu-demo`/`k3-sched-demo`）；
 /// `run --bin` 用 `name`（短名，如 `demo`，因 run 仅服务 QEMU）。
 pub struct RtAsyncBin {
-    /// cargo `--bin` 名（源码里的 bin 名，如 "demo"、"minimal"）。
+    /// cargo `--bin` 名（源码里的 bin 名，如 "demo"、"sched_demo"）。
     pub name: &'static str,
-    /// xtask `build` 的 target 名（带平台前缀，如 "qemu-demo"、"k3-minimal"）。
+    /// xtask `build` 的 target 名（带平台前缀，如 "qemu-demo"、"k3-sched-demo"）。
     pub target_name: &'static str,
     /// 平台："qemu" / "k3"。用于 `build qemu` / `build k3` 聚合。
     pub platform: &'static str,
-    /// `build/` 下产物文件名（如 "rt-async.bin"、"rt-async-k3-minimal.elf"）。
+    /// `build/` 下产物文件名（如 "rt-async.bin"、"rt-async-k3-sched-demo.elf"）。
     pub out: &'static str,
     /// app crate 目录（如 "apps/rt-async-app"、"apps/rt-async-k3"）。
     pub app_dir: &'static str,
@@ -70,10 +70,10 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         artifact: Artifact::Bin,
     },
     RtAsyncBin {
-        name: "minimal",
-        target_name: "k3-minimal",
+        name: "sched_demo",
+        target_name: "k3-sched-demo",
         platform: "k3",
-        out: "rt-async-k3-minimal.elf",
+        out: "rt-async-k3-sched-demo.elf",
         app_dir: "apps/rt-async-k3",
         package: "rt-async-k3",
         target: "riscv64imac-unknown-none-elf",

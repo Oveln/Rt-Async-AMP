@@ -51,6 +51,12 @@ QEMURAM = "256M"
 RT24RCPU1BASE = "0x100804000"
 RT24RCPU1SIZE = "0x300000"     # 3M，与 esos baremetal.ld 一致
 
+# K3 RT24 外设基址（rcpu1 视角，单一真相源；driver 当前硬编码但保持约定）
+K3_SYSTIMER  = "0xe4000000"   # SysTimer：mtime(+0xbff8全局)/mtimecmp(+0x4000+hart<<27)/MSIP(+0x0+hart<<27)
+K3_PLIC      = "0xe0000000"   # PLIC（自定义布局，stride hart<<27）
+K3_UART0     = "0xc0881000"   # R_UART0（PXA 派生）
+K3_UART0_IRQ = 17             # shub_uart_int[0] = int_src[17]
+
 # ── Upstream repos ──────────────────────────────────────────────────────────
 
 [opensbi]

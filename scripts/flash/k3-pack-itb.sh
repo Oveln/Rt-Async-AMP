@@ -20,7 +20,7 @@ PAYLOADS="$SCRIPT_DIR/payloads"
 ITS="$SCRIPT_DIR/esos_k3_com260_ifx.its"
 ITB_OUT="$SCRIPT_DIR/esos.itb"
 
-ELF_SRC="${ELF_SRC:-build/rt-async-k3-minimal.elf}"   # 相对 repo 根
+ELF_SRC="${ELF_SRC:-build/rt-async-k3-sched-demo.elf}"   # 相对 repo 根
 
 # ── 0. preflight ────────────────────────────────────────────────────────────
 for t in mkimage lzop; do
@@ -42,7 +42,7 @@ done
 RCPU1_ELF_SRC="${REPO_ROOT}/${ELF_SRC}"
 [ -f "$RCPU1_ELF_SRC" ] || {
     echo "✗ rcpu1 ELF 缺失: $RCPU1_ELF_SRC" >&2
-    echo "  先跑: cargo xtask build k3-minimal" >&2
+    echo "  先跑: cargo xtask build k3-sched-demo" >&2
     exit 1
 }
 
