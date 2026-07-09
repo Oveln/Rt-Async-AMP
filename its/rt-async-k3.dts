@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: MIT
+//
+// K3 RT24 rcpu1 设备树（内嵌进 rt-async ELF）
+//
+// U-Boot 对 RT24 **不做任何 DTB handoff**（k3-rproc.c 只 memcpy ELF 的
+// PT_LOAD 段，不传 DTB 指针、不扫 FDT magic）。故本 DTB 经 `include_bytes!`
+// 内嵌进 rcpu1 固件 ELF 的 .rodata 段，`Board::init` 直接 `init_dtb(...)`。
+//
+// 本 DTB 只描述 **rcpu1（hart 1）视角**：rcpu0（官方 esos）在另一 ELF 里，
+// 两者由 U-Boot 从同一 itb 的 rcpu0-fw / rcpu1-fw 节点分别加载。
+//
+// 地址均为 rcpu1 物理视图（与 AP 共享同一物理地址空间，无别名）：
+//   - SysTimer 0xe4000000：mtime(+0xbff8，全局)/mtimecmp(+0x4000+hart<<27)/
+//     MSIP(+0x0+hart<<27，已上板实测)
+//   - PLIC  0xe0000000：自定义布局，stride hart<<27
+//   - UART0 0xc0881000：PXA 派生，IRQ 17（时钟/pinmux 在 clock::early_init 已做）
+
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "ov,rt-async-k3";
+	compatible = "ov,rt-async";
+
+	chosen {
+		stdout-path = "/serial@c0881000";
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		// K3 SysTimer 频率 24MHz（esOS SOC_TIMER_FREQ）。
+		// fdt_parser 用此推导 timebase；ClintK3 driver 也读它作 freq。
+		timebase-frequency = <24000000>;
+
+		cpu@1 {
+			device_type = "cpu";
+			// reg=<1> + 单 cpu 节点 → dtc 推导 boot_cpuid_phys=1，
+			// driver probe 据此算 (mhartid<<27) per-hart 窗口。
+			reg = <1>;
+			compatible = "spacemit,rt24", "riscv";
+		};
+	};
+
+	// R_UART0（PXA 派生，spacemit,pxa-uart0）。时钟/pinmux 在
+	// clock::early_init() 里已使能，本节点仅给 driver probe 取 reg。
+	serial@c0881000 {
+		compatible = "spacemit,pxa-uart0";
+		reg = <0x0 0xc0881000 0x0 0x100>;
+	};
+
+	// SysTimer（mtime/mtimecmp）。compatible 用 K3 专属串，回退 riscv,clint0。
+	systimer@e4000000 {
+		compatible = "spacemit,k3-systimer", "riscv,clint0";
+		reg = <0x0 0xe4000000 0x0 0x10000>;
+	};
+
+	// SysTimer MSIP（与 systimer 同 reg，单独节点以便 Ipi driver 独立 probe）。
+	msip@e4000000 {
+		compatible = "spacemit,k3-systimer-msip", "riscv,clint0-msip";
+		reg = <0x0 0xe4000000 0x0 0x10000>;
+	};
+
+	// K3 PLIC（自定义布局，stride hart<<27，compatible 仍为 riscv,plic0）。
+	intc@e0000000 {
+		compatible = "riscv,plic0";
+		reg = <0x0 0xe0000000 0x0 0x4000000>;
+	};
+};

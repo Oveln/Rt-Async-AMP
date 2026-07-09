@@ -7,7 +7,9 @@ publish = false
 [dependencies]
 platform = { path = "../../rt-async/modules/platform" }
 extern-trait = "0.4.3"
-riscv = "0.16.0"
+riscv = { version = "0.16.0", default-features = false, features = ["critical-section-single-hart"] }
+fdt-parser = "0.4.19"
+log = { version = "0.4", default-features = false }
 
 [build-dependencies]
 xtask = { path = "../../xtask" }
