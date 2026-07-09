@@ -128,10 +128,11 @@ impl Driver for PxaUart {
         write32(base + IER, UART_IER_UUE);
         write32(base + MCR, UART_MCR_OUT2);
 
-        // 先注册 console，再打日志：Logger 经 driver::console() 输出，
-        // console 未注册时 console().expect 会 panic（且 panic handler 是裸
-        // loop{}，静默死锁）。故任何 log::info! 必须在 set_console 之后。
-        platform::driver::set_console(&INSTANCE);
+        // 登记进多实例注册表；默认 console 由 boot() 的 try_derive_console
+        // 据 chosen.stdout-path 在首个 Serial probe 后派生（不再由 probe 自命）。
+        // 本 probe 内的 log::info! 因 console 尚未派生会经 try_console 静默丢弃；
+        // 后续节点（如 PLIC）probe 时 console 已就绪，日志正常输出。
+        platform::driver::SERIALS.register(&INSTANCE);
 
         log::info!("K3 R_UART0 probed: base={:#x}, 115200-8N1", base);
     }

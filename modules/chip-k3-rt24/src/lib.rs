@@ -18,7 +18,7 @@
 //! 1. `clock::early_init()` —— SPL 握手回写（解锁 AP 的 6s 轮询）+ UART 时钟
 //!    链（ruart_14 DDN gate + UART0 末端 gate）+ pinmux（GPIO_122/123）。
 //! 2. `init_dtb` —— 注入内嵌 K3 DTB。
-//! 3. `set_drivers` + `boot()` —— DT 遍历，按 compatible 实例化各 driver。
+//! 3. `DRIVERS.set` + `boot()` —— DT 遍历，按 compatible 实例化各 driver。
 //!
 //! 启动握手必须最先（步骤1），否则 AP 卡在 `k3_rproc_start()` 的轮询循环。
 
@@ -42,7 +42,7 @@ pub struct K3Rt24;
 ///
 /// K3 没有 ns16550a / sifive-test（QEMU 专属），且 PXA-UART 是 K3 专属驱动
 /// 放在本 crate；故在此组装自己的列表注入 registry。
-/// reset_stub 无 DT 节点，不经 probe，在 init() 里直接 `set_reset`。
+/// reset_stub 无 DT 节点，不经 probe，在 init() 里直接 `RESET.set`。
 static K3_DRIVERS: &[&dyn Driver] = &[
     &pxa_uart::INSTANCE,
     &clint_k3::TIMER,
@@ -61,12 +61,12 @@ impl Board for K3Rt24 {
         platform::dtb::init_dtb(include_bytes!("../../../its/rt-async-k3.dtb"));
 
         // 3. 注册 K3 专属 driver 列表。
-        platform::driver::set_drivers(K3_DRIVERS);
+        platform::driver::DRIVERS.set(K3_DRIVERS);
 
         // 4. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
         platform::driver::boot();
 
         // 5. reset_stub 无 DT 节点，直接注册（关机=wfi 死循环，trait 占位）。
-        platform::driver::set_reset(&reset_stub::INSTANCE);
+        platform::driver::RESET.set(&reset_stub::INSTANCE);
     }
 }
