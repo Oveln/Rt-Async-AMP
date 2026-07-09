@@ -16,7 +16,6 @@ use core::sync::atomic::Ordering;
 use chip_qemu_virt_rt::SHMBASE;
 use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
 use ov_rpc::{define_service, RpcServer};
-use platform::{TimerChip, TimerChipImpl};
 
 // ============================================================================
 // RPC 服务定义
@@ -41,9 +40,9 @@ impl RtAsyncRpc {
     /// 精确延时（busy-wait）：在 process_all 中顺序执行，
     /// 保证前后 RPC 指令之间的时序精度。
     fn delay(us: u32) {
-        let freq = TimerChipImpl::freq_hz() as u64;
-        let target = TimerChipImpl::now_ticks() + (us as u64) * freq / 1_000_000;
-        while TimerChipImpl::now_ticks() < target {
+        let freq = platform::timer().freq_hz() as u64;
+        let target = platform::timer().now() + (us as u64) * freq / 1_000_000;
+        while platform::timer().now() < target {
             core::hint::spin_loop();
         }
     }
@@ -60,7 +59,7 @@ impl RtAsyncRpc {
 // other `intercom` function.  Calling `has_pending()`, `process_elastic()`,
 // `send_message()`, or `server()` before `init()` will read from
 // uninitialized shared memory.
-static SERVER: RpcServer = RpcServer::new(chip_qemu_virt_rt::SHMBASE);
+static SERVER: RpcServer = RpcServer::new(SHMBASE);
 
 /// 弹性忙等自旋上限。
 ///
@@ -76,10 +75,10 @@ const ELASTIC_SPIN_LIMIT: u32 = 100000;
 /// 初始化共享内存（由 rt-async 启动时调用一次）
 pub fn init() {
     unsafe {
-        let shm = SharedMemory::<3>::at(chip_qemu_virt_rt::SHMBASE);
+        let shm = SharedMemory::<3>::at(SHMBASE);
         shm.init();
     }
-    log::info!("[InterCom] initialized at {:#x}", chip_qemu_virt_rt::SHMBASE);
+    log::info!("[InterCom] initialized at {:#x}", SHMBASE);
 }
 
 /// 检查是否有待处理消息
@@ -125,7 +124,7 @@ fn send_notify_ipi() {
 /// `init()` must have been called before this function, otherwise this will
 /// access uninitialized shared memory.
 pub fn process_elastic() -> usize {
-    let shm = unsafe { SharedMemory::<3>::at(chip_qemu_virt_rt::SHMBASE) };
+    let shm = unsafe { SharedMemory::<3>::at(SHMBASE) };
 
     // 1. 标记忙等
     shm.set_busy();
@@ -212,7 +211,7 @@ fn handle_non_rpc(msg: Message) {
 /// access uninitialized shared memory.
 pub fn send_message(msg: Message) {
     unsafe {
-        let shm = SharedMemory::<3>::at(chip_qemu_virt_rt::SHMBASE);
+        let shm = SharedMemory::<3>::at(SHMBASE);
         match shm.sender(ChannelId::new(1)) {
             Ok(tx) => {
                 if let Err(e) = tx.try_send(&msg) {

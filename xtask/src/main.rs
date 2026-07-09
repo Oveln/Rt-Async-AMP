@@ -116,7 +116,7 @@ fn main() {
                         build::build_rt_async(&root, bin);
                     }
                 }
-                // 单个 rt-async bin：按 target_name（带平台前缀，如 qemu-demo/k3-minimal）
+                // 单个 rt-async bin：按 target_name（带平台前缀，如 qemu-demo/k3-sched-demo）
                 name => {
                     let bin = build::find_by_target(name).unwrap_or_else(|| {
                         eprintln!("unknown target: {name}");

@@ -21,7 +21,7 @@ fn main() {
         xtask::config::parse_size(amp.get("RT24RCPU1SIZE").expect("missing RT24RCPU1SIZE"));
 
     let memory_x = format!(
-        "ENTRY(__start);\n\nMEMORY\n{{\n    RAM : ORIGIN = {rtasync_base}, LENGTH = 0x{rtasync_size:x}\n}}\n\n_max_hart_id = 0;\n_hart_stack_size = 4096;\n"
+        "ENTRY(__start);\n\nMEMORY\n{{\n    RAM : ORIGIN = {rtasync_base}, LENGTH = 0x{rtasync_size:x}\n}}\n\n_max_hart_id = 0;\n_hart_stack_size = 8192;\n"
     );
     std::fs::write(Path::new(&out_dir).join("memory.x"), memory_x).unwrap();
 }

@@ -15,8 +15,8 @@ use core::pin::Pin;
 
 use executor::priority::Priority;
 use executor::spawner::Spawner;
+use fugit::ExtU64;
 use platform::arch::TrapFrame;
-use platform::{Chip, ChipImpl};
 
 // ============================================================================
 // 任务
@@ -36,11 +36,24 @@ async fn task_ipc() {
     }
 }
 
+/// 定时器异步唤醒验证：每 500ms 打一条日志，验证 driver model 下 CLINT
+/// timer 中断经 handle_timer_isr → TimerQueue → wake → 调度器的完整唤醒链。
+#[executor::task]
+async fn task_timer_heartbeat() {
+    let mut n = 0u32;
+    loop {
+        futures::timer::after(500.millis()).await;
+        n += 1;
+        log::info!("[heartbeat] tick #{n}");
+    }
+}
+
 #[executor::main(trace)]
 fn main(spawner: Pin<&'static Spawner<4>>) {
     log::info!("rt-async-amp: hart 1 (rt-async) started");
 
     spawner.spawn(Priority::new(2), task_ipc().unwrap());
+    spawner.spawn(Priority::new(1), task_timer_heartbeat().unwrap());
 
     log::info!("rt-async-amp: task spawned, entering scheduler");
 }

@@ -7,7 +7,7 @@
 #                                           #  ends stopped at U-Boot prompt)
 #
 # Pipeline:
-#   1. cargo xtask build k3-minimal                 (rcpu1 ELF)
+#   1. cargo xtask build k3-sched-demo              (rcpu1 ELF)
 #   2. k3-pack-itb.sh                               (cp ELF + lzo + mkimage → esos.itb)
 #   3. k3-console.py ensure-uboot                   (reset, catch autoboot, land at =>)
 #   4. fastboot usb 0 on the board                  (board enters fastboot gadget)
@@ -51,8 +51,8 @@ step() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
 # ── 1+2. build + pack ─────────────────────────────────────────────────────────
 if [ "$NO_BUILD" -eq 0 ]; then
-    step "build k3-minimal"
-    cargo xtask build k3-minimal
+    step "build k3-sched-demo"
+    cargo xtask build k3-sched-demo
 
     step "pack esos.itb (cp ELF + lzo + mkimage)"
     bash "$SCRIPT_DIR/k3-pack-itb.sh"

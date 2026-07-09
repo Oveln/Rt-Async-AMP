@@ -163,19 +163,22 @@ rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
 
 完整设计见 [docs/IPC-DESIGN.md](docs/IPC-DESIGN.md)；端到端通讯流程、SHM/通道状态机与 RPC 协议图见 [`architecture.html`](docs/architecture.html)（[§3 通讯全流程](docs/architecture.html#flow)、[§4 SHM 与通道状态机](docs/architecture.html#shm)、[§5 RPC 协议](docs/architecture.html#rpc)）。
 
-### 3.5 K3 实体板目标架构
+### 3.5 K3 实体板架构（已跑通）
 
-迁移到 K3 时**整个通信方案不变**，仅底层寄存器地址与外设模型替换：
+迁移到 K3 时**整个通信方案不变**，仅底层寄存器地址与外设模型替换。K3 线已在新 driver model（`Board` + 设备树 probe）下跑通抢占调度：
 
-| 层次 | QEMU virt（当前） | K3（迁移目标） |
+| 层次 | QEMU virt | K3 RT24（rcpu1） |
 |------|-------------------|----------------|
 | 数据通路 / RPC / 用户态接口 | ov-channels / ov-rpc / `/dev/rt_shm` | **完全不变** |
-| IPI 通知 | CLINT MSIP | ACLINT MSIP（同机制，换基址） |
-| 定时器 | CLINT mtime | AON Timer + GP Timer（rtimer0） |
-| 中断控制器 | PLIC `0x0c000000` | PLIC `0xe0000000`（RT24 视角，模型一致） |
-| UART | NS16550A | R_UART0（PXA-UART，需 CCU 使能时钟） |
+| IPI 通知 | CLINT MSIP | SysTimer MSIP（`systimer + hart<<27`，上板实测） |
+| 定时器 | CLINT mtime/mtimecmp | SysTimer mtime（`base+0xbff8` 全局）/ mtimecmp（`win+0x4000`） |
+| 中断控制器 | PLIC `0x0c000000` | PLIC `0xe0000000`（自定义布局：priority/enable/threshold 全带 `hart<<27` 偏移） |
+| UART | NS16550A（stride=1） | R_UART0（PXA-UART `0xc0881000`，stride=4，需 UUE+MCR OUT2） |
 | 共享内存 | QEMU 物理内存固定区 | SRAM（512KB）或 DDR |
-| 启动 | OpenSBI mret 分流 | U-Boot SPL `rproc_load` + `rproc_start` |
+| 启动 | OpenSBI mret 分流 | U-Boot SPL `rproc_load` + `rproc_start`（无 DTB handoff，DTB 内嵌进 ELF） |
+| 板级接入 | `default_drivers()`（ns16550a / CLINT） | 自定义 `K3_DRIVERS`（pxa-uart / SysTimer / PLIC），DTB 经 `include_bytes!` 内嵌 |
+
+K3 的 SysTimer 实为 CLINT 风格的**非标准布局**：per-hart 窗口步长 `hart<<27`（而非 SiFive 的 `hart*8`），MSIP 地址经 `firmware/msip_probe/` 上板实测确定为 `0xec000000`（= `systimer + (rcpu1<<27)`）。
 
 ---
 
@@ -188,7 +191,7 @@ rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
 - [x] 核心调度器（Spawner / Executor / RunQueue）
 - [x] O(1) 两级优先级位图 `PriorityBitmap`
 - [x] 过程宏 `#[task]` / `#[main]` / `#[interrupt]`
-- [x] 平台抽象（`Chip` / `TimerChip` trait）、QEMU virt 平台实现
+- [x] 平台抽象（`Board` trait + Driver Model，设备树 probe 实例化）、QEMU virt 平台实现
 - [x] Timer / TimerQueue、`JoinHandle<T>`
 - [x] 集成测试（14 个）
 
@@ -205,7 +208,8 @@ rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
 - [x] K3 RT24 启动机制全链路调研
 - [x] 实体板上手、刷机、RT24 UART 输出点亮
 - [x] 极简 Rust 固件替换官方 ESOS，打通 SPL → RT24 加载链
-- [ ] `chip-k3-rt24` 模块：PXA-UART 驱动、CCU 时钟使能、rtimer 定时器、PLIC 改址
+- [x] `chip-k3-rt24` 模块迁移到 driver model：PXA-UART / SysTimer（Timer+MSIP）/ PLIC，DTB 内嵌
+- [x] 抢占调度全链路在 K3 真板跑通（sched_demo：SysTimer 唤醒 + 优先级抢占 + MSIP 自中断）
 - [ ] 外设驱动：GPIO / PWM / I2C / SPI（机器人控制所需）
 
 ### 阶段四：实验展示（7 月 15 日 – 8 月 10 日）
@@ -234,6 +238,7 @@ rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
 | 2026-04 | rt-async 内核重新设计：优先级抢占 + 共享系统栈 + O(1) 位图调度，过程宏 API，QEMU virt 平台 |
 | 2026-05 | 同步原语、`JoinHandle`；确定 StarryOS + rt-async 双内核架构方案 |
 | 2026-06 | **QEMU 双核 AMP 跑通**：ov-channels + ov-rpc + rt_shm 驱动； |
+| 2026-07 | **K3 RT24 真板跑通**：driver model 重构（Board + 设备树 probe），MSIP 地址上板实测，sched_demo 跑通抢占调度 + SysTimer + MSIP 全链路 |
 
 ---
 
@@ -268,9 +273,12 @@ make test
 
 构建与部署均经 xtask：`cargo xtask build user-test-ipc|user-test-rpc|user-test-sched` 编译，`cargo xtask install --all` 装入 StarryOS rootfs，`cargo xtask run` 启动后在 StarryOS 用户态执行。
 
-### 6.4 计划中的硬件测试（K3）
+### 6.4 硬件测试（K3 RT24）
 
+- **msip_probe**（`firmware/msip_probe/`）：一次性诊断固件，上板实测确定 RT24 的 MSIP 地址为 `0xec000000`（= SysTimer `0xe4000000` + `(rcpu1<<27)`），写 1 触发 MachineSoft（mip=0x8）。
+- **sched_demo**（`apps/rt-async-k3/src/bin/sched_demo.rs`）：K3 RT24 真板抢占调度验证。task_high（优先级 3）与 task_low（优先级 1）各每 50ms 输出 `H`/`L`，上板观察到稳定交替（H 出现频率 ≥ L）、计数对等上涨，证明 SysTimer 唤醒 + 优先级抢占 + MSIP 自中断全链路在 K3 真板跑通。
 
+构建：`cargo xtask build k3-sched-demo` → `build/rt-async-k3-sched-demo.elf`；刷写：`./scripts/flash/k3-flash.sh`（一键编译+打包 itb+fastboot 刷写）；串口观察：R_UART0，115200 8N1。
 
 ---
 
@@ -315,25 +323,31 @@ rt-async-amp/
 ├── rt-async/                     # 【submodule】rt-async 实时 RTOS 内核 (github.com/Oveln/rt-async)
 │   ├── modules/executor/         #   核心调度器：Spawner / Executor / PriorityBitmap / task
 │   ├── modules/executor-macro/   #   过程宏 #[task] #[main] #[interrupt]
-│   ├── modules/platform*/        #   Chip / TimerChip trait + 平台实现
+│   ├── modules/platform*/        #   Board trait + Driver Model（设备树 probe）+ 平台实现
 │   └── apps/test/                #   14 个 QEMU 集成测试
 ├── tgoskits/                     # 【submodule】集成构建框架（含 os/StarryOS 通用内核、os/arceos、os/axvisor）
 │   └── os/StarryOS/              #   StarryOS 通用内核（本项目在其 kernel/src/pseudofs/dev/rt_shm.rs 新增 IPC 设备）
 ├── apps/
 │   ├── rt-async-app/             # rt-async 侧应用（QEMU virt）
 │   │   └── src/                  #   intercom.rs(IPI 策略) ipc_wait.rs uart_wait.rs bin/(console/demo)
-│   └── rt-async-k3/              # rt-async 侧应用（K3 RT24）
+│   └── rt-async-k3/              # rt-async 侧应用（K3 RT24，sched_demo 抢占调度验证）
 ├── user-apps/                    # StarryOS 用户态测试程序（musl 交叉编译）
 │   ├── user-test-ipc/            #   基础 IPC 收发
 │   ├── user-test-rpc/            #   RPC 四种调用模式
 │   └── user-test-sched/          #   三明治计时（端到端延迟 / 死锁复现用例）
 ├── modules/
 │   ├── chip-qemu-virt-rt/        # QEMU virt 平台支持（UART1 / CLINT / IPI / PLIC）
-│   ├── chip-k3-rt24/             # K3 RT24 平台支持
+│   ├── chip-k3-rt24/             # K3 RT24 平台支持（PXA-UART / SysTimer / MSIP / PLIC，DTB 内嵌）
 │   └── ov-rpc/                   # RPC 框架（postcard 序列化，call/send/urgent）
 ├── patches/
 │   ├── opensbi-amp.patch         # OpenSBI：hart 路由 + PIE 修复 + IPI 转发
 │   └── qemu-uart1.patch          # QEMU：第二路 UART @ 0x10002000 (IRQ 12)
+├── its/                          # 设备树源 + 编译产物（内嵌进 ELF .rodata）
+│   ├── rt-async-k3.dts/.dtb      #   K3 RT24 rcpu1 设备树（U-Boot 不 handoff DTB）
+│   └── qemu-virt-amp.dts         #   QEMU virt AMP 设备树
+├── firmware/
+│   └── msip_probe/               # 一次性诊断固件：上板实测 RT24 MSIP 地址
+├── scripts/flash/                # K3 一键刷写（编译+打包 itb+fastboot）
 ├── xtask/                        # 【构建编排器】setup/build/run/install/clean/qemu 子命令
 ├── docs/
 │   ├── architecture.html         # 交互式架构文档（7 节图表，README §3 引用）
@@ -384,13 +398,23 @@ cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS r
 cargo xtask run                            # 7. 启动双核 AMP（可选 --tmux 同时观察 UART1）
 ```
 
+### K3 实体板构建与刷写
+
+```bash
+cargo xtask build k3-sched-demo            # 构建 K3 RT24 rcpu1 固件 → build/rt-async-k3-sched-demo.elf
+./scripts/flash/k3-flash.sh                # 一键：编译 + 打包 itb（rcpu0 esos + rcpu1 rt-async）+ fastboot 刷写
+# 串口观察 R_UART0（115200 8N1）：sched_demo 输出交替的 H/L
+```
+
+> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 U-Boot 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。详见 [`scripts/flash/README.md`](scripts/flash/README.md)。
+
 ### 常用子命令
 
 ```bash
 # 构建单个目标：组件（opensbi / starryos / user-test-*）或 rt-async bin
 cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名：
                              #     qemu-demo / qemu-console / qemu-console-interrupt → flat bin（QEMU loader）
-                             #     k3-minimal → ELF（esos 脚本整合进 itb）
+                             #     k3-sched-demo → ELF（esos 脚本整合进 itb）
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
 cargo xtask run --bin demo   # 指定 rt-async bin 启动（默认 demo；run 用短名）

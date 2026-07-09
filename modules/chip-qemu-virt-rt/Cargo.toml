@@ -8,6 +8,8 @@ publish = false
 platform = { path = "../../rt-async/modules/platform" }
 extern-trait = "0.4.3"
 riscv = "0.16.0"
+fdt-parser = "0.4.19"
+log = "0.4"
 
 [build-dependencies]
 xtask = { path = "../../xtask" }

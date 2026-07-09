@@ -3,7 +3,11 @@
 //! hart 1 (M-mode): rt-async priority-preemptive scheduler, UART1 interactive shell
 //! hart 0 (S-mode): StarryOS, output to UART0
 //!
-//! RX strategy: UART1 RX interrupt → PLIC → MachineExternal ISR → ring buffer → WaitForByte Future
+//! RX strategy: UART1 RX interrupt → NS16550A driver ring buffer → SerialRx Future.
+//! Board (`chip-qemu-virt-rt`) 在 `Board::init()` 注册 RX IRQ handler；PLIC
+//! enable/priority 在 `Board::late_init()` 配置（由 `platform::start()` 在开
+//! 全局中断前调用，等 StarryOS 结束其共享 PLIC 初始化后再设，避免被覆盖）。
+//! App 代码不参与 PLIC 配置——换板零改动。
 
 #![no_std]
 #![no_main]
@@ -14,24 +18,17 @@ extern crate rt_async_app;
 use core::fmt::Write;
 use core::pin::Pin;
 
-use chip_qemu_virt_rt::{self as chip, plic_claim, plic_complete, PLICBASE};
 use executor::priority::Priority;
 use executor::spawner::Spawner;
+use futures::serial::SerialRx;
 use platform::arch::TrapFrame;
-use platform::{Chip, ChipImpl};
 
-use rt_async_app::uart_wait;
-
-
-use fugit::ExtU64;
-
-const UART1_IRQ: u32 = 12;
 const LINE_BUF_SIZE: usize = 128;
 
 struct UartWriter;
 impl Write for UartWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        ChipImpl::put_str(s);
+        platform::console().write(s.as_bytes());
         Ok(())
     }
 }
@@ -54,24 +51,15 @@ async fn task_ipc() {
     }
 }
 
-fn plic_set_priority(irq: u32, prio: u32) {
-    unsafe {
-        core::ptr::write_volatile((PLICBASE + 4 * irq as usize) as *mut u32, prio);
-    }
-}
-
 #[executor::task]
 async fn task_console() {
-    futures::timer::after(1.secs()).await;
-    plic_set_priority(UART1_IRQ, 2);
-
     let mut line_buf = [0u8; LINE_BUF_SIZE];
     let mut line_len: usize = 0;
 
     uprintln!("\r\nrt-async console ready (interrupt-driven). Type 'help' for commands.\r\n");
 
     loop {
-        let byte = uart_wait::WaitForByte.await;
+        let byte = SerialRx::new().await;
 
         match byte {
             0x7f | 0x08 => {
@@ -195,14 +183,11 @@ fn parse_i32(s: &str) -> Option<i32> {
 }
 
 fn put_str(s: &str) {
-    ChipImpl::put_str(s);
+    platform::console().write(s.as_bytes());
 }
 
 #[executor::main(info)]
 fn main(spawner: Pin<&'static Spawner<4>>) {
-    chip::uart_init();
-    chip::plic_init();
-
     log::info!("rt-async-amp: hart 1 console started (interrupt-driven)");
 
     spawner.spawn(Priority::new(2), task_ipc().unwrap());
@@ -223,13 +208,5 @@ fn MachineTimer(_tf: &mut TrapFrame) {
 
 #[executor::interrupt]
 fn MachineExternal(_tf: &mut TrapFrame) {
-    let irq = plic_claim();
-    if irq == UART1_IRQ {
-        while chip::uart_has_data() {
-            let byte = chip::uart_read_byte();
-            uart_wait::push_byte(byte);
-        }
-        uart_wait::notify_from_isr();
-    }
-    plic_complete(irq);
+    platform::dispatch_external();
 }

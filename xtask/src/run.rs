@@ -13,10 +13,26 @@ const UART_SOCK: &str = "/tmp/rt-async-uart.sock";
 const QEMU_DTS: &str = "its/qemu-virt-amp.dts";
 const QEMU_DTB: &str = "qemu-virt-amp.dtb";
 
+/// rt-async 专属 DTB（hart1 + UART1 视角）。经 QEMU loader 摆到
+/// RTASYNCDTBBASE，board_init 的 esos 同款扫描从此地址认领
+/// compatible="ov,rt-async" 的 DTB。
+const RTASYNC_DTS: &str = "its/rt-async-qemu-virt-amp.dts";
+const RTASYNC_DTB: &str = "rt-async.dtb";
+
 /// Compile the QEMU AMP device-tree source to DTB (uses `dtc`).
 fn ensure_dtb(root: &Path) -> std::path::PathBuf {
-    let dts = root.join(QEMU_DTS);
-    let dtb = root.join("build").join(QEMU_DTB);
+    compile_dtb(root, QEMU_DTS, QEMU_DTB)
+}
+
+/// Compile the rt-async专属 device-tree source to DTB (uses `dtc`).
+fn ensure_rtasync_dtb(root: &Path) -> std::path::PathBuf {
+    compile_dtb(root, RTASYNC_DTS, RTASYNC_DTB)
+}
+
+/// 共享的 dts→dtb 编译逻辑：按 mtime 增量编译。
+fn compile_dtb(root: &Path, dts_rel: &str, dtb_rel: &str) -> std::path::PathBuf {
+    let dts = root.join(dts_rel);
+    let dtb = root.join("build").join(dtb_rel);
 
     let dts_mtime = std::fs::metadata(&dts).ok().and_then(|m| m.modified().ok());
     let dtb_mtime = std::fs::metadata(&dtb).ok().and_then(|m| m.modified().ok());
@@ -64,9 +80,11 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     }
 
     let rtasync_base = cfg.get("RTASYNCBASE");
+    let rtasync_dtb_base = cfg.get("RTASYNCDTBBASE");
     let smp = cfg.get("QEMUSMP");
     let ram = cfg.get("QEMURAM");
     let dtb = ensure_dtb(root);
+    let rtasync_dtb = ensure_rtasync_dtb(root);
 
     let _ = std::fs::remove_file(UART_SOCK);
 
@@ -75,6 +93,10 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     eprintln!(
         "  UART1 → unix socket {} (rt-async, bidirectional)",
         UART_SOCK
+    );
+    eprintln!(
+        "  rt-async DTB → {rtasync_dtb_base} ({} bytes)",
+        rtasync_dtb.metadata().map(|m| m.len()).unwrap_or(0)
     );
     eprintln!("  Connect with: socat - UNIX-CONNECT:{}", UART_SOCK);
 
@@ -102,6 +124,11 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
             &starryos_bin.to_string_lossy(),
             "-device",
             &format!("loader,addr={rtasync_base},file={}", app_bin.display()),
+            "-device",
+            &format!(
+                "loader,addr={rtasync_dtb_base},file={}",
+                rtasync_dtb.display()
+            ),
             "-drive",
             &format!("file={},format=raw,if=none,id=hd0", rootfs.display()),
             "-device",
@@ -136,9 +163,11 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     }
 
     let rtasync_base = cfg.get("RTASYNCBASE");
+    let rtasync_dtb_base = cfg.get("RTASYNCDTBBASE");
     let smp = cfg.get("QEMUSMP");
     let ram = cfg.get("QEMURAM");
     let dtb = ensure_dtb(root);
+    let rtasync_dtb = ensure_rtasync_dtb(root);
     let root_str = root.to_string_lossy().to_string();
 
     // Pane 2 (right): socat listens on the Unix socket so it's ready
@@ -162,6 +191,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
          -dtb {} \
          -bios {} -kernel {} \
          -device loader,addr={},file={} \
+         -device loader,addr={},file={} \
          -drive file={},format=raw,if=none,id=hd0 \
          -device virtio-blk-pci,drive=hd0 \
          -nographic",
@@ -170,6 +200,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
         dtb.display(),
         opensbi_fw.display(), starryos_bin.display(),
         rtasync_base, app_bin.display(),
+        rtasync_dtb_base, rtasync_dtb.display(),
         rootfs.display(),
     );
 

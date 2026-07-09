@@ -14,22 +14,17 @@ extern crate rt_async_app;
 use core::fmt::Write;
 use core::pin::Pin;
 
-use chip_qemu_virt_rt::{self as chip, plic_claim, plic_complete, uart_has_data, uart_read_byte};
 use executor::priority::Priority;
 use executor::spawner::Spawner;
 use fugit::ExtU64;
 use platform::arch::TrapFrame;
-use platform::{Chip, ChipImpl};
 
-use rt_async_app::uart_wait;
-
-const UART1_IRQ: u32 = 12;
 const LINE_BUF_SIZE: usize = 128;
 
 struct UartWriter;
 impl Write for UartWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        ChipImpl::put_str(s);
+        platform::console().write(s.as_bytes());
         Ok(())
     }
 }
@@ -60,8 +55,7 @@ async fn task_console() {
     uprintln!("\r\nrt-async console ready. Type 'help' for commands.\r\n");
 
     loop {
-        if uart_has_data() {
-            let byte = uart_read_byte();
+        while let Some(byte) = platform::console().read() {
 
             match byte {
                 0x7f | 0x08 => {
@@ -188,14 +182,11 @@ fn parse_i32(s: &str) -> Option<i32> {
 }
 
 fn put_str(s: &str) {
-    ChipImpl::put_str(s);
+    platform::console().write(s.as_bytes());
 }
 
 #[executor::main(info)]
 fn main(spawner: Pin<&'static Spawner<4>>) {
-    chip::uart_init();
-    chip::plic_init();
-
     log::info!("rt-async-amp: hart 1 (rt-async) console started");
 
     spawner.spawn(Priority::new(2), task_ipc().unwrap());
@@ -216,13 +207,5 @@ fn MachineTimer(_tf: &mut TrapFrame) {
 
 #[executor::interrupt]
 fn MachineExternal(_tf: &mut TrapFrame) {
-    let irq = plic_claim();
-    if irq == UART1_IRQ {
-        while uart_has_data() {
-            let byte = uart_read_byte();
-            uart_wait::push_byte(byte);
-        }
-        uart_wait::notify_from_isr();
-    }
-    plic_complete(irq);
+    platform::dispatch_external();
 }

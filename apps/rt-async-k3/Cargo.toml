@@ -7,7 +7,9 @@ publish = false
 [dependencies]
 executor = { path = "../../rt-async/modules/executor" }
 platform = { path = "../../rt-async/modules/platform" }
+futures = { path = "../../rt-async/modules/futures" }
 chip-k3-rt24 = { path = "../../modules/chip-k3-rt24" }
+fugit = "0.4"
 log = { version = "0.4", default-features = false }
 
 [build-dependencies]
@@ -18,7 +20,7 @@ default = ["riscv64"]
 riscv64 = ["platform/riscv64"]
 
 [[bin]]
-name = "minimal"
+name = "sched_demo"
 
 [profile.dev]
 panic = "abort"
