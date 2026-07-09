@@ -128,8 +128,8 @@ impl Driver for PlicK3 {
         // 门槛清零（不屏蔽任何中断）。
         write32(win + THRESHOLD_OFFSET, 0);
 
-        // 先注册再打日志（log 经 console 输出，console 未注册会 panic）。
-        platform::driver::set_intctl(&PLIC);
+        // 先注册再打日志（log 经 console 输出；新 logger 经 try_console 容错）。
+        platform::driver::INTC.set(&PLIC);
 
         log::info!(
             "K3 PLIC probed: base={:#x}, hart={}, win={:#x}",

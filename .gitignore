@@ -12,3 +12,7 @@ node_modules
 .codegraph
 .zcode
 /StarryOS
+
+# DTB 是 .dts 的编译产物（build.rs 用 dtc 生成），不追踪
+# 限定 its/：避免误伤 scripts/flash/payloads 下的厂商固件 blob（已追踪）
+its/*.dtb

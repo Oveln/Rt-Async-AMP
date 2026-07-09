@@ -72,7 +72,7 @@ impl Board for QemuVirtRt {
 
         // 2. 注册板级 driver 列表（platform 内置默认列表）。
         let drivers = platform::drivers::default_drivers();
-        platform::driver::set_drivers(drivers);
+        platform::driver::DRIVERS.set(drivers);
 
         // 3. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
         platform::driver::boot();

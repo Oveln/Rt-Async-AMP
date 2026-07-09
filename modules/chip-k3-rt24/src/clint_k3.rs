@@ -107,8 +107,9 @@ impl Driver for K3SysTimer {
         let win = base + (hart << HART_SHIFT);
         WIN.store(win, Ordering::Release);
 
-        // 先注册再打日志（log 经 console 输出，console 未注册会 panic）。
-        platform::driver::set_timer(&TIMER);
+        // 先注册再打日志（log 经 console 输出；新 logger 经 try_console 容错，
+        // console 未就绪时静默丢弃而非 panic）。
+        platform::driver::TIMER.set(&TIMER);
 
         log::info!(
             "K3 SysTimer probed: base={:#x}, hart={}, win={:#x}",
@@ -169,8 +170,8 @@ impl Driver for K3Msip {
         let win = base + (hart << HART_SHIFT);
         WIN.store(win, Ordering::Release);
 
-        // 先注册再打日志（log 经 console 输出，console 未注册会 panic）。
-        platform::driver::set_ipi(&MSIP);
+        // 先注册再打日志（log 经 console 输出；新 logger 经 try_console 容错）。
+        platform::driver::IPI.set(&MSIP);
 
         log::info!("K3 MSIP probed: win={:#x} (msip @ {:#x})", win, win + OFF_MSIP);
     }

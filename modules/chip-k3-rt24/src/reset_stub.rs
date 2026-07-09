@@ -4,7 +4,7 @@
 //! 复位外设。关机语义退化为 `wfi` 死循环（与 PowerManager 配合的低功耗停机
 //! 留后续；阶段1仅需 trait 占位）。
 //!
-//! 不经 DT probe（无对应节点），由 `Board::init` 直接 `set_reset`。
+//! 不经 DT probe（无对应节点），由 `Board::init` 直接 `RESET.set`。
 
 use platform::device::Reset;
 
