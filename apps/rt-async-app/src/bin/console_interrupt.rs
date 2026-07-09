@@ -4,9 +4,10 @@
 //! hart 0 (S-mode): StarryOS, output to UART0
 //!
 //! RX strategy: UART1 RX interrupt → NS16550A driver ring buffer → SerialRx Future.
-//! Board (`chip-qemu-virt-rt`) registers the RX IRQ handler during `Board::init()`;
-//! PLIC enable/priority is configured here (after StarryOS finishes its shared
-//! PLIC init) via [`chip_qemu_virt_rt::setup_console_irq`].
+//! Board (`chip-qemu-virt-rt`) 在 `Board::init()` 注册 RX IRQ handler；PLIC
+//! enable/priority 在 `Board::late_init()` 配置（由 `platform::start()` 在开
+//! 全局中断前调用，等 StarryOS 结束其共享 PLIC 初始化后再设，避免被覆盖）。
+//! App 代码不参与 PLIC 配置——换板零改动。
 
 #![no_std]
 #![no_main]

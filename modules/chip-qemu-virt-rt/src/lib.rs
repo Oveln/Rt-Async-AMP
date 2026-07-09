@@ -104,6 +104,13 @@ impl Board for QemuVirtRt {
 ///
 /// 此函数在 `Board::late_init`（`platform::start()` 之前、全局中断关闭）
 /// 调用，忙等不影响系统响应。
+///
+/// **失效条件（需关注）**：当前 `HART0_BOOT_SECS` 是经验值，依赖两点假设——
+/// ① StarryOS 启动到 PLIC 初始化稳定在窗口内；② hart0 在该窗口之后不会
+/// 再次清零 source priority。若 StarryOS 启动序列或耗时显著变化（如增加
+/// 外设 probe、慢速 flash 初始化），需重估此窗口；hart0 若引入运行时
+/// 重新 disable_all_sources 的逻辑，本方案需改为事件驱动（如 StarryOS
+/// 完成后主动 IPI 通知），否则 priority 会被二次覆盖。
 fn setup_console_irq() {
     const TARGET_PRIO: u32 = 2;
     // 等 hart0 启动窗口（含 PLIC 初始化）。3 秒留足裕量。
