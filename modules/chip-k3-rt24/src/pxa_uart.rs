@@ -22,51 +22,65 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fdt_parser::Node;
 use platform::device::{Driver, Serial};
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::{ReadOnly, ReadWrite};
+use tock_registers::{register_bitfields, register_structs};
 
 /// probe 写入的 MMIO 基址。0 表示尚未 probe。
 static BASE: AtomicUsize = AtomicUsize::new(0);
 
-// ── NS16550/PXA 兼容寄存器偏移（stride = 4）──────────────────────
-const THR: usize = 0x000; // 发送保持（读为 RBR）
-const IER: usize = 0x004; // 中断使能（DLAB=0）；DLH（DLAB=1）
-const FCR: usize = 0x008; // FIFO 控制
-const LCR: usize = 0x00C; // 线路控制
-const MCR: usize = 0x010; // modem 控制
-const LSR: usize = 0x014; // 线路状态
-const DLL: usize = 0x000; // 除数低（DLAB=1）
-const DLH: usize = 0x004; // 除数高（DLAB=1）
+// ── 寄存器定义（tock-registers，stride = 4）─────────────────────────
 
-// PXA-uart 专属使能位——不置 UUE，整个 UART 单元 disabled，THR 写入不出波形。
-const UART_IER_UUE: u32 = 0x40; // UART Unit Enable
-const UART_MCR_OUT2: u32 = 0x08;
+register_bitfields![u32,
+    /// 中断使能寄存器 IER。
+    Ier [
+        UUE OFFSET(6) NUMBITS(1) [],  // UART Unit Enable（PXA 专属，最易漏）
+    ],
+    /// FIFO 控制寄存器 FCR。
+    Fcr [
+        ENABLE OFFSET(0) NUMBITS(1) [],  // FIFO 使能
+        CLR_RX OFFSET(1) NUMBITS(1) [],  // 清 RX FIFO
+        CLR_TX OFFSET(2) NUMBITS(1) [],  // 清 TX FIFO
+    ],
+    /// 线路控制寄存器 LCR。
+    Lcr [
+        WLEN8 OFFSET(0) NUMBITS(2) [],   // 8 数据位（值 0b11）
+        DLAB  OFFSET(7) NUMBITS(1) [],   // 除数锁存访问
+    ],
+    /// modem 控制寄存器 MCR。
+    Mcr [
+        OUT2 OFFSET(3) NUMBITS(1) [],    // OUT2（PXA 专属，配合 UUE）
+    ],
+    /// 线路状态寄存器 LSR。
+    Lsr [
+        DR   OFFSET(0) NUMBITS(1) [],   // 数据就绪
+        THRE OFFSET(5) NUMBITS(1) [],   // 发送保持寄存器空
+    ],
+];
 
-const LCR_DLAB: u32 = 0x80; // 设波特率时置
-const LCR_8N1: u32 = 0x03; // 8 数据位、1 停止位、无校验
-const FCR_ENABLE_CLEAR: u32 = 0x07; // 使能 FIFO + 清 RX/TX
-
-const LSR_THR_EMPTY: u32 = 0x20; // THR 空（可写）
-const LSR_DATA_READY: u32 = 0x01; // RX 数据就绪（可读）
+register_structs! {
+    /// PXA-UART 寄存器映射（u32 寄存器，stride = 4）。
+    pub PxaUartRegs {
+        (0x000 => thr_rbr: ReadWrite<u32>),                        // 发送/接收保持
+        (0x004 => ier:     ReadWrite<u32, Ier::Register>),         // 中断使能（DLAB=0）/ DLH（DLAB=1）
+        (0x008 => fcr:     ReadWrite<u32, Fcr::Register>),         // FIFO 控制
+        (0x00C => lcr:     ReadWrite<u32, Lcr::Register>),         // 线路控制
+        (0x010 => mcr:     ReadWrite<u32, Mcr::Register>),         // modem 控制
+        (0x014 => lsr:     ReadOnly<u32, Lsr::Register>),          // 线路状态
+        (0x018 => @END),
+    }
+}
 
 // 14.48MHz / (16 * 115200) ≈ 8
 const DIVISOR: u32 = 8;
 
-#[inline(always)]
-fn write32(addr: usize, val: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
-}
-
-#[inline(always)]
-fn read32(addr: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
-}
-
-/// 轮询 LSR bit5（THR 空）后写 THR（与旧 uart.rs::putc 一致）。
-#[inline(always)]
-fn putc(base: usize, c: u8) {
-    while read32(base + LSR) & LSR_THR_EMPTY == 0 {
-        core::hint::spin_loop();
-    }
-    write32(base + THR, c as u32);
+/// 返回寄存器引用。probe 前调用为 panic。
+fn regs() -> &'static PxaUartRegs {
+    let addr = BASE.load(Ordering::Acquire);
+    assert!(addr != 0, "pxa-uart: not probed");
+    // SAFETY: addr 来自 probe 写入的 DT reg，指向已验证的 MMIO 区域。
+    // 单 hart 串行访问，无别名引用（tock-registers 内部用 volatile）。
+    unsafe { &*(addr as *const PxaUartRegs) }
 }
 
 /// PXA-UART 单例（零大小）。
@@ -77,29 +91,36 @@ pub static INSTANCE: PxaUart = PxaUart;
 
 impl Serial for PxaUart {
     fn write(&self, buf: &[u8]) {
-        let base = BASE.load(Ordering::Acquire);
+        let r = regs();
         for &b in buf {
             // 串口需 \r\n：把 \n 转成 \r\n（与旧 uart.rs::put_str 行为一致），
             // 否则终端按 LF 解释会呈阶梯换行。
             if b == b'\n' {
-                putc(base, b'\r');
+                // 等 THR 空，写 \r。
+                while !r.lsr.is_set(Lsr::THRE) {
+                    core::hint::spin_loop();
+                }
+                r.thr_rbr.set(b'\r' as u32);
             }
-            putc(base, b);
+            // 等 THR 空，写字节。
+            while !r.lsr.is_set(Lsr::THRE) {
+                core::hint::spin_loop();
+            }
+            r.thr_rbr.set(b as u32);
         }
     }
 
     fn read(&self) -> Option<u8> {
         // 阶段1：轮询读（不接 RX 中断）。SerialRx 异步路径留后续。
-        let base = BASE.load(Ordering::Acquire);
-        if read32(base + LSR) & LSR_DATA_READY == 0 {
+        let r = regs();
+        if !r.lsr.is_set(Lsr::DR) {
             return None;
         }
-        Some(read32(base + THR) as u8)
+        Some(r.thr_rbr.get() as u8)
     }
 
     fn has_data(&self) -> bool {
-        let base = BASE.load(Ordering::Acquire);
-        read32(base + LSR) & LSR_DATA_READY != 0
+        regs().lsr.is_set(Lsr::DR)
     }
 }
 
@@ -119,20 +140,19 @@ impl Driver for PxaUart {
 
         // 波特率：设 DLAB → DLL/DLH → 清 DLAB 设 8N1 → FCR。
         // 时钟链/pinmux 已由 CCU/pinctrl driver 在 probe 前自动配置，此处只配 IP 自身。
-        write32(base + LCR, LCR_DLAB);
-        write32(base + DLL, DIVISOR & 0xFF);
-        write32(base + DLH, (DIVISOR >> 8) & 0xFF);
-        write32(base + LCR, LCR_8N1);
-        write32(base + FCR, FCR_ENABLE_CLEAR);
+        let r = regs();
+        r.lcr.write(Lcr::DLAB::SET);                 // 进除数锁存模式
+        r.thr_rbr.set(DIVISOR & 0xFF);               // DLL（offset 0x000 与 thr_rbr 共用）
+        r.ier.set((DIVISOR >> 8) & 0xFF);            // DLH（offset 0x004 与 ier 共用）
+        r.lcr.write(Lcr::WLEN8::SET);                // 清 DLAB，设 8N1
+        r.fcr.write(Fcr::ENABLE::SET + Fcr::CLR_RX::SET + Fcr::CLR_TX::SET);
 
         // UUE 单元使能（PXA 专属，⭐ 最易漏）+ MCR OUT2。
-        write32(base + IER, UART_IER_UUE);
-        write32(base + MCR, UART_MCR_OUT2);
+        r.ier.write(Ier::UUE::SET);
+        r.mcr.write(Mcr::OUT2::SET);
 
         // 登记进多实例注册表；默认 console 由 boot() 的 try_derive_console
         // 据 chosen.stdout-path 在首个 Serial probe 后派生（不再由 probe 自命）。
-        // 本 probe 内的 log::info! 因 console 尚未派生会经 try_console 静默丢弃；
-        // 后续节点（如 PLIC）probe 时 console 已就绪，日志正常输出。
         platform::driver::SERIALS.register(&INSTANCE);
 
         log::info!("K3 R_UART0 probed: base={:#x}, 115200-8N1", base);
