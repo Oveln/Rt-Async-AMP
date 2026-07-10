@@ -15,12 +15,12 @@
 //! ## 初始化序列（移植自 esos `os1_rcpu/baremetal/main.c`，已验证）
 //!
 //! `Board::init()`（由 `platform::init()` 调用）：
-//! 1. `clock::early_init()` —— SPL 握手回写（解锁 AP 的 6s 轮询）+ UART 时钟
-//!    链（ruart_14 DDN gate + UART0 末端 gate）。
+//! 1. `handshake::spl_handshake()` —— SPL 握手回写（解锁 AP 的 6s 轮询）。
 //! 2. `init_dtb` —— 注入内嵌 K3 DTB。
 //! 3. `DRIVERS.set` + `boot()` —— DT 遍历，按 compatible 实例化各 driver。
 //!    `boot()` 对每个节点在 probe 前自动应用 `pinctrl-0`（由 pinctrl-single
-//!    driver 完成），故 UART0 的 GPIO_122/123 pinmux 在 serial probe 前就绪。
+//!    driver 完成）并调用 `try_clock().enable_for()`（由 CCU driver 完成），
+//!    故 UART0 的 GPIO_122/123 pinmux 和末端时钟在 serial probe 前就绪。
 //!
 //! 启动握手必须最先（步骤1），否则 AP 卡在 `k3_rproc_start()` 的轮询循环。
 
@@ -29,6 +29,7 @@
 
 pub mod clock;
 pub mod clint_k3;
+pub mod handshake;
 pub mod pinctrl_k3;
 pub mod plic_k3;
 pub mod pxa_uart;
@@ -48,6 +49,7 @@ pub struct K3Rt24;
 /// reset_stub 无 DT 节点，不经 probe，在 init() 里直接 `RESET.set`。
 static K3_DRIVERS: &[&dyn Driver] = &[
     &pinctrl_k3::PINCTRL,
+    &clock::CCU,
     &pxa_uart::INSTANCE,
     &clint_k3::TIMER,
     &clint_k3::MSIP,
@@ -57,8 +59,9 @@ static K3_DRIVERS: &[&dyn Driver] = &[
 #[extern_trait]
 impl Board for K3Rt24 {
     fn init() {
-        // 1. SPL 握手回写 + UART 时钟链 + pinmux（最先，解锁 AP 6s 轮询）。
-        clock::early_init();
+        // 1. SPL 启动握手回写（最先，解锁 AP 的 6s 轮询）。
+        //    原 clock::early_init() 的握手职责抽出至此独立模块。
+        handshake::spl_handshake();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
         //    .dtb 由 build.rs 在编译期用 dtc 从 .dts 生成到 OUT_DIR，路径经
@@ -70,6 +73,9 @@ impl Board for K3Rt24 {
         platform::driver::DRIVERS.set(K3_DRIVERS);
 
         // 4. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
+        //    boot() 对每个节点：先 try_pinctrl().apply()，再
+        //    try_clock().enable_for()，最后 driver probe——故外设 probe
+        //    前引脚和时钟都已就绪。CCU 节点先于外设被 probe（DFS 先序）。
         platform::driver::boot();
 
         // 5. reset_stub 无 DT 节点，直接注册（关机=wfi 死循环，trait 占位）。

@@ -5,9 +5,10 @@
 //!
 //! ## 与时钟/pinmux 的分工
 //!
-//! UART 的上游时钟链（ruart_14 DDN gate `0xc088003c` bit31）+ 末端 gate
-//!（`0xc0881f00`=0x3）+ pinmux（GPIO_122/123）已在 `clock::early_init()` 里
-//! 做完（`Board::init` 第一步，先于本 probe）。本 probe **只做波特率/FIFO/
+//! UART 的时钟链（ruart_14 上游 gate + UART0 末端 gate）由 CCU driver
+//!（[`crate::clock`]）经设备树 `clocks` 属性在 `boot()` 的 driver probe
+//! **之前**自动使能；pinmux（GPIO_122/123）由 pinctrl-single driver 经
+//! `pinctrl-0` 同样在 probe 前自动应用。本 probe **只做波特率/FIFO/
 //! UUE 单元使能**——这些是 PXA-uart IP 自身的配置，与时钟链无关。
 //!
 //! ## PXA-uart 关键点
@@ -117,7 +118,7 @@ impl Driver for PxaUart {
         BASE.store(base, Ordering::Release);
 
         // 波特率：设 DLAB → DLL/DLH → 清 DLAB 设 8N1 → FCR。
-        // 时钟链/pinmux 已在 clock::early_init() 完成，此处只配 IP 自身。
+        // 时钟链/pinmux 已由 CCU/pinctrl driver 在 probe 前自动配置，此处只配 IP 自身。
         write32(base + LCR, LCR_DLAB);
         write32(base + DLL, DIVISOR & 0xFF);
         write32(base + DLH, (DIVISOR >> 8) & 0xFF);
