@@ -16,6 +16,9 @@
 
 use extern_trait::extern_trait;
 use platform::Board;
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::ReadWrite;
+use tock_registers::register_structs;
 
 #[allow(dead_code)]
 mod amp {
@@ -23,6 +26,22 @@ mod amp {
 }
 
 pub use amp::{SHMBASE, SHMSIZE, UART1IRQ};
+
+register_structs! {
+    /// PLIC priority 寄存器（单 u32，读回确认用）。
+    pub PlicPrioReg {
+        (0x00 => priority: ReadWrite<u32>),
+        (0x04 => @END),
+    }
+}
+
+register_structs! {
+    /// CLINT MSIP 寄存器（单 u32，跨 hart IPI 用）。
+    pub ClintMsipReg {
+        (0x00 => msip: ReadWrite<u32>),
+        (0x04 => @END),
+    }
+}
 
 pub struct QemuVirtRt;
 
@@ -127,10 +146,13 @@ fn setup_console_irq() {
     platform::intctl().enable_irq(UART1IRQ as u32);
     // 配置并读回确认（裸读 PLIC priority 寄存器，板级自查，不走通用 trait）；
     // hart0 偶发的延迟写需要重试，但有上限。
-    let prio_addr = (amp::PLICBASE + 4 * UART1IRQ as usize) as *const u32;
+    let prio_addr = amp::PLICBASE + 4 * UART1IRQ as usize;
     for _ in 0..MAX_CONFIRM_RETRIES {
         platform::intctl().set_priority(UART1IRQ as u32, TARGET_PRIO);
-        if unsafe { core::ptr::read_volatile(prio_addr) } == TARGET_PRIO {
+        // SAFETY: prio_addr = PLICBASE + irq*4，amp.toml 校验过的 MMIO 地址，
+        // 单 hart 串行读（tock-registers 内部用 volatile）。
+        let prio: &PlicPrioReg = unsafe { &*(prio_addr as *const PlicPrioReg) };
+        if prio.priority.get() == TARGET_PRIO {
             return;
         }
         for _ in 0..50_000 {
@@ -152,10 +174,14 @@ fn setup_console_irq() {
 /// 内部使用 `fence(Release)` 保证内存可见性。
 pub unsafe fn send_ipi_to_linux() {
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-    unsafe { core::ptr::write_volatile(amp::CLINTBASE as *mut u32, 1) };
+    // SAFETY: amp::CLINTBASE 是 amp.toml 校验过的 MMIO 地址，单 hart 串行写。
+    let msip: &ClintMsipReg = unsafe { &*(amp::CLINTBASE as *const ClintMsipReg) };
+    msip.msip.set(1);
 }
 
 /// 清除 hart 0 的 MSIP0。
 pub unsafe fn clear_ipi_to_linux() {
-    unsafe { core::ptr::write_volatile(amp::CLINTBASE as *mut u32, 0) };
+    // SAFETY: 同上。
+    let msip: &ClintMsipReg = unsafe { &*(amp::CLINTBASE as *const ClintMsipReg) };
+    msip.msip.set(0);
 }

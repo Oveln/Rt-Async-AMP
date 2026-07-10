@@ -19,6 +19,9 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fdt_parser::Node;
 use platform::device::{Driver, Ipi, Timer};
+use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::registers::{ReadOnly, ReadWrite};
+use tock_registers::register_structs;
 
 /// SysTimer 基址。
 const SYSTIMER_BASE: usize = 0xe400_0000;
@@ -34,20 +37,32 @@ const OFF_MTIME: usize = 0xBFF8;
 /// 时钟频率（Hz）。
 const FREQ_HZ: u32 = 24_000_000;
 
-#[inline(always)]
-fn write32(addr: usize, val: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
+register_structs! {
+    /// mtimecmp 寄存器，拆成 hi/lo 两个 32 位字段。
+    ///
+    /// RISC-V 真板写 mtimecmp 应先写高 32 位再写低 32 位，避免中间出现
+    /// 很小的临时值伪触发定时器中断。
+    pub MtimecmpRegs {
+        (0x00 => lo: ReadWrite<u32>),
+        (0x04 => hi: ReadWrite<u32>),
+        (0x08 => @END),
+    }
 }
 
-#[inline(always)]
-#[allow(dead_code)]
-fn read32(addr: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
+register_structs! {
+    /// mtime 寄存器（64 位全局单调计数器）。
+    pub MtimeRegs {
+        (0x00 => count: ReadOnly<u64>),
+        (0x08 => @END),
+    }
 }
 
-#[inline(always)]
-fn read64(addr: usize) -> u64 {
-    unsafe { core::ptr::read_volatile(addr as *const u64) }
+register_structs! {
+    /// MSIP 寄存器（单 u32：写 1 触发 MSI，写 0 清除）。
+    pub MsipRegs {
+        (0x00 => msip: ReadWrite<u32>),
+        (0x04 => @END),
+    }
 }
 
 /// probe 写入的 per-hart 窗口基址 = `base + (hart << 27)`。
@@ -69,18 +84,21 @@ impl Timer for K3SysTimer {
 
     fn now(&self) -> u64 {
         // 全局 mtime（base+0xbff8），所有 hart 共享同一递增计数。
-        read64(SYSTIMER_BASE + OFF_MTIME)
+        let addr = SYSTIMER_BASE + OFF_MTIME;
+        // SAFETY: 固定地址 0xe400bff8，amp.toml 校验，指向有效 MMIO 区，
+        // 单 hart 串行访问（tock-registers 内部用 volatile）。
+        let regs: &MtimeRegs = unsafe { &*(addr as *const MtimeRegs) };
+        regs.count.get()
     }
 
     fn set_deadline(&self, tick: u64) {
         let addr = WIN.load(Ordering::Acquire) + OFF_MTIMECMP;
-        // RISC-V 真板写 mtimecmp 应先写高 32 位再写低 32 位，避免中间出现一个
-        // 很小的临时值伪触发定时器中断（QEMU 上单次 64 位写等价，但 K3 真板
-        // 按规范拆写更稳）。
-        unsafe {
-            core::ptr::write_volatile((addr + 4) as *mut u32, (tick >> 32) as u32);
-            core::ptr::write_volatile(addr as *mut u32, tick as u32);
-        }
+        // SAFETY: addr = WIN + 0x4000，WIN 来自 probe 写入的 DT reg + hart 偏移，
+        // 指向有效 MMIO 区，单 hart 串行访问。
+        let regs: &MtimecmpRegs = unsafe { &*(addr as *const MtimecmpRegs) };
+        // 先写高 32 位再写低 32 位，避免伪瞬态触发。
+        regs.hi.set((tick >> 32) as u32);
+        regs.lo.set(tick as u32);
     }
 }
 
@@ -107,8 +125,6 @@ impl Driver for K3SysTimer {
         let win = base + (hart << HART_SHIFT);
         WIN.store(win, Ordering::Release);
 
-        // 先注册再打日志（log 经 console 输出；新 logger 经 try_console 容错，
-        // console 未就绪时静默丢弃而非 panic）。
         platform::driver::TIMER.set(&TIMER);
 
         log::info!(
@@ -123,31 +139,36 @@ impl Driver for K3SysTimer {
 // ── Ipi 单例 ───────────────────────────────────────────────────────
 
 /// SysTimer MSIP 单例（零大小）。
-pub struct K3Msip;
+pub struct K3MsIP;
 
 /// 全局单例，供 probe 注册进 registry。
-pub static MSIP: K3Msip = K3Msip;
+pub static MSIP: K3MsIP = K3MsIP;
 
-impl Ipi for K3Msip {
+impl Ipi for K3MsIP {
     unsafe fn send(&self) {
         // 写本 hart 的 MSIP=1 触发 MachineSoft。地址 WIN+0x0 已上板实测确认。
-        let addr = WIN.load(Ordering::Acquire) + OFF_MSIP;
-        if addr == OFF_MSIP {
-            return; // WIN 未 probe（=0），静默跳过
+        let win = WIN.load(Ordering::Acquire);
+        if win == 0 {
+            return; // WIN 未 probe，静默跳过
         }
-        write32(addr, 1);
+        // SAFETY: addr = WIN + 0x0，WIN 来自 probe 写入的 DT reg + hart 偏移，
+        // 指向有效 MMIO 区。Ipi::send 的 unsafe 由调用者保证上下文。
+        let regs: &MsipRegs = unsafe { &*((win + OFF_MSIP) as *const MsipRegs) };
+        regs.msip.set(1);
     }
 
     unsafe fn clear(&self) {
-        let addr = WIN.load(Ordering::Acquire) + OFF_MSIP;
-        if addr == OFF_MSIP {
+        let win = WIN.load(Ordering::Acquire);
+        if win == 0 {
             return;
         }
-        write32(addr, 0);
+        // SAFETY: 同上。
+        let regs: &MsipRegs = unsafe { &*((win + OFF_MSIP) as *const MsipRegs) };
+        regs.msip.set(0);
     }
 }
 
-impl Driver for K3Msip {
+impl Driver for K3MsIP {
     fn compatible(&self) -> &'static [&'static str] {
         &["spacemit,k3-systimer-msip", "riscv,clint0-msip"]
     }
@@ -170,7 +191,6 @@ impl Driver for K3Msip {
         let win = base + (hart << HART_SHIFT);
         WIN.store(win, Ordering::Release);
 
-        // 先注册再打日志（log 经 console 输出；新 logger 经 try_console 容错）。
         platform::driver::IPI.set(&MSIP);
 
         log::info!("K3 MSIP probed: win={:#x} (msip @ {:#x})", win, win + OFF_MSIP);

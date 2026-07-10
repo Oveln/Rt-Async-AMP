@@ -126,6 +126,7 @@ dependencies = [
  "log",
  "platform",
  "riscv",
+ "tock-registers",
  "xtask",
 ]
 
@@ -586,6 +587,7 @@ dependencies = [
  "portable-atomic",
  "riscv",
  "riscv64-rt",
+ "tock-registers",
 ]
 
 [[package]]
