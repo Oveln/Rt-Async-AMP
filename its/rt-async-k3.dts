@@ -13,15 +13,29 @@
 //   - SysTimer 0xe4000000：mtime(+0xbff8，全局)/mtimecmp(+0x4000+hart<<27)/
 //     MSIP(+0x0+hart<<27，已上板实测)
 //   - PLIC  0xe0000000：自定义布局，stride hart<<27
-//   - UART0 0xc0881000：PXA 派生，IRQ 17（时钟/pinmux 在 clock::early_init 已做）
+//   - UART0 0xc0881000：PXA 派生，IRQ 17（时钟在 clock::early_init 已做，
+//     pinmux 由 pinctrl-single driver 在 probe 前自动应用）
+//
+// 编译链：cc -E（展开 #include/#define 宏）→ dtc（求值算术，生成 .dtb）。
+// 宏定义见 k3-pinctrl.h（与 esos 互用）。
 
 /dts-v1/;
+
+#include "k3-pinctrl.h"
 
 / {
 	#address-cells = <2>;
 	#size-cells = <2>;
 	model = "ov,rt-async-k3";
 	compatible = "ov,rt-async";
+
+	// pinctrl-single 控制器（必须排在 serial 之前：DFS 先序保证
+	// pinctrl driver 先 probe 并注册进 PINCTRL slot，之后 serial 节点
+	// 在 probe 前自动应用 pinctrl-0 引脚配置）。
+	pinctrl@d401e000 {
+		compatible = "pinctrl-single";
+		reg = <0x0 0xd401e000 0x0 0x250>;
+	};
 
 	chosen {
 		stdout-path = "/serial@c0881000";
@@ -43,11 +57,23 @@
 		};
 	};
 
-	// R_UART0（PXA 派生，spacemit,pxa-uart0）。时钟/pinmux 在
-	// clock::early_init() 里已使能，本节点仅给 driver probe 取 reg。
+	// R_UART0 引脚配置（原 clock.rs 硬编码的 ruart0_3_cfg：GPIO_122/123）。
+	// K3_PADCONF 展开 → ((pinid)*4) (conf) 两组 cell，dtc 求值为
+	// <0x1e8 0xd044 0x1ec 0xd044>（offset, value 对）。
+	ruart0_3_cfg: ruart0-3-cfg {
+		pinctrl-single,pins = <
+			K3_PADCONF(GPIO_122, (MUX_MODE4 | EDGE_NONE | PULL_UP | PAD_DS8))  /* r_uart0_tx */
+			K3_PADCONF(GPIO_123, (MUX_MODE4 | EDGE_NONE | PULL_UP | PAD_DS8))  /* r_uart0_rx */
+		>;
+	};
+
+	// R_UART0（PXA 派生，spacemit,pxa-uart0）。时钟在 clock::early_init() 里
+	// 已使能；pinmux 由 pinctrl-single driver 在 probe 前据 pinctrl-0 自动应用。
 	serial@c0881000 {
 		compatible = "spacemit,pxa-uart0";
 		reg = <0x0 0xc0881000 0x0 0x100>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&ruart0_3_cfg>;
 	};
 
 	// SysTimer（mtime/mtimecmp）。compatible 用 K3 专属串，回退 riscv,clint0。
