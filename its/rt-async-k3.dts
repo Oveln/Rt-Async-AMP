@@ -42,11 +42,30 @@
 	// CCU 时钟控制器（DFS 先序：排在所有需时钟的外设之前，保证 CCU
 	// driver 先 probe 注册进 CLOCK slot）。#clock-cells=<1> 表示 clocks
 	// 属性里 phandle 后跟 1 个 ID cell（K3_CLK_xxx）。
-	ccu: ccu@c0880000 {
-		compatible = "spacemit,k3-ccu";
-		reg = <0x0 0xc0880000 0x0 0x1000>;
-		#clock-cells = <1>;
-	};
+		ccu: ccu@c0880000 {
+			compatible = "spacemit,k3-ccu";
+			reg = <0x0 0xc0880000 0x0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		// 核间信令 mailbox（纯门铃模式，数据走共享内存 ov-rpc）。
+		// rcpu-communicate 属性表示本节点由 rcpu1 视角使用（USER1=本地）。
+		// 两实例方向：
+		//   mailbox3（starryos -> rcpu1）：基址 0xCAC90C00，IRQ 68
+		//   mailbox4（rcpu1 -> starryos）：基址 0xCAC91000，IRQ 69
+		mailbox3: mailbox@cac90c00 {
+			compatible = "spacemit,k3-mailbox";
+			reg = <0x0 0xcac90c00 0x0 0x400>;
+			interrupts = <68>;
+			rcpu-communicate;
+		};
+
+		mailbox4: mailbox@cac91000 {
+			compatible = "spacemit,k3-mailbox";
+			reg = <0x0 0xcac91000 0x0 0x400>;
+			interrupts = <69>;
+			rcpu-communicate;
+		};
 
 	chosen {
 		stdout-path = "/serial@c0881000";

@@ -30,6 +30,7 @@
 pub mod clock;
 pub mod clint_k3;
 pub mod handshake;
+pub mod mailbox;
 pub mod pinctrl_k3;
 pub mod plic_k3;
 pub mod pxa_uart;
@@ -50,6 +51,7 @@ pub struct K3Rt24;
 static K3_DRIVERS: &[&dyn Driver] = &[
     &pinctrl_k3::PINCTRL,
     &clock::CCU,
+    &mailbox::DRIVER,
     &pxa_uart::INSTANCE,
     &clint_k3::TIMER,
     &clint_k3::MSIP,
@@ -80,5 +82,12 @@ impl Board for K3Rt24 {
 
         // 5. reset_stub 无 DT 节点，直接注册（关机=wfi 死循环，trait 占位）。
         platform::driver::RESET.set(&reset_stub::INSTANCE);
+    }
+
+    fn late_init() {
+        // PLIC 已 probe（DFS 先序保证：mailbox 在 K3_DRIVERS 中排在 PLIC
+        // 之前，故 mailbox probe 早于 PLIC probe；但 late_init 在 boot()
+        // 全部完成后调用，此时 PLIC 已就绪），可以安全注册 ISR 并使能中断。
+        mailbox::setup_interrupts();
     }
 }
