@@ -259,6 +259,7 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
   每个 `unsafe` 块上方注释说明为何安全。
 - `log::info!()`/`log::error!()` 输出到 console UART，阻塞写，**中断上下文勿高频打印**。
 - 构建产物（`build/*.elf`、`*.bin`、`*.dtb`）不入 git，由 build.rs / xtask 派生。
+- **过程中产生的设计文档、计划文档不入 git**（如 `docs/superpowers/`），除非用户明确要求。
 - `amp.toml` 是地址布局 + 构建参数的 single source of truth，driver 硬编码地址时与
   之保持一致并加注释。
 
