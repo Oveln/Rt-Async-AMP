@@ -586,6 +586,7 @@ dependencies = [
  "portable-atomic",
  "riscv",
  "riscv64-rt",
+ "tock-registers",
 ]
 
 [[package]]
