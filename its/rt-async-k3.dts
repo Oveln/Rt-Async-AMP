@@ -13,15 +13,17 @@
 //   - SysTimer 0xe4000000：mtime(+0xbff8，全局)/mtimecmp(+0x4000+hart<<27)/
 //     MSIP(+0x0+hart<<27，已上板实测)
 //   - PLIC  0xe0000000：自定义布局，stride hart<<27
-//   - UART0 0xc0881000：PXA 派生，IRQ 17（时钟在 clock::early_init 已做，
-//     pinmux 由 pinctrl-single driver 在 probe 前自动应用）
+//   - UART0 0xc0881000：PXA 派生，IRQ 17（时钟链由 CCU driver 经 clocks
+//     属性在 probe 前自动配置，pinmux 由 pinctrl-single driver 在 probe
+//     前自动应用；SPL 握手见 handshake 模块）
 //
 // 编译链：cc -E（展开 #include/#define 宏）→ dtc（求值算术，生成 .dtb）。
-// 宏定义见 k3-pinctrl.h（与 esos 互用）。
+// 宏定义见 k3-pinctrl.h（与 esos 互用）+ k3-clock.h（时钟 ID）。
 
 /dts-v1/;
 
 #include "k3-pinctrl.h"
+#include "k3-clock.h"
 
 / {
 	#address-cells = <2>;
@@ -35,6 +37,15 @@
 	pinctrl@d401e000 {
 		compatible = "pinctrl-single";
 		reg = <0x0 0xd401e000 0x0 0x250>;
+	};
+
+	// CCU 时钟控制器（DFS 先序：排在所有需时钟的外设之前，保证 CCU
+	// driver 先 probe 注册进 CLOCK slot）。#clock-cells=<1> 表示 clocks
+	// 属性里 phandle 后跟 1 个 ID cell（K3_CLK_xxx）。
+	ccu: ccu@c0880000 {
+		compatible = "spacemit,k3-ccu";
+		reg = <0x0 0xc0880000 0x0 0x1000>;
+		#clock-cells = <1>;
 	};
 
 	chosen {
@@ -67,13 +78,15 @@
 		>;
 	};
 
-	// R_UART0（PXA 派生，spacemit,pxa-uart0）。时钟在 clock::early_init() 里
-	// 已使能；pinmux 由 pinctrl-single driver 在 probe 前据 pinctrl-0 自动应用。
+	// R_UART0（PXA 派生）。时钟链（ruart_14 上游 gate + UART0 末端 gate）
+	// 由 CCU driver 经 clocks 属性在 probe 前自动配置；pinmux 由
+	// pinctrl-single driver 在 probe 前据 pinctrl-0 自动应用。
 	serial@c0881000 {
 		compatible = "spacemit,pxa-uart0";
 		reg = <0x0 0xc0881000 0x0 0x100>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&ruart0_3_cfg>;
+		clocks = <&ccu K3_CLK_RUART0>;
 	};
 
 	// SysTimer（mtime/mtimecmp）。compatible 用 K3 专属串，回退 riscv,clint0。
