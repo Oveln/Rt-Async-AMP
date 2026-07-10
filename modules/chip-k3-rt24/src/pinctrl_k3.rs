@@ -19,14 +19,20 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use fdt_parser::Node;
 use platform::device::{Driver, PinController};
+use tock_registers::interfaces::Writeable;
+use tock_registers::registers::ReadWrite;
+use tock_registers::register_structs;
+
+register_structs! {
+    /// 单个 pinmux 配置寄存器（每 pin 4 字节，散落在 base + pin*4）。
+    pub PinReg {
+        (0x00 => conf: ReadWrite<u32>),
+        (0x04 => @END),
+    }
+}
 
 /// probe 写入的 pinctrl 寄存器基址（从 DT `reg` 属性读取）。
 static BASE: AtomicUsize = AtomicUsize::new(0);
-
-#[inline(always)]
-fn write32(addr: usize, val: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
-}
 
 /// pinctrl-single 控制器单例（零大小）。
 pub struct PinctrlK3;
@@ -47,9 +53,6 @@ impl Driver for PinctrlK3 {
             .address as usize;
         BASE.store(base, Ordering::Release);
         platform::driver::PINCTRL.set(&PINCTRL);
-        // 注意：pinctrl 是 K3_DRIVERS 列表首位 + DT 第一个节点，probe 早于
-        // console 派生，此刻 log 会被 logger 丢弃。console 就绪后（如后续调整
-        // 初始化顺序使 pinctrl 延后）此日志自动生效。
         log::info!("k3 pinctrl: base {:#x}", base);
     }
 }
@@ -79,7 +82,11 @@ impl PinController for PinctrlK3 {
         // 4. 两两一组写入 pinmux 寄存器。
         let mut vals = pins_prop.u32_list();
         while let (Some(offset), Some(value)) = (vals.next(), vals.next()) {
-            write32(base + offset as usize, value);
+            let addr = base + offset as usize;
+            // SAFETY: addr = pinctrl base + pin offset，来自 DT reg + 编译期
+            // 求值的 pinctrl-single,pins 元组。指向有效 MMIO 区，单 hart 串行。
+            let reg: &PinReg = unsafe { &*(addr as *const PinReg) };
+            reg.conf.set(value);
         }
     }
 }
