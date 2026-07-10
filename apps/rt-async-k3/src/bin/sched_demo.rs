@@ -30,6 +30,9 @@ use executor::spawner::Spawner;
 use fugit::ExtU64;
 use platform::arch::TrapFrame;
 
+// 编译期生成的本 ELF 构建时间（build.rs → OUT_DIR/build_time.rs）。
+include!(concat!(env!("OUT_DIR"), "/build_time.rs"));
+
 /// 高优先级任务：每 50ms 输出 `H`，验证定时器唤醒 + 抢占低优先级。
 #[executor::task]
 async fn task_high() {
@@ -65,7 +68,9 @@ async fn task_low() {
 
 #[executor::main]
 fn main(spawner: Pin<&'static Spawner<4>>) {
-    platform::console().write(b"\nK3 rt-async scheduler demo\n");
+    platform::console().write(b"\nK3 rt-async scheduler demo (built ");
+    platform::console().write(BUILD_TIME.as_bytes());
+    platform::console().write(b")\n");
     platform::console().write(b"expect alternating H/L (high preempts low)\n\n");
 
     spawner.spawn(Priority::new(3), task_high().unwrap());

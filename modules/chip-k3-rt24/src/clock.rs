@@ -1,7 +1,9 @@
-//! K3 RT24 rcpu1 时钟链 + pinmux + SPL 握手常量与初始化。
+//! K3 RT24 rcpu1 时钟链 + SPL 握手常量与初始化。
 //!
 //! 移植自 esos `os1_rcpu/baremetal/main.c`（已验证），对应
-//! 设计文档 §1.5 的步骤 1-4。
+//! 设计文档 §1.5 的步骤 1-3。pinmux（原步骤 4）已迁移到
+//! [`crate::pinctrl_k3`] driver，经 `pinctrl-0` DTS 属性由
+//! `boot()` 在 driver probe 前自动应用。
 
 // 步骤1：SPL 启动握手。k3_rproc_start() 唤醒 rcpu1 后死等
 // CORE0_BOOT_ENTRY_LO 非 0（~6s）。rcpu1 必须回写 *CORE0* 寄存器
@@ -27,15 +29,6 @@ pub const RUART_14_GATE_BIT: u32 = 1u32 << 31;
 pub const UART0_CLK_RST: usize = 0xc088_1f00;
 pub const UART0_CLK_RST_ENABLE: u32 = 0x0000_0003;
 
-// 步骤4：pinmux。ruart0_3_cfg 用 "pinctrl-single,pins"（offset/value 对，
-// 每 pin 一个寄存器），故 GPIO_n 寄存器 = PINCTRL_BASE + n*4。
-//   GPIO_122 (0x1e8) -> UART0_TX,  GPIO_123 (0x1ec) -> UART0_RX
-// 值 = MUX_MODE4 | EDGE_NONE | PULL_UP | PAD_DS8 = 0xD044（per ruart0_3_cfg）。
-pub const PINCTRL_BASE: usize = 0xd401_e000;
-pub const UART0_TX_PIN: usize = 122;
-pub const UART0_RX_PIN: usize = 123;
-pub const UART0_PIN_VAL: u32 = 0xD044;
-
 #[inline(always)]
 pub(crate) fn write32(addr: usize, val: u32) {
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) };
@@ -46,9 +39,11 @@ pub(crate) fn read32(addr: usize) -> u32 {
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
 
-/// 握手回写 + 上游 ruart_14 gate + UART0 末端 gate + pinmux（步骤 1-4）。
+/// 握手回写 + 上游 ruart_14 gate + UART0 末端 gate（步骤 1-3）。
 ///
 /// `Chip::board_init()` 第一步。握手必须最先（解锁 AP 的 6s 轮询）。
+/// UART0 pinmux 不在此处——由 `pinctrl-single` driver 在 `boot()` DFS
+/// 遍历 serial 节点时自动应用（见 [`crate::pinctrl_k3`]）。
 pub fn early_init() {
     // 1. SPL 握手回写（最先，解锁 AP）
     write32(RCPU_CORE0_BOOT_ENTRY_LO, 1);
@@ -59,8 +54,4 @@ pub fn early_init() {
 
     // 3. 使能 UART0 末端 gate（gate=0x3、mux=ruart_14、div=/1）
     write32(UART0_CLK_RST, UART0_CLK_RST_ENABLE);
-
-    // 4. pinmux：GPIO_122=TX, GPIO_123=RX
-    write32(PINCTRL_BASE + UART0_TX_PIN * 4, UART0_PIN_VAL);
-    write32(PINCTRL_BASE + UART0_RX_PIN * 4, UART0_PIN_VAL);
 }
