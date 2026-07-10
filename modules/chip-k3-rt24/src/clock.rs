@@ -34,7 +34,7 @@ use fdt_parser::Node;
 use platform::device::{ClockProvider, Driver};
 use platform::driver;
 
-use tock_registers::interfaces::{Readable, ReadWriteable, Writeable};
+use tock_registers::interfaces::{ReadWriteable, Writeable};
 use tock_registers::registers::ReadWrite;
 use tock_registers::{register_bitfields, register_structs};
 
