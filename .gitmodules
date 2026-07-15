@@ -4,4 +4,9 @@
 [submodule "tgoskits"]
 	path = tgoskits
 	url = https://github.com/Oveln/tgoskits.git
-	branch = dev
+	# 上游基线：Dirinkbottle/tgoskits dev-k3com260kit（K3 com260kit 板级适配来源）。
+	# 开发分支 feat/rt-async-amp 基于 dev-k3com260kit + 本项目 rt-shm/AMP 工作，
+	# push 到 Oveln/tgoskits（自己的 fork）。子模块内 origin=Oveln(可 push)，
+	# upstream=Dirinkbottle(只 fetch)。url 必须指向 gitlink commit 所在仓库，
+	# 即 Oveln fork（dev-k3com260kit 基线 + 本项目 cherry-pick 后的 commit 只在此）。
+	branch = feat/rt-async-amp
