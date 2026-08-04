@@ -6,17 +6,18 @@
 //! ## 职责
 //!
 //! - [`Board`] 实现：DTB handoff + driver 注册 + DT 遍历 + IRQ 注册
-//! - AMP 共享内存常量和 hart0 IPI（`send_ipi_to_linux`）
+//! - AMP 共享内存/通知驱动注册（`ov_shm` crate：`ShmDriver` + `ClintMsipNotifier`）
 //!
 //! 全部外设驱动（NS16550A / CLINT / PLIC / sifive-test）已迁移到
-//! `platform::drivers` 内部模块，经设备树 probe 实例化。
+//! `platform::drivers` 内部模块，经设备树 probe 实例化；跨核共享内存与
+//! 通知（MSIP0 写）由 `ov_shm` 提供并经本板驱动列表注册。
 
 #![no_std]
 #![allow(unreachable_code)]
 
 use extern_trait::extern_trait;
 use platform::Board;
-use tock_registers::interfaces::{Readable, Writeable};
+use tock_registers::interfaces::Readable;
 use tock_registers::registers::ReadWrite;
 use tock_registers::register_structs;
 
@@ -25,7 +26,8 @@ mod amp {
     include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
 }
 
-pub use amp::{SHMBASE, SHMSIZE, UART1IRQ};
+/// UART1 中断号（IRQ 12，由 amp.toml 生成）。
+pub use amp::UART1IRQ;
 
 register_structs! {
     /// PLIC priority 寄存器（单 u32，读回确认用）。
@@ -35,15 +37,22 @@ register_structs! {
     }
 }
 
-register_structs! {
-    /// CLINT MSIP 寄存器（单 u32，跨 hart IPI 用）。
-    pub ClintMsipReg {
-        (0x00 => msip: ReadWrite<u32>),
-        (0x04 => @END),
-    }
-}
-
 pub struct QemuVirtRt;
+
+/// 板级驱动列表：platform 内置 5 个通用驱动 + ov_shm 的共享内存/通知驱动。
+///
+/// 不用 `platform::drivers::default_drivers()`（不含 AMP 设备），单独组装
+/// 数组注入 [`platform::driver::DRIVERS`]，经 [`platform::driver::boot`]
+/// 按 DT compatible 遍历实例化。
+static QEMU_DRIVERS: &[&dyn platform::Driver] = &[
+    &platform::drivers::serial_ns16550a::INSTANCE,
+    &platform::drivers::timer_clint::INSTANCE,
+    &platform::drivers::ipi_clint_msip::INSTANCE,
+    &platform::drivers::reset_sifive_test::INSTANCE,
+    &platform::drivers::plic_sifive::PLIC,
+    &ov_shm::shm::INSTANCE,
+    &ov_shm::notifier::CLINT_MSIP,
+];
 
 /// esos 同款 handoff：从 `RTASYNCDTBBASE` 起按 `SCAN_STEP` 步长扫描内存，
 /// 认领 root 节点 `compatible` 含 `"ov,rt-async"` 的 DTB。
@@ -89,8 +98,8 @@ impl Board for QemuVirtRt {
         let dtb = locate_rtasync_dtb();
         platform::dtb::init_dtb(dtb);
 
-        // 2. 注册板级 driver 列表（platform 内置默认列表）。
-        let drivers = platform::drivers::default_drivers();
+        // 2. 注册板级 driver 列表（platform 内置 5 个 + ov_shm AMP 驱动）。
+        let drivers = QEMU_DRIVERS;
         platform::driver::DRIVERS.set(drivers);
 
         // 3. 遍历 DT 实例化 driver（probe 各节点 → 填充 registry 槽位）。
@@ -160,28 +169,4 @@ fn setup_console_irq() {
         }
     }
     log::warn!("setup_console_irq: priority not stable after retries, forcing enable");
-}
-
-// ── AMP 专用：向 hart 0 (StarryOS) 发送 IPI ───────────────────────────
-
-/// 向 hart 0 (StarryOS) 发送 IPI (写 MSIP0)。
-///
-/// 与 driver registry 的本 hart IPI（base + hart*4）不同，这是跨 hart 的
-/// AMP 通知——写 CLINT base+0 触发 hart0 的 MachineSoft 中断。
-///
-/// # Safety
-/// 调用前应确保共享内存中的数据已写入完成。
-/// 内部使用 `fence(Release)` 保证内存可见性。
-pub unsafe fn send_ipi_to_linux() {
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-    // SAFETY: amp::CLINTBASE 是 amp.toml 校验过的 MMIO 地址，单 hart 串行写。
-    let msip: &ClintMsipReg = unsafe { &*(amp::CLINTBASE as *const ClintMsipReg) };
-    msip.msip.set(1);
-}
-
-/// 清除 hart 0 的 MSIP0。
-pub unsafe fn clear_ipi_to_linux() {
-    // SAFETY: 同上。
-    let msip: &ClintMsipReg = unsafe { &*(amp::CLINTBASE as *const ClintMsipReg) };
-    msip.msip.set(0);
 }

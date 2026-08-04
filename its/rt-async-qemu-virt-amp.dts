@@ -62,10 +62,10 @@
         reg = <0 0x0100000 0 0x1000>;
     };
 
-    shm@88000000 {
-        compatible = "ov,rt-async-shm";
-        reg = <0 0x88000000 0 0x11000>;
-    };
+    // 跨核共享内存 + notifier：单一真相源见 rt-async-shm.dtsi。
+    // rt-async 侧写 MSIP0（唤醒 hart0/StarryOS），无需 OV_AP_SIDE。
+#define OV_MSIP_HART 0
+#include "rt-async-shm.dtsi"
 
     plic@c000000 {
         compatible = "riscv,plic0";

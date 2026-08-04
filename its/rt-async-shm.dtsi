@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: MIT
+//
+// 跨核共享内存节点单一真相源（rt-async-amp 系统）。
+//
+// 由两边的设备树源文件引用：
+//   - its/qemu-virt-amp.dts          （AP / StarryOS 视角）
+//   - its/rt-async-qemu-virt-amp.dts （rt-async 视角）
+//
+// 引用方式：在 #include 之前按需定义宏覆盖默认值：
+//   - OV_MSIP_HART：本端要唤醒的**对端** hart 号。rt-async 侧写 MSIP0
+//     唤醒 hart0（StarryOS），StarryOS 侧写 MSIP1 唤醒 hart1（rt-async）。
+//   - OV_AP_SIDE   ：AP 侧（StarryOS）定义，增加 S-mode 独有属性（SSI cause）。
+//
+// 编译链与 K3 一致：cc -E（-I its/ 展开 #include/#define）→ dtc（求值算术
+// 表达式，如 <0 (0x02000000 + OV_MSIP_HART*4) 0 0x4>）。
+
+#ifndef OV_MSIP_HART
+#define OV_MSIP_HART 0
+#endif
+
+rt-async@88000000 {
+	compatible = "ov,rt-async-amp";
+	reg = <0 0x88000000 0 0x11000>;
+
+	// 显式声明子节点的 cell 尺寸，避免 fdt-parser 解析 notifier.reg
+	// 时回退到默认值（默认 #size-cells=1）导致 reg 错位/panic。
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+
+	// 节点名不带 unit-address：两侧 reg 不同（MSIP0/MSIP1），同名会
+	// 触发 dtc 的 unit-address 与 reg 不匹配警告。驱动按 compatible
+	// 匹配（fdt-parser 的 Node 查找不依赖节点名），故省略 @ 后缀。
+	notifier {
+		compatible = "ov,clint-msip-notifier";
+		// MSIP 物理地址 = CLINTBASE(0x2000000) + hart*4。
+		// 本端写**对端**的 MSIP 触发其中断：rt-async(MSIP_HART=0) 写
+		// MSIP0 唤醒 hart0，StarryOS(MSIP_HART=1) 写 MSIP1 唤醒 hart1。
+		reg = <0 (0x02000000 + OV_MSIP_HART * 4) 0 0x4>;
+#ifdef OV_AP_SIDE
+		// AP 侧（S-mode）独有：SSI cause 号（riscv64 软中断 = 1）。
+		// rt-async 在 M-mode 直接读 mip.MSIP，不需要此属性。
+		ov,ipi-irq = <0x1>;
+#endif
+	};
+};

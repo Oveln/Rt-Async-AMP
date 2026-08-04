@@ -30,24 +30,52 @@ fn ensure_rtasync_dtb(root: &Path) -> std::path::PathBuf {
 }
 
 /// 共享的 dts→dtb 编译逻辑：按 mtime 增量编译。
+///
+/// 编译链与 K3（`modules/chip-k3-rt24/build.rs`）一致：
+/// `cc -E`（展开 #include/#define，-I its/）→ `dtc`（求值算术表达式）。
+/// DTS 经 `#include "rt-async-shm.dtsi"` 引用跨核共享内存节点单一真相源，
+/// 故依赖追踪需包含 its/ 下所有 .dts/.dtsi 的 mtime。
 fn compile_dtb(root: &Path, dts_rel: &str, dtb_rel: &str) -> std::path::PathBuf {
+    let its_dir = root.join("its");
+    // dts_rel 形如 "its/<name>.dts"，含 its/ 前缀，故从 root join（勿与 its_dir 再拼）。
     let dts = root.join(dts_rel);
     let dtb = root.join("build").join(dtb_rel);
+    let pp_dts = root.join("build").join(format!("{}.pp.dts", dtb_rel));
 
-    let dts_mtime = std::fs::metadata(&dts).ok().and_then(|m| m.modified().ok());
+    let inputs: Vec<_> = std::fs::read_dir(&its_dir)
+        .expect("its/ dir missing")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("dts" | "dtsi")))
+        .collect();
+
+    let newest_input = inputs.iter().filter_map(|p| p.metadata().ok()).filter_map(|m| m.modified().ok()).max();
     let dtb_mtime = std::fs::metadata(&dtb).ok().and_then(|m| m.modified().ok());
 
-    let stale = match (dts_mtime, dtb_mtime) {
-        (_, None) => true,
-        (Some(dts_ts), Some(dtb_ts)) => dts_ts > dtb_ts,
-        (None, Some(_)) => false,
-    };
+    // 任一 dts/dtsi 比 dtb 新则重编译（dtsi 改动会影响所有引用它的 DTB）。
+    let stale = newest_input.map_or(true, |t| dtb_mtime.map_or(true, |d| t > d));
 
     if stale {
         eprintln!("DTB: compiling {} -> {}", dts.display(), dtb.display());
         std::fs::create_dir_all(root.join("build")).unwrap();
+
+        // 1. C 预处理：展开 #include/#define（与 K3 build.rs 一致）。
+        let cpp_out = Command::new("cc")
+            .args(["-E", "-P", "-nostdinc", "-undef", "-x", "assembler-with-cpp"])
+            .arg("-I")
+            .arg(&its_dir)
+            .arg(&dts)
+            .output()
+            .unwrap_or_else(|_| panic!("cc (C compiler) not found"));
+        if !cpp_out.status.success() {
+            eprintln!("cc -E failed:\n{}", String::from_utf8_lossy(&cpp_out.stderr));
+            panic!("DTS preprocess failed");
+        }
+        std::fs::write(&pp_dts, &cpp_out.stdout).expect("write pp.dts");
+
+        // 2. dtc 编译：算术表达式由 dtc 求值。
         let out = Command::new("dtc")
-            .args(["-I", "dts", "-O", "dtb", "-o", &dtb.to_string_lossy(), &dts.to_string_lossy()])
+            .args(["-I", "dts", "-O", "dtb", "-o", &dtb.to_string_lossy(), &pp_dts.to_string_lossy()])
             .output()
             .expect("dtc not found. Install device-tree-compiler (dtc) via your system package manager");
         if !out.status.success() {
@@ -132,7 +160,7 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
             "-drive",
             &format!("file={},format=raw,if=none,id=hd0", rootfs.display()),
             "-device",
-            "virtio-blk-pci,drive=hd0",
+            "nvme,drive=hd0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
         ])
         .status()
         .expect("qemu not found");
@@ -193,7 +221,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
          -device loader,addr={},file={} \
          -device loader,addr={},file={} \
          -drive file={},format=raw,if=none,id=hd0 \
-         -device virtio-blk-pci,drive=hd0 \
+         -device nvme,drive=hd0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65 \
          -nographic",
         qemu_bin.display(),
         UART_SOCK, smp, ram,

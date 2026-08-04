@@ -124,6 +124,7 @@ dependencies = [
  "extern-trait",
  "fdt-parser",
  "log",
+ "ov-shm",
  "platform",
  "riscv",
  "tock-registers",
@@ -565,6 +566,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ov-shm"
+version = "0.1.0"
+dependencies = [
+ "fdt-parser",
+ "log",
+ "platform",
+ "tock-registers",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +706,7 @@ dependencies = [
  "log",
  "ov-channels",
  "ov-rpc",
+ "ov-shm",
  "platform",
  "portable-atomic",
  "postcard",
