@@ -125,4 +125,14 @@
 		compatible = "riscv,plic0";
 		reg = <0x0 0xe0000000 0x0 0x4000000>;
 	};
+
+	// 跨核共享内存（与 AP 侧 rt_shm_sram 对齐：SRAM 0xc0800000，68KB）。
+	// ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小（compatible
+	// ov,rt-async-amp 与 AP 侧匹配同一节点）。K3 的通知后端是硬件
+	// mailbox（chip-k3-rt24 在 setup_interrupts 直接注册 NOTIFIER），
+	// 无需 QEMU 那样的 notifier 子节点。
+	rt-async@c0800000 {
+		compatible = "ov,rt-async-amp";
+		reg = <0x0 0xc0800000 0x0 0x11000>;
+	};
 };

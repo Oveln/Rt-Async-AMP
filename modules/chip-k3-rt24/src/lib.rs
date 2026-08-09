@@ -52,6 +52,11 @@ static K3_DRIVERS: &[&dyn Driver] = &[
     &pinctrl_k3::PINCTRL,
     &clock::CCU,
     &mailbox::DRIVER,
+    // ov-shm 的共享内存驱动：probe `rt-async@c0800000` 节点（compatible
+    // ov,rt-async-amp），提供 `ov_shm::shm::base()`/`size()`。无依赖其他
+    // slot，放在 mailbox 后即可。通知后端不在此列表——由 mailbox.rs 的
+    // setup_interrupts() 直接注册 MBX4 进 NOTIFIER slot。
+    &ov_shm::shm::INSTANCE,
     &pxa_uart::INSTANCE,
     &clint_k3::TIMER,
     &clint_k3::MSIP,

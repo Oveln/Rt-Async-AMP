@@ -359,6 +359,17 @@ impl Mailbox for MboxK3 {
     }
 }
 
+// ── PeerNotifier 实现（跨核通知后端，注册进 ov-shm 的 NOTIFIER slot）──
+
+impl ov_shm::notifier::PeerNotifier for MboxK3 {
+    fn notify(&self) {
+        // 契约要求：notify 返回前须保证共享内存数据对 AP 可见。
+        core::sync::atomic::fence(Ordering::Release);
+        // 写 mailbox4 FIFO 通道 0 → 触发对端（AP/StarryOS）NEW_MSG 中断。
+        self.signal(0);
+    }
+}
+
 // ── 中断设置（Board::late_init 调用）──────────────────────────────
 
 /// 注册 mailbox ISR 并在 PLIC 使能中断。
@@ -384,6 +395,14 @@ pub fn setup_interrupts() {
         intctl.enable_irq(irq);
         mbox.enable_new_msg_irq(0);
         log::info!("mailbox @ irq {}: interrupts enabled", irq);
+    }
+
+    // 注册跨核通知后端：MBX4 是 rcpu1 → starryos 方向（DTS 中第二个 mailbox
+    // 节点，AP 侧使用的就是 mailbox4）。仅当已 probe（base 非零）才注册。
+    // 注意 MBX4 本身是 `&'static MboxK3`（MBX_POOL 的引用），直接 set。
+    if MBX4.base.load(Ordering::Acquire) != 0 {
+        ov_shm::notifier::NOTIFIER.set(MBX4);
+        log::info!("ov-shm notifier: MBX4 registered as PeerNotifier");
     }
 }
 
