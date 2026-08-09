@@ -9,6 +9,11 @@ executor = { path = "../../rt-async/modules/executor" }
 platform = { path = "../../rt-async/modules/platform" }
 futures = { path = "../../rt-async/modules/futures" }
 chip-k3-rt24 = { path = "../../modules/chip-k3-rt24" }
+ov-shm = { path = "../../modules/ov-shm" }
+ov-channels = { workspace = true }
+ov-rpc = { path = "../../modules/ov-rpc" }
+serde = { workspace = true }
+postcard = { workspace = true }
 fugit = "0.4"
 log = { version = "0.4", default-features = false }
 
@@ -22,6 +27,9 @@ riscv64 = ["platform/riscv64", "chip-k3-rt24/riscv64"]
 
 [[bin]]
 name = "sched_demo"
+
+[[bin]]
+name = "ipc_demo"
 
 [profile.dev]
 panic = "abort"
