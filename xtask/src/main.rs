@@ -93,6 +93,7 @@ fn main() {
                         build::build_rt_async(&root, bin);
                     }
                     build::user_test(&root, &cfg);
+                    build::user_test_mbox(&root, &cfg);
                     build::user_test_rpc(&root, &cfg);
                     build::user_test_sched(&root, &cfg);
                     eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
@@ -100,6 +101,7 @@ fn main() {
                 "opensbi" => build::opensbi(&root, &cfg),
                 "starryos" => build::starryos(&root, &cfg),
                 "user-test-ipc" => build::user_test(&root, &cfg),
+                "user-test-mbox" => build::user_test_mbox(&root, &cfg),
                 "user-test-rpc" => build::user_test_rpc(&root, &cfg),
                 "user-test-sched" => build::user_test_sched(&root, &cfg),
                 // 平台聚合：构建该平台所有 rt-async bin
@@ -125,7 +127,7 @@ fn main() {
                             eprintln!("  {}", b.target_name);
                         }
                         eprintln!("\nplatform aggregates: qemu, k3");
-                        eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-rpc, user-test-sched");
+                        eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-mbox, user-test-rpc, user-test-sched");
                         std::process::exit(1);
                     });
                     build::build_rt_async(&root, bin);
@@ -151,7 +153,7 @@ fn main() {
         Cmd::Log => run::log(&root),
         Cmd::Install { file, dst, all } => {
             if all {
-                for name in ["user-test-ipc", "user-test-rpc", "user-test-sched"] {
+                for name in ["user-test-ipc", "user-test-mbox", "user-test-rpc", "user-test-sched"] {
                     let src = root.join("build").join(name);
                     if src.exists() {
                         install::run(&root, &src.to_string_lossy(), &format!("/{name}"));

@@ -111,6 +111,7 @@ dependencies = [
  "extern-trait",
  "fdt-parser",
  "log",
+ "ov-shm",
  "platform",
  "riscv",
  "tock-registers",
@@ -724,7 +725,12 @@ dependencies = [
  "fugit",
  "futures",
  "log",
+ "ov-channels",
+ "ov-rpc",
+ "ov-shm",
  "platform",
+ "postcard",
+ "serde",
  "xtask",
 ]
 
@@ -1002,6 +1008,14 @@ dependencies = [
  "ov-channels",
  "postcard",
  "serde",
+ "xtask",
+]
+
+[[package]]
+name = "user-test-mbox"
+version = "0.1.0"
+dependencies = [
+ "libc",
  "xtask",
 ]
 

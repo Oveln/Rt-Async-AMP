@@ -5,9 +5,10 @@
 #   ./scripts/flash/k3-flash.sh --no-build  # skip build+pack, reflash existing itb
 #   ./scripts/flash/k3-flash.sh --boot      # (legacy, now a no-op: flow always
 #                                           #  ends stopped at U-Boot prompt)
+#   K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh   # 刷其他 rcpu1 bin
 #
 # Pipeline:
-#   1. cargo xtask build k3-sched-demo              (rcpu1 ELF)
+#   1. cargo xtask build ${K3_TARGET:-k3-sched-demo}   (rcpu1 ELF)
 #   2. k3-pack-itb.sh                               (cp ELF + lzo + mkimage → esos.itb)
 #   3. k3-console.py ensure-uboot                   (reset, catch autoboot, land at =>)
 #   4. fastboot usb 0 on the board                  (board enters fastboot gadget)
@@ -30,12 +31,14 @@ ITB="$SCRIPT_DIR/esos.itb"
 # ── arg parse ───────────────────────────────────────────────────────────────
 BOOT=0
 NO_BUILD=0
+# 要构建/刷写的 rcpu1 xtask 目标（如 k3-sched-demo / k3-ipc-demo）。
+K3_TARGET="${K3_TARGET:-k3-sched-demo}"
 for a in "$@"; do
     case "$a" in
         --boot)    BOOT=1 ;;
         --no-build) NO_BUILD=1 ;;
         -h|--help)
-            sed -n '2,11p' "$0"; exit 0 ;;
+            sed -n '2,13p' "$0"; exit 0 ;;
         *) echo "unknown arg: $a" >&2; exit 2 ;;
     esac
 done
@@ -51,11 +54,12 @@ step() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
 # ── 1+2. build + pack ─────────────────────────────────────────────────────────
 if [ "$NO_BUILD" -eq 0 ]; then
-    step "build k3-sched-demo"
-    cargo xtask build k3-sched-demo
+    step "build $K3_TARGET"
+    cargo xtask build "$K3_TARGET"
 
     step "pack esos.itb (cp ELF + lzo + mkimage)"
-    bash "$SCRIPT_DIR/k3-pack-itb.sh"
+    # ELF_SRC 由 k3-pack-itb.sh 读取：k3-<name> → build/rt-async-k3-<name>.elf
+    ELF_SRC="build/rt-async-${K3_TARGET#k3-}.elf" bash "$SCRIPT_DIR/k3-pack-itb.sh"
 else
     step "skip build (--no-build); reusing $ITB"
     [ -f "$ITB" ] || { echo "✗ itb 不存在: $ITB (先去掉 --no-build)" >&2; exit 1; }

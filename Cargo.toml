@@ -7,6 +7,7 @@ members = [
     "apps/rt-async-app",
     "apps/rt-async-k3",
     "user-apps/user-test-ipc",
+    "user-apps/user-test-mbox",
     "user-apps/user-test-rpc",
     "user-apps/user-test-sched",
     "xtask",

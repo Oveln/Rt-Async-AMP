@@ -79,6 +79,16 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         target: "riscv64imac-unknown-none-elf",
         artifact: Artifact::Elf,
     },
+    RtAsyncBin {
+        name: "ipc_demo",
+        target_name: "k3-ipc-demo",
+        platform: "k3",
+        out: "rt-async-k3-ipc-demo.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Elf,
+    },
 ];
 
 /// 按 xtask build target 名查找（带平台前缀，如 "qemu-demo"）。
@@ -300,6 +310,10 @@ pub fn starryos(root: &Path, cfg: &Config) {
 
 pub fn user_test(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-ipc", "user-test-ipc");
+}
+
+pub fn user_test_mbox(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/user-test-mbox", "user-test-mbox");
 }
 
 pub fn user_test_rpc(root: &Path, _cfg: &Config) {
