@@ -58,8 +58,10 @@ if [ "$NO_BUILD" -eq 0 ]; then
     cargo xtask build "$K3_TARGET"
 
     step "pack esos.itb (cp ELF + lzo + mkimage)"
-    # ELF_SRC 由 k3-pack-itb.sh 读取：k3-<name> → build/rt-async-k3-<name>.elf
-    ELF_SRC="build/rt-async-${K3_TARGET#k3-}.elf" bash "$SCRIPT_DIR/k3-pack-itb.sh"
+    # ELF_SRC 由 k3-pack-itb.sh 读取：target_name 已含 k3- 前缀，
+    # 产物文件名 = rt-async-<target_name>.elf（如 k3-ipc-demo →
+    # build/rt-async-k3-ipc-demo.elf），不再剥离 k3- 前缀。
+    ELF_SRC="build/rt-async-${K3_TARGET}.elf" bash "$SCRIPT_DIR/k3-pack-itb.sh"
 else
     step "skip build (--no-build); reusing $ITB"
     [ -f "$ITB" ] || { echo "✗ itb 不存在: $ITB (先去掉 --no-build)" >&2; exit 1; }

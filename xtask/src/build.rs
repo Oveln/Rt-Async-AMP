@@ -88,6 +88,16 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         target: "riscv64imac-unknown-none-elf",
         artifact: Artifact::Elf,
     },
+    RtAsyncBin {
+        name: "shm_ping",
+        target_name: "k3-shm-ping",
+        platform: "k3",
+        out: "rt-async-k3-shm-ping.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: "riscv64imac-unknown-none-elf",
+        artifact: Artifact::Elf,
+    },
 ];
 
 /// 按 xtask build target 名查找（带平台前缀，如 "qemu-demo"）。

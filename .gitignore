@@ -11,6 +11,7 @@ node_modules
 .claude
 .codegraph
 .zcode
+.omo
 /StarryOS
 
 # DTB 是 .dts 的编译产物（build.rs 用 dtc 生成），不追踪
