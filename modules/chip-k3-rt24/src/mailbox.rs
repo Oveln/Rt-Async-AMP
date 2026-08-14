@@ -109,14 +109,6 @@ register_structs! {
 static INSTANCES: [AtomicUsize; platform::irq::MAX_IRQ] =
     [const { AtomicUsize::new(0) }; platform::irq::MAX_IRQ];
 
-/// 诊断：ISR 实际触发次数（每进入 mbox_isr 加一，无打印开销）。
-///
-/// 与 recv() 消费次数对比可区分：
-/// - 计数不涨 → AP→RP 中断未到达（mailbox/PLIC 链路问题）
-/// - 计数涨但 recv 不返回 → 中断到了但 IrqLatch 未唤醒 task
-/// - 计数异常增长 → 幽灵中断/风暴（配合 `mbox-diag` feature 的打印定位）
-pub static ISR_COUNT: AtomicUsize = AtomicUsize::new(0);
-
 /// 注册实例到 IRQ 查找表。
 fn register_instance(irq: u32, mbox: &'static MboxK3) {
     INSTANCES[irq as usize].store(mbox as *const _ as usize, Ordering::Release);
@@ -467,38 +459,12 @@ pub fn setup_interrupts() {
 /// # Safety
 /// 中断上下文调用，关中断执行，不可阻塞。
 unsafe fn mbox_isr(irq: u32) {
-    ISR_COUNT.fetch_add(1, Ordering::Relaxed);
     let mbox = match instance_for_irq(irq) {
         Some(m) => m,
         None => return,
     };
     let regs = mbox.regs();
     let user_local = mbox.user_local.load(Ordering::Acquire) as usize;
-
-    // 风暴诊断（可选 feature `mbox-diag`，默认关闭）：进入 ISR 时打印两个
-    // USER 的完整中断状态 + 所有通道 FIFO 计数。目标：定位 raw=0x1 cnt=0
-    // 风暴——是哪个 USER 真正有待清的 pending，IRQ 69 到底连接到 USER0
-    // 还是 USER1。默认不启用：中断上下文高频 log::info! 会阻塞 UART 严重
-    // 限速（约 7ms/条 @115200），联调需要时经 `cargo build --features
-    // chip-k3-rt24/mbox-diag` 打开。
-    #[cfg(feature = "mbox-diag")]
-    {
-        let u0_raw = regs.mbox_irq[0].irq_status.get();
-        let u0_en = regs.mbox_irq[0].irq_en_set.get();
-        let u1_raw = regs.mbox_irq[1].irq_status.get();
-        let u1_en = regs.mbox_irq[1].irq_en_set.get();
-        let cnt0 = mbox.msg_count(0);
-        let cnt1 = mbox.msg_count(1);
-        log::info!(
-            "[mbox-isr] irq={} n={} loc={} U0:r={:#x} e={:#x} U1:r={:#x} e={:#x} c0={} c1={}",
-            irq,
-            ISR_COUNT.load(Ordering::Relaxed),
-            user_local,
-            u0_raw, u0_en,
-            u1_raw, u1_en,
-            cnt0, cnt1,
-        );
-    }
 
     loop {
         let raw = regs.mbox_irq[user_local].irq_status.get();

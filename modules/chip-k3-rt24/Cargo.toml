@@ -18,5 +18,3 @@ xtask = { path = "../../xtask" }
 
 [features]
 riscv64 = ["platform/riscv64"]
-# mailbox ISR 风暴诊断打印（默认关闭；开启会显著限速，仅联调定位用）
-mbox-diag = []
