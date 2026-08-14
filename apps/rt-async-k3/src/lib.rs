@@ -2,6 +2,8 @@
 //!
 //! 与 AP 侧 StarryOS 经共享内存（ov-channels）+ mailbox4 通知通信。
 //! 共享内存基址来自设备树 `ov,rt-async-amp` 节点（ov-shm 驱动 probe）。
+//! mailbox4（0xCAC91000，IRQ 69，Rust 变量名 MBX3）为核间信令通道；
+//! mailbox3 归 esos(rcpu0) rproc 专用，rt-async 不触碰。
 
 #![no_std]
 

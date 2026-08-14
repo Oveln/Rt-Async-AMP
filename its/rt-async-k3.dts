@@ -49,22 +49,18 @@
 		};
 
 		// 核间信令 mailbox（纯门铃模式，数据走共享内存 ov-rpc）。
-		// rcpu-communicate 属性表示本节点由 rcpu1 视角使用（USER1=本地）。
-		// 两实例方向：
-		//   mailbox3（starryos -> rcpu1）：基址 0xCAC90C00，IRQ 68
-		//   mailbox4（rcpu1 -> starryos）：基址 0xCAC91000，IRQ 69
-		mailbox3: mailbox@cac90c00 {
-			compatible = "spacemit,k3-mailbox";
-			reg = <0x0 0xcac90c00 0x0 0x400>;
-			interrupts = <68>;
-			rcpu-communicate;
-		};
-
+		// mailbox4（starryos ↔ rcpu1）：基址 0xCAC91000，IRQ 69。
+		//   必须用 mailbox4 而非 mailbox3——实测 rcpu0 DTB（k3_rt240_com260_ifx.dtb）
+		//   中 mailbox3 = status "okay"（esos 正在使用），mailbox4 = status "disabled"
+		//   （空闲）。若用 mailbox3，esos 的 rproc 活动与本核 ISR 竞争同一 FIFO，
+		//   一方排空后另一方 NEW_MSG latch 永久卡死 → 中断风暴。
+		//   不加 rcpu-communicate 属性：rcpu_communicate=false →
+		//   USER0=数组0（AP/starryos）/USER1=数组1（rcpu1/本核），
+		//   与 AP 侧 rt_shm 硬编码一致。
 		mailbox4: mailbox@cac91000 {
 			compatible = "spacemit,k3-mailbox";
 			reg = <0x0 0xcac91000 0x0 0x400>;
 			interrupts = <69>;
-			rcpu-communicate;
 		};
 
 	chosen {
@@ -126,13 +122,14 @@
 		reg = <0x0 0xe0000000 0x0 0x4000000>;
 	};
 
-	// 跨核共享内存（与 AP 侧 rt_shm_sram 对齐：SRAM 0xc0800000，68KB）。
-	// ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小（compatible
-	// ov,rt-async-amp 与 AP 侧匹配同一节点）。K3 的通知后端是硬件
-	// mailbox（chip-k3-rt24 在 setup_interrupts 直接注册 NOTIFIER），
-	// 无需 QEMU 那样的 notifier 子节点。
-	rt-async@c0800000 {
+	// 跨核共享内存（与 AP 侧 rt_shm_ddr 对齐：DDR 0x104430000，68KB）。
+	// 已从 Audio SRAM 搬到 DDR——rcpu1 写 Audio SRAM 的数据 AP 读不到（疑似
+	// Secure/IOPMP 过滤或 dcache 一致性，未深查；官方 rpmsg 虽用 rcpu1+SRAM 但
+	// AP 经不同访问路径）。DDR 两核均能可靠读写（与官方 rpmsg data buffer 同在
+	// DDR，架构一致）。ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小。
+	// K3 的通知后端是硬件 mailbox（chip-k3-rt24 在 setup_interrupts 注册 NOTIFIER）。
+	rt-async@104430000 {
 		compatible = "ov,rt-async-amp";
-		reg = <0x0 0xc0800000 0x0 0x11000>;
+		reg = <0x1 0x04430000 0x0 0x11000>;
 	};
 };

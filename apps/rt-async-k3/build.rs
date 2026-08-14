@@ -10,6 +10,8 @@ fn main() {
     println!("cargo:rustc-link-arg=-Tmemory.x");
     println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=build.rs");
+    // 源码变化时重跑 build.rs，刷新编译时间戳（否则 OUT_DIR 里是旧缓存值）。
+    println!("cargo:rerun-if-changed=src/");
 
     let ws = xtask::config::workspace_dir_from_manifest();
     println!("cargo:rerun-if-changed={}/amp.toml", ws.display());

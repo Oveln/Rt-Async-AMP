@@ -5,7 +5,10 @@
 //! - `ov,clint-msip-notifier`：QEMU virt，写 CLINT MSIP 寄存器触发对端
 //!   （hart0/StarryOS）的 MachineSoft 中断；
 //! - K3 真板用硬件 mailbox：`chip-k3-rt24` 实现本模块的
-//!   [`PeerNotifier`] trait（包 `MBX4`）并在板级注册，无需改本 crate。
+//!   [`PeerNotifier`] trait（包 `MBX3`——绑定物理 mailbox4，0xCAC91000/
+//!   IRQ 69）并在板级注册，无需改本 crate。mailbox3 归 esos(rcpu0) 的
+//!   rproc 专用（rcpu0 DTB status "okay"），本 DTS 未保留其节点；物理
+//!   mailbox4 在 esos 侧 disabled、空闲可用。
 //!
 //! DTS 示例（与 AP 侧 StarryOS binding 对称）：
 //! ```dts

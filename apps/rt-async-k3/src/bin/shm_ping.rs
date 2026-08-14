@@ -1,18 +1,19 @@
-//! K3 RT24 rcpu1 双核 IPC demo。
+//! K3 共享内存 ov-channels ping 验证（rp 端）。
 //!
-//! 验收点：与 AP 侧 StarryOS（/dev/rt_shm 用户态 user-test-*）双向 RPC：
-//!   - 收：AP 写 mailbox4（0xCAC91000）FIFO ch0 → rcpu1 IRQ 69 → mbox_isr
-//!     → MBX3.recv().await 唤醒
-//!   - 发：intercom::send_notify_ipi() → MBX3.signal(1)（ch1）→ AP IRQ 217
-//! 共享内存 0x104430000（DDR，ov,rt-async-amp 节点，ov-shm 驱动 probe）。
+//! 与 AP 侧 StarryOS 用户态 `user-test-ipc`（Rust，用 ov-channels sender/receiver）
+//! 配对，走完整的 ov-channels 消息机制（非自定义裸槽）：
 //!
-//! mailbox 通道约定：物理 **mailbox4**（esos 侧 DTB status "disabled"，空闲）
-//! 是 rt-async ↔ AP 的核间信令通道，Rust 变量名沿用 `MBX3`（= DT 唯一
-//! mailbox 节点）；**mailbox3** 归 esos(rcpu0) 的 rproc 专用（rcpu0 DTB
-//! status "okay"），故 DTS 未保留其节点。RT24 双核共享同一 PLIC，若注册
-//! esos 在用通道（mailbox3）的 ISR，会被 esos 的 rpmsg 活动触发幽灵中断
-//! ——必须避开。收发分通道：AP→RP ch0（本侧 enable_new_msg_irq(0) 接收），
-//! RP→AP ch1（notify() → signal(1)）。
+//! - **收**：AP 经 ch0（StarryOS→rt-async）写消息 → mailbox4 FIFO → rcpu1 IRQ 69
+//!   → mbox_isr → `MBX3.recv().await` 唤醒 → `process_elastic` 收割 ring buffer。
+//! - **发**：`process_elastic` 处理每条消息后经 ch1（rt-async→StarryOS）回写
+//!   响应，`send_notify_ipi()` → mailbox4 signal → AP IRQ 唤醒 AWAIT。
+//!
+//! 共享内存位于 DDR（0x104430000，经 ov-shm DT 节点 probe）。intercom 模块
+//! 负责 `SharedMemory::<3>::init()` 初始化 ring buffer + `RpcServer` 消息收发
+//! （sender/try_send/receiver/try_recv 的细节封装其内）。AP 侧 mmap 经
+//! svpbmt PBMT=NC 映射（uncached），保证跨核读写一致。
+//!
+//! 与 `ipc_demo` 共用 intercom 机制；本 bin 作为 ov-channels 链路的 ping 验证入口。
 
 #![no_std]
 #![no_main]
@@ -37,27 +38,33 @@ static _FORCE_LINK_CHIP_K3_RT24: K3Rt24 = K3Rt24;
 // 编译期生成的本 ELF 构建时间（build.rs → OUT_DIR/build_time.rs）。
 include!(concat!(env!("OUT_DIR"), "/build_time.rs"));
 
-/// 双核 IPC 服务任务：弹性忙等处理 + mailbox4 外部中断唤醒。
+/// ov-channels ping 服务任务：init ring buffer → 弹性忙等收割 → mailbox4 唤醒。
 #[executor::task]
-async fn task_ipc() {
+async fn task_shm_ping() {
+    // 初始化 SharedMemory::<3> ring buffer（AP 侧 is_valid() 轮询等待此完成）。
     rt_async_k3::intercom::init();
+    log::info!(
+        "[shm-ping] SharedMemory<3> inited, awaiting AP notify (mailbox4, IRQ 69)"
+    );
 
     loop {
-        // 弹性忙等处理所有消息，每个 Notify 响应立即回 IPI。
+        // 弹性忙等处理 ch0 所有待处理消息（notification + RPC），
+        // 每条响应立即经 ch1 回写 + send_notify_ipi() 通知 AP。
+        // 弹性窗口过期后返回，进入下面的 mailbox 阻塞等待。
         let _count = rt_async_k3::intercom::process_elastic();
 
-        // 弹性窗口过期，等待 AP 经 mailbox4 发来的新消息（IRQ 69）。
+        // 弹性窗口过期，等 AP 经 mailbox4 发来的新消息（IRQ 69）。
         chip_k3_rt24::mailbox::MBX3.recv().await;
     }
 }
 
 #[executor::main]
 fn main(spawner: Pin<&'static Spawner<4>>) {
-    platform::console().write(b"\nK3 rt-async IPC demo (built ");
+    platform::console().write(b"\nK3 shm ov-channels ping (built ");
     platform::console().write(BUILD_TIME.as_bytes());
     platform::console().write(b")\n");
 
-    spawner.spawn(Priority::new(2), task_ipc().unwrap());
+    spawner.spawn(Priority::new(2), task_shm_ping().unwrap());
     platform::console().write(b"tasks spawned, scheduler running\n");
 }
 

@@ -55,3 +55,19 @@ pub fn base() -> usize {
 pub fn size() -> usize {
     SIZE.load(Ordering::Acquire)
 }
+
+/// 将共享内存写入对 AP 可见。
+///
+/// AMP 无跨核一致性，RP 写共享内存后必须确保 store 到达物理内存（DDR），
+/// 再发通知让 AP 读取。CVA6 的 store 可能滞留在 store/write buffer 或
+/// write-back dcache 中。`fence iorw,iorw` 是全内存屏障（对普通内存与 MMIO
+/// 均排序，与 `fence rw,rw` 对普通内存的排序能力等价），排空 store buffer
+/// 到目标介质。
+///
+/// 注：若 RP dcache 是 write-back 且 dirty 行未 evict，本 fence 不足以
+/// 触发 cache 回写（CVA6 无 Zicbom）。但至少保证 store buffer 排空。
+pub fn flush() {
+    // SAFETY: fence iorw,iorw 是内存屏障指令，无内存副作用，仅保证后续
+    // IO 操作在之前的 store 之后对总线可见。
+    unsafe { core::arch::asm!("fence iorw, iorw"); }
+}

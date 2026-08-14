@@ -68,32 +68,19 @@ async fn task_low() {
 
 /// 高优先级 mailbox 接收任务：await 中断后打印日志。
 ///
-/// 先调 recv().await 挂起（让出 CPU），被低优先级 task_mailbox_send
-/// 触发的中断唤醒后打印 "WOKE UP"。验证 ISR→latch→waker→task 全链路。
+/// 注意：mailbox 写 FIFO 会同时置位**双方 user** 的 NEW_MSG（见 mailbox.rs
+/// 通道约定），理论上可本地写 FIFO 自触发；但 W1S 写 IRQSTATUS_RAW 的调试
+/// 注入会产生幽灵 pending（FIFO 空），无法靠读 FIFO 清除（NEW_MSG 是"FIFO
+/// 非空"电平信号），会引发 PLIC 风暴——故不做本地自触发自测。此处仅验证
+/// recv().await 挂起本身不破坏调度（配合 H/L 抢占观察）；真实 ISR→latch
+/// →recv 链路由 shm_ping + AP 经 FIFO 通知验证。
 #[executor::task]
 async fn task_mailbox_recv() {
     use chip_k3_rt24::mailbox::MBX3;
 
-    platform::console().write(b"\nmailbox recv task: awaiting...\n");
+    platform::console().write(b"\nmailbox recv task: awaiting (no local trigger, waits AP FIFO)...\n");
     MBX3.recv().await;
     platform::console().write(b"mailbox recv task: WOKE UP!\n");
-    platform::console().write(b"mailbox async self-test: PASS\n");
-}
-
-/// 低优先级 mailbox 发送任务：延时后触发本地中断唤醒接收 task。
-///
-/// mailbox 硬件设计中写 FIFO 只触发对端 user 的中断。本核自测用
-/// trigger_local_irq() 写 IRQSTATUS_RAW（W1S，手册允许 debug 置位）
-/// 触发本地 NEW_MSG → IRQ 68 → mbox_isr → latch.notify → recv task 唤醒。
-#[executor::task]
-async fn task_mailbox_send() {
-    use chip_k3_rt24::mailbox::MBX3;
-
-    // 等接收 task 先挂到 await 上。
-    futures::timer::after(100.millis()).await;
-
-    MBX3.trigger_local_irq(0);
-    platform::console().write(b"mailbox send task: triggered IRQ\n");
 }
 
 #[executor::main]
@@ -106,7 +93,6 @@ fn main(spawner: Pin<&'static Spawner<4>>) {
     spawner.spawn(Priority::new(3), task_high().unwrap());
     spawner.spawn(Priority::new(1), task_low().unwrap());
     spawner.spawn(Priority::new(3), task_mailbox_recv().unwrap());
-    spawner.spawn(Priority::new(1), task_mailbox_send().unwrap());
 
     platform::console().write(b"tasks spawned, scheduler running\n");
 }

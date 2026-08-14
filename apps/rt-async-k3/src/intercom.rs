@@ -12,7 +12,7 @@
 //! 共享内存基址与跨核通知设备均来自设备树（`ov-shm` crate probe），
 //! 不再从 amp.toml 编译期常量获取。
 //!
-//! K3 平台：共享内存 0xc0800000（`ov,rt-async-amp` 节点，68KB），
+//! K3 平台：共享内存 0x104430000（DDR，`ov,rt-async-amp` 节点，68KB），
 //! 跨核通知经 mailbox4 硬件中断（IRQ 69）替代 QEMU 的 MachineSoft IPI。
 
 use core::sync::atomic::{AtomicUsize, Ordering};

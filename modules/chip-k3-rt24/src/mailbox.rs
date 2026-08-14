@@ -71,7 +71,7 @@ register_structs! {
     /// Mailbox 中断寄存器组（每 user 一组，偏移 0x100 + 0x10×u）。
     pub MboxIrqRegs {
         (0x00 => irq_status:     ReadWrite<u32>), // IRQSTATUS_RAW — 读为 pending，写 1 置位（调试）
-        (0x04 => irq_status_clr: WriteOnly<u32>), // IRQSTATUS_CLR — 写 1 清除对应 pending 位
+        (0x04 => irq_status_clr: ReadWrite<u32>), // IRQSTATUS_CLR — 写 1 清除对应 pending 位；可读（esos 用读-改-写）
         (0x08 => irq_en_set:     ReadWrite<u32>), // IRQENABLE_SET — 写 1 使能，读回确认
         (0x0c => irq_en_clr:     WriteOnly<u32>), // IRQENABLE_CLR — 写 1 禁能
         (0x10 => @END),
@@ -108,6 +108,14 @@ register_structs! {
 /// MAX_IRQ 对齐。
 static INSTANCES: [AtomicUsize; platform::irq::MAX_IRQ] =
     [const { AtomicUsize::new(0) }; platform::irq::MAX_IRQ];
+
+/// 诊断：ISR 实际触发次数（每进入 mbox_isr 加一，无打印开销）。
+///
+/// 与 recv() 消费次数对比可区分：
+/// - 计数不涨 → AP→RP 中断未到达（mailbox/PLIC 链路问题）
+/// - 计数涨但 recv 不返回 → 中断到了但 IrqLatch 未唤醒 task
+/// - 计数异常增长 → 幽灵中断/风暴（配合 `mbox-diag` feature 的打印定位）
+pub static ISR_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// 注册实例到 IRQ 查找表。
 fn register_instance(irq: u32, mbox: &'static MboxK3) {
@@ -162,10 +170,13 @@ impl MboxK3 {
 
     /// 排空指定通道 FIFO（probe 初始化用，避免遗留数据触发虚假中断）。
     fn drain_channel(regs: &MboxRegs, ch: usize) {
-        // 循环读直到 FIFO 为空（FIFOSTATUS bit[1]=is_empty）。
-        while !regs.fifo_status[ch].is_set(FifoStatus::IS_EMPTY) {
-            // 读 FIFO 丢弃数据。
+        // 先读 mbox_msg 再判 is_empty——对齐 esos spacemit_chan_startup 的
+        // while(1){readl;check;break} 模式，保证至少一次硬件 acknowledge。
+        loop {
             let _ = regs.mbox_msg[ch].get();
+            if regs.fifo_status[ch].is_set(FifoStatus::IS_EMPTY) {
+                break;
+            }
         }
     }
 
@@ -208,9 +219,12 @@ impl MboxK3 {
 
     /// 手动写 IRQSTATUS_RAW（W1S）置位本地 NEW_MSG pending，触发硬件中断。
     ///
-    /// mailbox 硬件设计中写 FIFO 只触发**对端** user 的 NEW_MSG。本核自测
-    /// 时用此方法直接写 RAW 寄存器（R/W1S，手册 §16.6.4.6：write 1 set the
-    /// event for debug），在 IRQENABLE_SET 已使能的前提下触发本地中断线。
+    /// 已废弃——勿用！NEW_MSG pending 是"FIFO 非空"电平信号，esos 清除它的
+    /// 唯一途径是读 FIFO 直到空（num_msg==0）。W1S 写 RAW 是手册 §16.6.4.6
+    /// 的 debug 注入：置位 pending 但 FIFO 为空，ISR 读不出东西、写 CLR 也
+    /// 清不掉该幽灵 pending → IRQ 线恒 assert → PLIC 中断风暴（实测 isr_count
+    /// 1→9+ 持续增长）。本地自测请改用写 FIFO（触发对端）配合对端回写，或
+    /// 直接等对端真实通知。
     pub fn trigger_local_irq(&self, channel: u8) {
         let user_local = self.user_local.load(Ordering::Acquire) as usize;
         self.regs().mbox_irq[user_local].irq_status.set(new_msg_mask(channel as usize));
@@ -237,9 +251,15 @@ impl MboxK3 {
 /// DFS 先序保证 DT 中靠前的节点先被 probe，先绑定到 MBX_POOL[0]。
 static MBX_POOL: [MboxK3; 2] = [MboxK3::new(), MboxK3::new()];
 
-/// Mailbox3（starryos → rcpu1，DT 中第一个 mailbox 节点）。
+/// MBX3：绑定 DT 中第一个 mailbox 节点，即**物理 mailbox4**（0xCAC91000，
+/// IRQ 69）。变量名沿用历史 "MBX3"（= DT 第 1 个 mailbox 节点），与物理
+/// mailbox 编号无关——DTS 只保留 mailbox4 一个节点（mailbox3 归 esos(rcpu0)
+/// 占用，rcpu0 DTB status "okay"），故 MBX_POOL[0] 绑定的是物理 mailbox4。
 pub static MBX3: &MboxK3 = &MBX_POOL[0];
-/// Mailbox4（rcpu1 → starryos，DT 中第二个 mailbox 节点）。
+/// MBX4：已弃用占位（MBX_POOL[1]）。DTS 仅一个 mailbox 节点（物理 mailbox4，
+/// 绑定到 MBX3），本实例无节点可 probe（base=0），保留仅为池容量占位。
+/// 注意：esos(rcpu0) 占用的是物理 **mailbox3**（非 mailbox4）；物理 mailbox4
+/// 在 esos 侧 DTB status "disabled"、空闲可用——见 its/rt-async-k3.dts 注释。
 pub static MBX4: &MboxK3 = &MBX_POOL[1];
 
 /// Mailbox driver 单例——实现 Driver trait，probe 时向实例池分配。
@@ -251,9 +271,9 @@ pub struct MboxDriver;
 
 // ── Slot（供 app 经 registry 取用）────────────────────────────────
 
-/// Mailbox3 Slot（starryos → rcpu1 方向）。
+/// MBX3 Slot（AP/starryos → rcpu1 方向；绑定物理 mailbox4，见 [`MBX3`]）。
 pub static MBX3_SLOT: Slot<&'static dyn Mailbox> = Slot::new();
-/// Mailbox4 Slot（rcpu1 → starryos 方向）。
+/// MBX4 Slot——已弃用（见 [`MBX4`] 说明：无节点可 probe，占位保留）。
 pub static MBX4_SLOT: Slot<&'static dyn Mailbox> = Slot::new();
 
 // ── Driver 实现 ────────────────────────────────────────────────────
@@ -280,9 +300,18 @@ impl Driver for MboxDriver {
         let base = reg.address as usize;
 
         // 从 DT 读 rcpu-communicate 属性，确定 USER_LOCAL/USER_REMOTE。
-        // 置位时 USER1=本地（RCPU）、USER0=对端（AP）。
+        // 寄存器组编号以 esos 官方 rcpu1 驱动为准
+        // （bsp/spacemit/drivers/mailbox/k3_mailbox.h + platform/rt24/os1_rcpu 的
+        // k3.dtsi：mailbox4 节点无 rcpu-communicate 属性 → rcpu_communicate=false
+        // → USER0_MBOX_OFFSET=0 / USER1_MBOX_OFFSET=1）：
+        //   - 本地（rcpu1）收中断用 mbox_irq[1]（esos ISR 读 USER1_MBOX_OFFSET）
+        //   - 发送时 enable 对端（AP）的 mbox_irq[0]（esos send_data 写 USER0）
+        // 本驱动保持与官方一致的 (local=1, remote=0)。
+        // 注意：rcpu-communicate=true 时 esos 宏会翻转（USER0=1/USER1=0），与
+        // AP 侧 rt_shm 的硬编码（starryos=USER0=数组0, rcpu1=USER1=数组1）错位
+        // → 必须保证 DTS 节点无 rcpu-communicate 属性（rcpu_comm=false）。
         let rcpu_comm = node.find_property("rcpu-communicate").is_some();
-        let (local, remote) = if rcpu_comm { (1, 0) } else { (0, 1) };
+        let (local, remote) = if rcpu_comm { (0, 1) } else { (1, 0) };
         mbox.user_local.store(local, Ordering::Release);
         mbox.user_remote.store(remote, Ordering::Release);
 
@@ -305,6 +334,11 @@ impl Driver for MboxDriver {
         for ch in 0..NUM_CHANNELS {
             MboxK3::drain_channel(regs, ch);
         }
+
+        // 清除 IRQSTATUS pending（esos `spacemit_chan_shutdown` 同款）。
+        // 否则上次运行遗留的 pending 会在 setup_interrupts 使能中断后
+        // 立即触发一次"幽灵通知"，recv().await 误判为 AP 消息。
+        regs.mbox_irq[local as usize].irq_status_clr.set(0xff);
 
         // 显式设置中断阈值 = 0（每条消息都触发中断，不依赖复位默认值）。
         // 每 user 占 4 个寄存器（0x180 + user×0x10），取第 0 个。
@@ -365,8 +399,14 @@ impl ov_shm::notifier::PeerNotifier for MboxK3 {
     fn notify(&self) {
         // 契约要求：notify 返回前须保证共享内存数据对 AP 可见。
         core::sync::atomic::fence(Ordering::Release);
-        // 写 mailbox4 FIFO 通道 0 → 触发对端（AP/StarryOS）NEW_MSG 中断。
-        self.signal(0);
+        // 写 mailbox4（MBX3 绑定的物理实例，0xCAC91000）FIFO 通道 1 →
+        // 触发 AP/StarryOS 的 NEW_MSG 中断。通道约定与 AP 侧 notifier 节点
+        // 对称（tx-channel=0 / rx-channel=1）：
+        //   AP → RP 走通道 0（本驱动 enable_new_msg_irq(0) 接收），
+        //   RP → AP 走通道 1（此处 signal(1) 触发 AP 的 rx-channel=1）。
+        // 注意：K3 mailbox 写 mbox_msg[ch] 会同时置位**双方 user** 的 ch NEW_MSG。
+        // 若发通道与本地使能的接收通道相同会自激——故收发必须分通道。
+        self.signal(1);
     }
 }
 
@@ -394,15 +434,25 @@ pub fn setup_interrupts() {
         intctl.set_priority(irq, 1);
         intctl.enable_irq(irq);
         mbox.enable_new_msg_irq(0);
+        // 清掉 PLIC 层残留 pending：上一轮运行未 complete 的中断会在本函数
+        // 返回后（开中断）立即触发 ISR，把 latch 置位——task 启动后第一次
+        // recv() 会误消费一条"幽灵通知"（此时共享内存还是残留数据）。
+        // 此处开中断前 claim+complete 一次，彻底清空。
+        let claimed = intctl.claim();
+        if claimed != 0 {
+            intctl.complete(claimed);
+        }
         log::info!("mailbox @ irq {}: interrupts enabled", irq);
     }
 
-    // 注册跨核通知后端：MBX4 是 rcpu1 → starryos 方向（DTS 中第二个 mailbox
-    // 节点，AP 侧使用的就是 mailbox4）。仅当已 probe（base 非零）才注册。
-    // 注意 MBX4 本身是 `&'static MboxK3`（MBX_POOL 的引用），直接 set。
-    if MBX4.base.load(Ordering::Acquire) != 0 {
-        ov_shm::notifier::NOTIFIER.set(MBX4);
-        log::info!("ov-shm notifier: MBX4 registered as PeerNotifier");
+    // 注册跨核通知后端：MBX3（= 物理 mailbox4，0xCAC91000/IRQ 69）是
+    // AP(rt_shm notifier) ↔ rcpu1 方向的信令通道。mailbox3 归 esos(rcpu0)
+    // 的 rproc 专用（rcpu0 DTB status "okay"），本 DTS 未保留其节点；
+    // 物理 mailbox4 在 esos 侧 disabled、空闲可用。仅当已 probe
+    // （base 非零）才注册。MBX3 本身是 `&'static MboxK3`（MBX_POOL 的引用）。
+    if MBX3.base.load(Ordering::Acquire) != 0 {
+        ov_shm::notifier::NOTIFIER.set(MBX3);
+        log::info!("ov-shm notifier: MBX3 registered as PeerNotifier");
     }
 }
 
@@ -417,12 +467,38 @@ pub fn setup_interrupts() {
 /// # Safety
 /// 中断上下文调用，关中断执行，不可阻塞。
 unsafe fn mbox_isr(irq: u32) {
+    ISR_COUNT.fetch_add(1, Ordering::Relaxed);
     let mbox = match instance_for_irq(irq) {
         Some(m) => m,
         None => return,
     };
     let regs = mbox.regs();
     let user_local = mbox.user_local.load(Ordering::Acquire) as usize;
+
+    // 风暴诊断（可选 feature `mbox-diag`，默认关闭）：进入 ISR 时打印两个
+    // USER 的完整中断状态 + 所有通道 FIFO 计数。目标：定位 raw=0x1 cnt=0
+    // 风暴——是哪个 USER 真正有待清的 pending，IRQ 69 到底连接到 USER0
+    // 还是 USER1。默认不启用：中断上下文高频 log::info! 会阻塞 UART 严重
+    // 限速（约 7ms/条 @115200），联调需要时经 `cargo build --features
+    // chip-k3-rt24/mbox-diag` 打开。
+    #[cfg(feature = "mbox-diag")]
+    {
+        let u0_raw = regs.mbox_irq[0].irq_status.get();
+        let u0_en = regs.mbox_irq[0].irq_en_set.get();
+        let u1_raw = regs.mbox_irq[1].irq_status.get();
+        let u1_en = regs.mbox_irq[1].irq_en_set.get();
+        let cnt0 = mbox.msg_count(0);
+        let cnt1 = mbox.msg_count(1);
+        log::info!(
+            "[mbox-isr] irq={} n={} loc={} U0:r={:#x} e={:#x} U1:r={:#x} e={:#x} c0={} c1={}",
+            irq,
+            ISR_COUNT.load(Ordering::Relaxed),
+            user_local,
+            u0_raw, u0_en,
+            u1_raw, u1_en,
+            cnt0, cnt1,
+        );
+    }
 
     loop {
         let raw = regs.mbox_irq[user_local].irq_status.get();
@@ -435,12 +511,26 @@ unsafe fn mbox_isr(irq: u32) {
 
         for ch in 0..NUM_CHANNELS {
             if pending & new_msg_mask(ch) != 0 {
-                // 读 FIFO 清空该通道。
-                let _ = regs.mbox_msg[ch].get();
-                // 清除中断 pending。
+                // 排空 FIFO——必须先读 mbox_msg 再判 num_msg（对齐 esos 驱动
+                // spacemit_mbox_irq 的 while(1){readl; check;break} 模式）。
+                // K3 mailbox 的 NEW_MSG 是电平信号：只要曾有待读消息，level
+                // 就拉高并 latch。硬件要求至少一次 mbox_msg 读访问作为
+                // acknowledge 才能让 irq_status_clr 的写永久生效。
+                // 若先判 num_msg==0 再跳过读（旧 bug），当 FIFO 已被对端或
+                // 上轮 ISR 排空时，缺少 acknowledge → 写 CLR 只临时清 latch →
+                // 硬件因 level 仍高立即重新置位 → 中断风暴（raw=0x1 cnt=0）。
+                loop {
+                    let _ = regs.mbox_msg[ch].get();
+                    if mbox.msg_count(ch as u8) == 0 {
+                        break;
+                    }
+                }
+                // 清除中断 pending：RMW（读-改-写）保留其他位，对齐 esos
+                // `j = readl(clr); j |= mask; writel(clr, j)`。
+                let cur = regs.mbox_irq[user_local].irq_status_clr.get();
                 regs.mbox_irq[user_local]
                     .irq_status_clr
-                    .set(new_msg_mask(ch));
+                    .set(cur | new_msg_mask(ch));
             }
         }
     }

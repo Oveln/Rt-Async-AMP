@@ -52,10 +52,10 @@ static K3_DRIVERS: &[&dyn Driver] = &[
     &pinctrl_k3::PINCTRL,
     &clock::CCU,
     &mailbox::DRIVER,
-    // ov-shm 的共享内存驱动：probe `rt-async@c0800000` 节点（compatible
+    // ov-shm 的共享内存驱动：probe `rt-async@104430000` 节点（compatible
     // ov,rt-async-amp），提供 `ov_shm::shm::base()`/`size()`。无依赖其他
     // slot，放在 mailbox 后即可。通知后端不在此列表——由 mailbox.rs 的
-    // setup_interrupts() 直接注册 MBX4 进 NOTIFIER slot。
+    // setup_interrupts() 直接注册 MBX3 进 NOTIFIER slot。
     &ov_shm::shm::INSTANCE,
     &pxa_uart::INSTANCE,
     &clint_k3::TIMER,
@@ -66,6 +66,12 @@ static K3_DRIVERS: &[&dyn Driver] = &[
 #[extern_trait]
 impl Board for K3Rt24 {
     fn init() {
+        // 0. cache/PMA 策略：完全不碰任何 custom CSR。
+        //    CVA6 rcpu1 不实现 0x7ca（MCACHE_CTL）——访问会硬件锁死（非 trap）。
+        //    0xbc0 在 rcpu0（esos）上可安全 csrc/csrs，但在 rcpu1 上纯读也 hang
+        //    ——两核虽同为 CVA6，但 custom CSR 实现不同（可能 RTL 配置差异）。
+        //    结论：rcpu1 无法通过 CSR 控制 cache/PMA。
+
         // 1. SPL 启动握手回写（最先，解锁 AP 的 6s 轮询）。
         //    原 clock::early_init() 的握手职责抽出至此独立模块。
         handshake::spl_handshake();

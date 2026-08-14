@@ -31,6 +31,9 @@ name = "sched_demo"
 [[bin]]
 name = "ipc_demo"
 
+[[bin]]
+name = "shm_ping"
+
 [profile.dev]
 panic = "abort"
 
