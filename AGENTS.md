@@ -54,8 +54,10 @@ cargo xtask build qemu-plic        # 环境聚合：opensbi + starryos + 全部 
 cargo xtask run                     # 启动 QEMU 双核 AMP（默认 qemu-plic，可 --env qemu-aia）
 cargo xtask build k3-com260         # K3 环境聚合：bins + esos.itb + starryos.uimg 两个交付产物
 cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
-./scripts/flash/k3-flash.sh         # K3 真板一键：构建 + 打包 itb + fastboot 刷写
 ```
+
+K3 刷写为手动 U-Boot fastboot 序列（见 README「使用方法 · K3 真板」），
+xtask 职责到产物为止。
 
 ### 直接 cargo（需手动指定 target）
 
@@ -287,9 +289,19 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 
 ### 刷写 K3 真板
 
+手动 U-Boot fastboot 序列（完整步骤见 README「使用方法 · K3 真板」）：
+
 ```bash
-./scripts/flash/k3-flash.sh           # 一键：构建 + 打包 itb + fastboot 刷写
-K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh   # 刷其他 rcpu1 bin
+# RP（esos.itb → esos MTD 分区）：
+#   U-Boot: fastboot -l $loadaddr -s 0x100000 usb 0
+#   Host:   fastboot stage build/k3-com260/esos.itb
+#   U-Boot: Ctrl-C 后：mtd erase esos && mtd write esos $loadaddr && reset
+# AP（starryos.uimg，bootm 直接引导，不落 flash）：
+#   U-Boot: fastboot -l 0x180000000 -s 0x04000000 usb 0
+#   Host:   fastboot stage build/k3-com260/starryos.uimg
+#   U-Boot: Ctrl-C 后：bootm 0x180000000
 ```
 
-详见 `scripts/flash/README.md`。
+注意：U-Boot 的 `fastboot` stage 传输完成后不会自动退出，需 **Ctrl+C** 回提示符。
+换打包 bin：`ELF_SRC=build/k3-com260/rt-async-k3-<bin>.elf bash scripts/flash/k3-pack-itb.sh`。
+板侧程序部署：局域网 HTTP 服务器 wget（见 README user-apps 小节）。

@@ -5,8 +5,8 @@
 # AP 与 RP 是两套独立镜像，本环境 build 的终点产物即两件：
 #   build/k3-com260/esos.itb     RP 侧（k3-pack-itb.sh 打包）
 #   build/k3-com260/starryos.uimg  AP 侧（tg-xtask 构建）
-# 刷写不进 xtask：RP 走 scripts/flash/k3-flash.sh，AP 走手动 fastboot 序列
-# （见 scripts/flash/README.md 与 docs/envs/k3-com260.md）。
+# 刷写为手动 U-Boot fastboot 序列（fastboot stage 后需 Ctrl+C 才能继续），
+# 完整步骤见 README「使用方法 · K3 真板」。
 
 [env]
 platform = "k3"
@@ -22,5 +22,6 @@ artifact = "starryos.uimg"
 
 [pack]
 # 打包进 esos.itb rcpu1-fw 节点的默认 bin（RTASYNC_BINS target_name）。
-# 刷其他 bin：K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh
+# 换 bin 打包：ELF_SRC=build/k3-com260/rt-async-k3-<bin>.elf
+#             bash scripts/flash/k3-pack-itb.sh
 bin = "k3-sched-demo"

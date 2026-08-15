@@ -64,7 +64,7 @@ K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，�
 |---|---|---|---|
 | `qemu-plic` | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb` |
 | `qemu-aia` | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见下） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
-| `k3-com260` | `cargo xtask build k3-com260` | RP：`./scripts/flash/k3-flash.sh`；AP：手动 fastboot+bootm（见下） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
+| `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（RP/AP 各一套，见下文 K3 小节） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
 
 > user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管地址布局与上游 repo pin；机器参数等环境属性在 `envs/`。
 
@@ -142,28 +142,38 @@ cargo xtask build k3-com260
 #   build/k3-com260/starryos.uimg  AP 侧：StarryOS FIT（kernel + dtb）
 ```
 
-**刷 RP 固件（一键，串口 fastboot）**：
+换打包的 rcpu1 bin（打包脚本保留在 `scripts/flash/k3-pack-itb.sh`）：
 
 ```bash
-./scripts/flash/k3-flash.sh                     # 构建 + 打包 itb + 刷写，板子最终停在 U-Boot 提示符
-K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh   # 换其他 rcpu1 bin
-./scripts/flash/k3-flash.sh --no-build          # 复用已打包的 itb 重刷
+cargo xtask build k3-ipc-demo
+ELF_SRC=build/k3-com260/rt-async-k3-ipc-demo.elf bash scripts/flash/k3-pack-itb.sh
 ```
 
-**刷/启 AP 内核（手动三步，同一串口会话）**：
+**刷写/引导（手动，U-Boot 串口 + 主机 fastboot）**
+
+> ⚠️ U-Boot 的 `fastboot` 在 stage 传输完成后**不会自动退出**，必须 **Ctrl+C** 回到提示符才能执行下一条命令。
+
+刷 RP 固件（写入 `esos` MTD 分区，掉电保留）：
 
 ```bash
-# U-Boot 侧：进入 fastboot，FIT 上传到 0x180000000（与 kernel/fdt 加载地址错开）
-fastboot -l 0x180000000 -s 0x04000000 usb 0
-# Host 侧：上传 starryos.uimg
-fastboot stage build/k3-com260/starryos.uimg
-# U-Boot 侧：Ctrl-C 退回提示符后启动（bootargs 已固化在设备树，无需 setenv）
+fastboot -l $loadaddr -s 0x100000 usb 0     # U-Boot：进入 fastboot（阻塞命令）
+fastboot stage build/k3-com260/esos.itb     # Host：上传 itb
+# ↓ U-Boot：Ctrl-C 退出 fastboot 后逐条执行：
+mtd erase esos
+mtd write esos $loadaddr
+reset
+```
+
+引导 AP 内核（StarryOS 不落 flash，`bootm` 直接启动；FIT 上传地址 `0x180000000` 与 kernel/fdt 加载地址错开）：
+
+```bash
+fastboot -l 0x180000000 -s 0x04000000 usb 0   # U-Boot
+fastboot stage build/k3-com260/starryos.uimg  # Host：上传 uimg
+# ↓ U-Boot：Ctrl-C 退出 fastboot 后：
 bootm 0x180000000
 ```
 
-串口设备名在 `scripts/flash/flash.conf` 配置（Linux 默认 `/dev/ttyUSB0`=主 UART、`/dev/ttyUSB1`=R_UART0，115200）。
-
-> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像。详见 [`scripts/flash/README.md`](scripts/flash/README.md)。
+> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像；bootargs 已固化在设备树 chosen 节点，无需 setenv。
 
 ### 用户态应用（user-apps）开发循环
 
@@ -174,8 +184,15 @@ cargo xtask build user-test-rpc      # 单独构建（环境聚合构建也会�
 # qemu-plic：注入 rootfs 后在 StarryOS shell 里运行
 cargo xtask install --all            # 全部注入（或 install build/user-test-rpc --dst /user-test-rpc）
 cargo xtask run                      # shell 里执行 /user-test-rpc
-# k3-com260：板上无编译环境/网络时经串口传 base64 还原
-bash scripts/serial_send.sh build/user-test-ipc /tmp/user-test-ipc   # 输出脚本粘到板子串口
+```
+
+k3-com260：板上经**局域网 HTTP 服务器 wget** 拉取——主机在产物目录起服务，板上 wget 后直接执行：
+
+```bash
+python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
+# 板上（StarryOS shell，IP 按实际网络填写）：
+#   wget http://<host-ip>:8000/user-test-ipc -O /tmp/user-test-ipc
+#   chmod +x /tmp/user-test-ipc && /tmp/user-test-ipc
 ```
 
 ### 常用子命令速查
