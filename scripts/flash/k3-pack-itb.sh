@@ -2,7 +2,8 @@
 # Pack a new rcpu1 ELF into esos.itb —— 完全自包含，不依赖 esos 仓库或 output/esos/。
 #
 # 所有 payload 都在 scripts/flash/payloads/ 下：
-#   - rt24_os0_rcpu.elf         (rcpu0 esos 固件，固定复用)
+#   - rt24_os0_rcpu.elf         (rcpu0 握手占位固件——写 BOOT_ENTRY 解锁 AP 轮询后 wfi，
+#                                 源码同目录 rt24_os0_rcpu.S，非官方 esos)
 #   - k3_rt240_com260_ifx.dtb   (本板型 rcpu0 设备树，固定复用)
 #   - k3_rt241_com260_ifx.dtb   (本板型 rcpu1 设备树，固定复用)
 #   - null.spacemit             (AP 交互 blob，固定复用)

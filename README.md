@@ -138,7 +138,7 @@ cargo xtask run --bin console              # demo / console / console_interrupt
 ```bash
 cargo xtask build k3-com260
 # 交付两个产物：
-#   build/k3-com260/esos.itb       RP 侧：rcpu0 官方 esos + rcpu1 rt-async（默认 k3-sched-demo）
+#   build/k3-com260/esos.itb       RP 侧：rcpu0 握手占位 + rcpu1 rt-async（默认 k3-sched-demo）
 #   build/k3-com260/starryos.uimg  AP 侧：StarryOS FIT（kernel + dtb）
 ```
 
@@ -173,7 +173,7 @@ fastboot stage build/k3-com260/starryos.uimg  # Host：上传 uimg
 bootm 0x180000000
 ```
 
-> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像；bootargs 已固化在设备树 chosen 节点，无需 setenv。
+> K3 的 rcpu0 跑**本仓库的握手占位固件**（`scripts/flash/payloads/rt24_os0_rcpu.S`：入口写 BOOT_ENTRY 寄存器解锁 AP 的 6s 启动轮询后永久 wfi，不参与 AMP 通信；mailbox3 留给未来），rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb（沿用官方 `esos` 分区命名）的不同节点加载，无 DTB handoff（DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像；bootargs 已固化在设备树 chosen 节点，无需 setenv。
 
 ### 用户态应用（user-apps）开发循环
 
