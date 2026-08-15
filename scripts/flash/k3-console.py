@@ -34,8 +34,11 @@ def cfg(key, default):
     return os.environ.get(key, default)
 
 
-MAIN_UART   = lambda: cfg("K3_MAIN_UART",   "/dev/tty.usbmodem62B68F06E7BF1")
-RUART       = lambda: cfg("K3_RUART",       "/dev/tty.usbserial-114120")
+# 串口默认值与 flash.conf 保持一致（Linux /dev/ttyUSB*）；k3-flash.sh 总会先
+# source flash.conf 再调本脚本，这里的缺省只影响直接调用本脚本的场合。
+# macOS 用户在 flash.conf 或环境变量里覆盖为 /dev/tty.usbmodem* 等。
+MAIN_UART   = lambda: cfg("K3_MAIN_UART",   "/dev/ttyUSB0")
+RUART       = lambda: cfg("K3_RUART",       "/dev/ttyUSB1")
 BAUD        = lambda: int(cfg("K3_BAUD",    "115200"))
 PROMPT      = lambda: cfg("K3_UBOOT_PROMPT", "=>")
 AUTOBOOT_RE = lambda: cfg("K3_AUTOBOOT_RE", "stop autoboot|Hit any key|autoboot")

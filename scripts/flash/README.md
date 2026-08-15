@@ -45,13 +45,16 @@ macOS 自带 python3。
 
 | 设备 | 角色 | 用途 |
 |---|---|---|
-| `/dev/tty.usbmodem62B68F06E7BF1` | 主 UART | **U-Boot 控制台**（fastboot、mtd、reset） |
-| `/dev/tty.usbserial-114120` | RUART | **rt-async 固件日志**（当前脚本未用，可 tail-log 调试） |
+| 主 UART（Linux：`/dev/ttyUSB0`） | 主 UART | **U-Boot 控制台**（fastboot、mtd、reset） |
+| RUART（Linux：`/dev/ttyUSB1`） | RUART | **rt-async 固件日志**（当前脚本未用，可 tail-log 调试） |
+
+> 串口设备名的单一配置点是 `flash.conf`（环境变量可再覆盖）。macOS 下设备名形如
+> `/dev/tty.usbmodem*`，查法：`ls /dev/tty.usb*`。
 
 > 跑脚本前**关掉**占用主 UART 的 picocom/screen/minicom 会话，否则 pyserial 打开会报
 > `Resource busy`：
 > ```
-> pkill -f 'picocom /dev/tty.usbmodem' ; pkill -f 'screen /dev/tty.usbmodem'
+> pkill -f 'picocom /dev/ttyUSB0' ; pkill -f 'screen /dev/ttyUSB0'
 > ```
 
 ## 配置
