@@ -23,8 +23,9 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 │   ├── rt-async-app/          ←   QEMU virt 固件
 │   └── rt-async-k3-app/       ←   K3 用户态应用
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
+├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
 ├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
-├── amp.toml                   ←   地址布局 + 构建参数 single source of truth
+├── amp.toml                   ←   地址布局 + 上游 pin 的 single source of truth
 ├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
 └── build/                     ←   构建产物（.elf/.bin/.dtb，不入 git）
@@ -43,11 +44,16 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 
 ### 推荐：xtask（处理 target、产物拷贝、地址布局等）
 
+环境是一等公民（`envs/<name>.toml`）：`qemu-plic`（快速冒烟）、`qemu-aia`
+（AIA 中断架构仿真，K3 对应物）、`k3-com260`（真板）。产物按环境隔离在
+`build/<env>/` 下。
+
 ```bash
-cargo xtask build k3-sched-demo    # 构建 K3 sched_demo → build/rt-async-k3-sched-demo.elf
-cargo xtask build qemu-demo        # 构建 QEMU demo
-cargo xtask run [--bin demo]       # 启动 QEMU 双核 AMP（run 仅服务 QEMU，--bin 用短名）
-./scripts/flash/k3-flash.sh        # K3 真板一键：构建 + 打包 itb + fastboot 刷写
+cargo xtask build qemu-plic        # 环境聚合：opensbi + starryos + 全部 qemu bins + user-apps
+cargo xtask run                     # 启动 QEMU 双核 AMP（默认 qemu-plic，可 --env qemu-aia）
+cargo xtask build k3-com260         # K3 环境聚合：bins + esos.itb + starryos.uimg 两个交付产物
+cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
+./scripts/flash/k3-flash.sh         # K3 真板一键：构建 + 打包 itb + fastboot 刷写
 ```
 
 ### 直接 cargo（需手动指定 target）

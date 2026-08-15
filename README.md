@@ -268,7 +268,7 @@ make test
 - **MSIP 地址实测**：RT24 的 MSIP 地址为 `0xec000000`（= SysTimer `0xe4000000` + `(rcpu1<<27)`），写 1 触发 MachineSoft（mip=0x8），已固化进 `clint_k3.rs` 的 K3Msip 驱动。
 - **Mailbox 异步收发自测**（`apps/rt-async-k3/src/bin/` 配合 mailbox driver）：高优先级 task `mailbox.recv().await` 阻塞等待、低优先级 task `signal()` 触发硬件中断唤醒高优任务，验证 IrqLatch + IrqFuture 桥接原语在 K3 真板的中断→async 路径。
 
-构建：`cargo xtask build k3-sched-demo` → `build/rt-async-k3-sched-demo.elf`；刷写：`./scripts/flash/k3-flash.sh`（一键编译+打包 itb+fastboot 刷写）；串口观察：R_UART0，115200 8N1。
+构建：`cargo xtask build k3-com260`（产出 `build/k3-com260/esos.itb` + `starryos.uimg` 两个交付产物）；刷写：`./scripts/flash/k3-flash.sh`（一键编译+打包 itb+fastboot 刷写）；串口观察：R_UART0，115200 8N1。
 
 ---
 
@@ -386,36 +386,44 @@ rt-async-amp/
 
 ### 一键构建运行
 
+环境（environment）是一等公民：`envs/<name>.toml` 声明机器参数、StarryOS 板级配置与 DTB 来源，产物按环境隔离在 `build/<env>/`。三个环境：`qemu-plic`（快速冒烟）、`qemu-aia`（APLIC+IMSIC，K3 中断架构的仿真对应物）、`k3-com260`（真板）。
+
 ```bash
 git submodule update --init --recursive   # 1. 初始化子模块
 cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU
 cargo xtask qemu                           # 3. 构建运行环境qemu
-cargo xtask build                          # 4. 构建全部组件（等同 build all）
+cargo xtask build qemu-plic                # 4. 环境聚合构建（opensbi + starryos + bins + user-apps）
 make -C tgoskits/os/StarryOS rootfs  # 5. 下载 StarryOS rootfs 镜像（Starry-OS 官方 release）
 cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS rootfs
-cargo xtask run                            # 7. 启动双核 AMP（可选 --tmux 同时观察 UART1）
+cargo xtask run                            # 7. 启动双核 AMP（默认 qemu-plic；--env qemu-aia / --tmux 可选）
 ```
 
 ### K3 实体板构建与刷写
 
 ```bash
-cargo xtask build k3-sched-demo            # 构建 K3 RT24 rcpu1 固件 → build/rt-async-k3-sched-demo.elf
-./scripts/flash/k3-flash.sh                # 一键：编译 + 打包 itb（rcpu0 esos + rcpu1 rt-async）+ fastboot 刷写
+cargo xtask build k3-com260    # 环境聚合：全部 rcpu1 bins + 打包 + StarryOS
+                              #   交付产物：build/k3-com260/esos.itb（RP 侧）
+                              #             build/k3-com260/starryos.uimg（AP 侧，fastboot bootm 用）
+./scripts/flash/k3-flash.sh                # RP 一键：编译 + 打包 itb + fastboot 刷写（K3_TARGET= 可换 bin）
 # 串口观察 R_UART0（115200 8N1）：sched_demo 输出交替的 H/L
 ```
 
-> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 U-Boot 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。详见 [`scripts/flash/README.md`](scripts/flash/README.md)。
+> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 U-Boot 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 侧 StarryOS 经 `starryos.uimg` + fastboot `bootm` 启动（手动序列见 [`scripts/flash/README.md`](scripts/flash/README.md)）。刷写不进 xtask——xtask 的职责到产物为止。
 
 ### 常用子命令
 
 ```bash
+# 环境聚合构建（一个环境一条命令，产物落 build/<env>/）
+cargo xtask build qemu-plic  #   OpenSBI + StarryOS + 全部 qemu bins + user-apps
+cargo xtask build qemu-aia   #   同上（AIA 机器；AP DTB 由 dumpdtb+overlay 自动生成）
+cargo xtask build k3-com260  #   全部 k3 bins + esos.itb + starryos.uimg
 # 构建单个目标：组件（opensbi / starryos / user-test-*）或 rt-async bin
-cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名：
+cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名（落平台默认环境目录）：
                              #     qemu-demo / qemu-console / qemu-console-interrupt → flat bin（QEMU loader）
                              #     k3-sched-demo → ELF（esos 脚本整合进 itb）
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
-cargo xtask run --bin demo   # 指定 rt-async bin 启动（默认 demo；run 用短名）
+cargo xtask run --env qemu-aia # 启动指定环境的 QEMU AMP（--bin demo 换 RP bin，run 用短名）
 cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志
 cargo xtask install --all    # 将 user-apps 安装进 StarryOS rootfs
 cargo xtask qemu             # 从源码构建带 UART1 的定制 QEMU
