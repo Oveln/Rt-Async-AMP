@@ -25,7 +25,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
 ├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
-├── amp.toml                   ←   地址布局 + 上游 pin 的 single source of truth
+├── amp.toml                   ←   QEMU 运行所需地址布局 + 上游 pin（其余地址在 DT/dts）
 ├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
 └── build/                     ←   构建产物（.elf/.bin/.dtb，不入 git）
@@ -143,7 +143,7 @@ dtc -I dtb -O dts /tmp/k3.dtb | grep "pinctrl-single,pins"   # 反编译核对�
 4. 如引入新功能 trait（如 `I2cBus`），先在子模块 `rt-async` 的 `device.rs` 定义，
    `driver.rs` 加 Slot + 访问器——这会同时改两个仓库，走"双仓开发流程"。
 
-### K3 关键地址（详见 `amp.toml`）
+### K3 关键地址（详见 `its/rt-async-k3.dts`，运行时 DT probe）
 
 | 外设 | 基址 | 说明 |
 |------|------|------|
@@ -269,8 +269,12 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 - `log::info!()`/`log::error!()` 输出到 console UART，阻塞写，**中断上下文勿高频打印**。
 - 构建产物（`build/*.elf`、`*.bin`、`*.dtb`）不入 git，由 build.rs / xtask 派生。
 - **过程中产生的设计文档、计划文档不入 git**（如 `docs/superpowers/`），除非用户明确要求。
-- `amp.toml` 是地址布局 + 构建参数的 single source of truth，driver 硬编码地址时与
-  之保持一致并加注释。
+- **地址布局的真相源分层**：`amp.toml` 只管 QEMU 运行所需（引导链 + 补丁 +
+  loader + 上游 pin，均为"能解析 DT 之前"就要用的值）；共享内存窗口以
+  `its/rt-async-shm.dtsi`（qemu）/ `its/rt-async-k3.dts` + tgoskits AP dts
+  （K3）为准，运行时双端 DT probe；K3 链接参数在 `apps/rt-async-k3/build.rs`；
+  `/dev/rt_shm` ioctl ABI 在 `user-apps/rtshm-abi`（内核侧 tgoskits
+  `rt_shm.rs` 保持同值，双仓对齐义务）。
 
 ---
 

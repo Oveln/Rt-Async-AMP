@@ -1,70 +1,39 @@
-# rt-async-amp 共享约定配置
+# rt-async-amp 共享约定配置（QEMU 环境）
 #
-# Single source of truth for address layout, build parameters, and repo pins.
-# Template variables {VAR} in patch files (patches/*.patch) are substituted
-# from top-level values below during `cargo xtask setup`.
+# 职责：QEMU 运行所需的地址布局（引导链 + 补丁 + loader）+ 上游 repo pin。
+# 这些值作用于"能解析设备树的代码存在之前"的阶段——OpenSBI patch 编译期
+# 变量、QEMU loader 摆放地址、链接脚本、DTB 扫描起点，设备树无法替代。
+#
+# 其余地址布局已由设备树承载（运行时 probe）：
+#   - 共享内存窗口：its/rt-async-shm.dtsi（qemu 双端单一真相源）
+#   - K3 外设/共享窗：its/rt-async-k3.dts（RP 侧）+ tgoskits AP dts
+#   - K3 链接参数：apps/rt-async-k3/build.rs（本地常量）
+# ioctl 等 /dev/rt_shm 软件 ABI：user-apps/rtshm-abi（内核侧 tgoskits 对齐义务）。
+# 机器参数（machine/smp/ram）等环境属性：envs/<env>.toml。
 
-# ── Physical memory layout ──────────────────────────────────────────────────
-# QEMU virt 256M RAM: 0x80000000 ~ 0x90000000
+# ── QEMU virt 256M RAM: 0x80000000 ~ 0x90000000 ─────────────────────────────
 OPENSBIBASE  = "0x80000000"
-OPENSBISIZE  = "0x80000"
 STARRYOSBASE = "0x80200000"
 RTASYNCBASE  = "0x82800000"
 RTASYNCSIZE  = "0x800000"
 # rt-async 专属 DTB 加载地址（esos 同款 handoff：QEMU loader 把 dtb 摆这里，
 # board_init 从此地址扫描认领 compatible="ov,rt-async" 的 DTB）。
-# 摆在 rt-async 8MB 区结束处，4KB 对齐，与 SHMBASE 不冲突。
+# 摆在 rt-async 8MB 区结束处，4KB 对齐，与 SHM 窗不冲突。
 # 不变式：board_init 从此地址裸读 16 页(64KB) 扫描 DTB，故该区间必须落在
 # QEMU virt RAM（0x80000000..0x90000000）内，否则裸读会 bus fault。
 RTASYNCDTBBASE = "0x83000000"
 
-# ── IPC shared memory ───────────────────────────────────────────────────────
-# 大小必须 ≥ ov-channels SharedMemory::<3> footprint 0x18700（同 K3_SHMSIZE
-# 注释）；与 its/rt-async-shm.dtsi reg、its/qemu-virt-amp.dts memreserve 同步。
-SHMBASE = "0x88000000"
-SHMSIZE = "0x19000"
-
 # ── rt-async hart (core) assignment ─────────────────────────────────────────
+# opensbi-amp.patch 的 fw_base.S 在第一条有效指令按 mhartid 分流（早于一切
+# 代码、无栈），该值无法从 DT 获取（AP DTB 中不声明 hart 归属）。
 RTASYNCHART = 1
 
-# ── CLINT ───────────────────────────────────────────────────────────────────
-CLINTBASE = "0x2000000"
-
-# ── Peripherals ─────────────────────────────────────────────────────────────
-UART0BASE = "0x10000000"
+# ── QEMU virt 定制外设（qemu-uart1.patch 定义虚拟硬件本身）──────────────────
 UART1BASE = "0x10002000"
-PLICBASE  = "0x0C000000"
 UART1IRQ  = 12
-
-# ── ioctl (rt_shm device) ──────────────────────────────────────────────────
-RTSHM_IOC_NOTIFY       = "0x735001"
-RTSHM_IOC_AWAIT        = "0x735002"
-RTSHM_IOC_CLR_PENDING  = "0x735003"
-
-# ── SBI constants ───────────────────────────────────────────────────────────
-SBI_EXT_IPI       = "0x735049"
-SBI_FUNC_SEND_IPI = "0x00"
-
-# 注：QEMU 机器参数（machine/smp/ram）已移入 envs/<env>.toml 的 [qemu] 节——
-# 它们是环境属性而非地址布局；amp.toml 只管地址 + 上游 pin。
-
-# ── K3 RT24 rcpu1 ───────────────────────────────────────────────────────────
-RT24RCPU1BASE = "0x100804000"
-RT24RCPU1SIZE = "0x300000"     # 3M，与 esos baremetal.ld 一致
-
-# K3 跨核共享内存窗（RCPU SRAM 起始；its/rt-async-k3.dts 与 tgoskits AP dts 的
-# rt-async-amp reg 与此对齐）。大小必须 ≥ ov-channels SharedMemory::<3>
-# footprint = 0x100 + 3×0x8200 = 0x18700（每 Channel = magic/version +
-# RingBuffer<128> 128×256B 消息），取整 0x19000。勿缩——AP 内核 is_valid()
-# 会遍历到 ch2.magic@+0x10500，用户态也要 mmap 全窗。
-K3_SHMBASE = "0xc0800000"
-K3_SHMSIZE = "0x19000"
-
-# K3 RT24 外设基址（rcpu1 视角，单一真相源；driver 当前硬编码但保持约定）
-K3_SYSTIMER  = "0xe4000000"   # SysTimer：mtime(+0xbff8全局)/mtimecmp(+0x4000+hart<<27)/MSIP(+0x0+hart<<27)
-K3_PLIC      = "0xe0000000"   # PLIC（自定义布局，stride hart<<27）
-K3_UART0     = "0xc0881000"   # R_UART0（PXA 派生）
-K3_UART0_IRQ = 17             # shub_uart_int[0] = int_src[17]
+# chip-qemu-virt-rt 的 setup_console_irq 读回确认用（PLIC 已 DT probe，
+# 待 plic_sifive 暴露 probed base 后可移除）。
+PLICBASE  = "0x0C000000"
 
 # ── Upstream repos ──────────────────────────────────────────────────────────
 

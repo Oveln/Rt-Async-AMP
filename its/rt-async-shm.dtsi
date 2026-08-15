@@ -22,7 +22,7 @@ rt-async@88000000 {
 	compatible = "ov,rt-async-amp";
 	// 大小 ≥ ov-channels SharedMemory::<3> footprint 0x18700（busy@+0x0；
 	// +0x100 起 3×Channel，每 Channel 0x8200），取整 0x19000，勿缩——
-	// 与 amp.toml SHMSIZE、qemu-virt-amp.dts 的 memreserve 三处同步。
+	// 本文件是共享窗的单一真相源（两侧 DTS 经 include 复用）。
 	reg = <0 0x88000000 0 0x19000>;
 
 	// 显式声明子节点的 cell 尺寸，避免 fdt-parser 解析 notifier.reg

@@ -2,12 +2,14 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    let ws = xtask::config::workspace_dir_from_manifest();
-    let config = xtask::config::load_amp_toml(&ws);
     let out_dir_str = std::env::var("OUT_DIR").unwrap();
     let out_dir = Path::new(&out_dir_str);
-    xtask::config::generate_amp_rs(&config, out_dir);
-    println!("cargo:rerun-if-changed={}/amp.toml", ws.display());
+    // 仓库根 = modules/chip-k3-rt24 的上两级（its/ 在仓库根下）。
+    let ws = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("manifest dir must be <repo>/modules/chip-k3-rt24")
+        .to_path_buf();
 
     // 编译期内嵌 DTB：.dts → cc -E（展开 #include/#define 宏）→ .pp.dts
     // → dtc（求值算术表达式，生成 .dtb）→ include_bytes!(env!("K3_DTB_PATH"))。

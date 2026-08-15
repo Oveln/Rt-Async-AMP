@@ -115,7 +115,6 @@ dependencies = [
  "platform",
  "riscv",
  "tock-registers",
- "xtask",
 ]
 
 [[package]]
@@ -731,8 +730,11 @@ dependencies = [
  "platform",
  "postcard",
  "serde",
- "xtask",
 ]
+
+[[package]]
+name = "rtshm-abi"
+version = "0.1.0"
 
 [[package]]
 name = "rustversion"
@@ -1008,8 +1010,8 @@ dependencies = [
  "ov-channels",
  "ov-rpc",
  "postcard",
+ "rtshm-abi",
  "serde",
- "xtask",
 ]
 
 [[package]]
@@ -1017,6 +1019,7 @@ name = "user-test-mbox"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rtshm-abi",
  "xtask",
 ]
 
@@ -1029,8 +1032,8 @@ dependencies = [
  "ov-rpc",
  "portable-atomic",
  "postcard",
+ "rtshm-abi",
  "serde",
- "xtask",
 ]
 
 [[package]]
@@ -1041,8 +1044,8 @@ dependencies = [
  "ov-channels",
  "ov-rpc",
  "postcard",
+ "rtshm-abi",
  "serde",
- "xtask",
 ]
 
 [[package]]

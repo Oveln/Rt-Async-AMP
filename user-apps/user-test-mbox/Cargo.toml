@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+rtshm-abi = { path = "../rtshm-abi" }
 libc = "0.2"
 
 [build-dependencies]

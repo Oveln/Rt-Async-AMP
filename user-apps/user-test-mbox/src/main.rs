@@ -11,8 +11,8 @@ use std::fs::OpenOptions;
 use std::io;
 use std::os::unix::io::IntoRawFd;
 
-// 与 StarryOS kernel 的 RT_SHM_IOC_TEST_MBOX 保持一致（0x7350_04）。
-const RT_SHM_IOC_TEST_MBOX: libc::c_ulong = 0x7350_04;
+// rtshm-abi 与 StarryOS kernel 的 RT_SHM_IOC_TEST_MBOX 保持一致。
+const RT_SHM_IOC_TEST_MBOX: libc::c_ulong = rtshm_abi::IOC_TEST_MBOX as libc::c_ulong;
 
 fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Result<libc::c_int> {
     let ret = unsafe { libc::ioctl(fd, cmd as _, arg) };

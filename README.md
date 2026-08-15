@@ -66,7 +66,7 @@ K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，�
 | `qemu-aia` | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见下） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
 | `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（RP/AP 各一套，见下文 K3 小节） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
 
-> user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管地址布局与上游 repo pin；机器参数等环境属性在 `envs/`。
+> user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管 QEMU 运行所需的引导链地址与上游 repo pin；机器参数等环境属性在 `envs/`，共享内存窗口等其余地址布局以设备树为准（运行时双端 DT probe）。
 
 ### 前置依赖
 
@@ -219,6 +219,6 @@ cargo xtask completions fish # 生成 shell 补全脚本（bash/zsh/fish/...）
 
 ### 约定说明
 
-- `amp.toml` 是地址常量与上游 repo pin 的单一真相源：patch 文件中的 `{VAR}` 模板变量在 `cargo xtask setup` 时由其顶层取值替换；板级 crate 的 `build.rs` 亦由它生成 `amp_gen.rs` 常量。机器参数等**环境属性**在 `envs/*.toml`。
+- 地址布局真相源分层：`amp.toml` 只保留 QEMU 运行所需（OpenSBI/QEMU 补丁的 `{VAR}` 模板变量、loader 摆放地址、DTB 扫描起点——均为"能解析 DT 之前"就要用的值）；共享内存窗口等其余地址以设备树为准（`its/rt-async-shm.dtsi` / `its/rt-async-k3.dts`，运行时 DT probe）；`/dev/rt_shm` 的 ioctl ABI 在 `user-apps/rtshm-abi`。机器参数等**环境属性**在 `envs/*.toml`。
 - 修改 `.dts`/`.dtsi` 后无需手动编译：`run` 时按 mtime 增量编译 DTB（`cc -E → dtc` 链，与 K3 `build.rs` 一致）。
 - 仓库结构与开发规范（分支工作流、提交约定、双仓流程）见 [`AGENTS.md`](AGENTS.md)。

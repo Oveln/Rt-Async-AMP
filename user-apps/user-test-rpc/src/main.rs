@@ -5,14 +5,10 @@ use std::os::unix::io::IntoRawFd;
 use ov_rpc::define_service_client;
 
 #[allow(dead_code)]
-mod amp {
-    include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
-}
-
-const RT_SHM_IOC_NOTIFY: libc::c_ulong = amp::RTSHM_IOC_NOTIFY as libc::c_ulong;
-const RT_SHM_IOC_AWAIT: libc::c_ulong = amp::RTSHM_IOC_AWAIT as libc::c_ulong;
-const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = amp::RTSHM_IOC_CLR_PENDING as libc::c_ulong;
-const SHM_SIZE: usize = amp::SHMSIZE;
+const RT_SHM_IOC_NOTIFY: libc::c_ulong = rtshm_abi::IOC_NOTIFY as libc::c_ulong;
+const RT_SHM_IOC_AWAIT: libc::c_ulong = rtshm_abi::IOC_AWAIT as libc::c_ulong;
+const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = rtshm_abi::IOC_CLR_PENDING as libc::c_ulong;
+const SHM_SIZE: usize = rtshm_abi::QEMU_SHM_SIZE;
 
 define_service_client! {
     RtAsyncRpc {

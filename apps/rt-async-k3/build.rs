@@ -13,17 +13,15 @@ fn main() {
     // 源码变化时重跑 build.rs，刷新编译时间戳（否则 OUT_DIR 里是旧缓存值）。
     println!("cargo:rerun-if-changed=src/");
 
-    let ws = xtask::config::workspace_dir_from_manifest();
-    println!("cargo:rerun-if-changed={}/amp.toml", ws.display());
-
-    let amp = xtask::config::load_amp_toml(&ws);
-
-    let rtasync_base = amp.get("RT24RCPU1BASE").expect("missing RT24RCPU1BASE");
-    let rtasync_size =
-        xtask::config::parse_size(amp.get("RT24RCPU1SIZE").expect("missing RT24RCPU1SIZE"));
+    // K3 RT24 rcpu1 链接布局——本 app 的板级常量（K3 地址布局不走 amp.toml）。
+    // 与官方 esos baremetal.ld 的 rcpu1 区一致：DDR 0x1_0080_4000 起 3MB。
+    // 不变式：U-Boot k3-rproc 只 memcpy ELF PT_LOAD、无 DTB handoff，
+    // 链接地址 = 加载地址 = 执行地址；esos.itb 的 rcpu1-fw load 地址与此对齐。
+    const RT24_RCPU1_BASE: &str = "0x100804000";
+    const RT24_RCPU1_SIZE: u64 = 0x300000; // 3M
 
     let memory_x = format!(
-        "ENTRY(__start);\n\nMEMORY\n{{\n    RAM : ORIGIN = {rtasync_base}, LENGTH = 0x{rtasync_size:x}\n}}\n\n_max_hart_id = 0;\n_hart_stack_size = 8192;\n"
+        "ENTRY(__start);\n\nMEMORY\n{{\n    RAM : ORIGIN = {RT24_RCPU1_BASE}, LENGTH = 0x{RT24_RCPU1_SIZE:x}\n}}\n\n_max_hart_id = 0;\n_hart_stack_size = 8192;\n"
     );
     std::fs::write(Path::new(&out_dir).join("memory.x"), memory_x).unwrap();
 

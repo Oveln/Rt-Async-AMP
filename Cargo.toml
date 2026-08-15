@@ -6,6 +6,7 @@ members = [
     "modules/ov-shm",
     "apps/rt-async-app",
     "apps/rt-async-k3",
+    "user-apps/rtshm-abi",
     "user-apps/user-test-ipc",
     "user-apps/user-test-mbox",
     "user-apps/user-test-rpc",
