@@ -9,7 +9,13 @@ pub fn run(root: &Path, file: &str, dst: &str) {
     } else {
         root.join(file)
     };
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
+    let rootfs = crate::util::resolve_rootfs(root).unwrap_or_else(|| {
+        panic!(
+            "rootfs 镜像缺失。准备方式（tgoskits 正统流程）：\n  \
+             cd tgoskits && cargo xtask starry rootfs --arch riscv64\n  \
+             （legacy 备选：make -C tgoskits/os/StarryOS rootfs）"
+        )
+    });
 
     assert!(
         file_path.exists(),

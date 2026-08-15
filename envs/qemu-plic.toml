@@ -1,0 +1,29 @@
+# 环境一：QEMU virt 双核 AMP（PLIC 中断控制器）。
+#
+# OpenSBI fw_dynamic 分流：hart0 → StarryOS(S 态)，hart1 → rt-async(M 态)。
+# 定制 QEMU（qemu-uart1.patch）在 0x10002000 加了第二路 UART 给 rt-async。
+# 这是快速冒烟环境：秒级迭代，硬件行为以 qemu-plic → qemu-aia → k3 递进逼近。
+
+[env]
+platform = "qemu"
+default = true
+desc = "QEMU virt 双核 AMP（PLIC）"
+
+[starry]
+# tgoskits 内相对路径（tg-xtask starry build --config 消费）。
+# StarryOS 二进制对 PLIC/AIA 通用（somehal 运行时 FDT 探测），与 qemu-aia 同一份。
+config = "os/StarryOS/configs/board/qemu-riscv64.toml"
+# AMP 下 hart1 归 rt-async，StarryOS 必须单核（多核会与 rt-async 抢 hart1 卡死）。
+smp = 1
+# 产物：.bin（QEMU -kernel 直接加载）
+artifact = "starryos.bin"
+
+[qemu]
+machine = "virt"
+smp = 2
+ram = "256M"
+
+[dtb]
+# AP 侧 DTB：手写 dts 编译（含 memreserve 与共享窗节点）。
+source = "dts"
+dts = "its/qemu-virt-amp.dts"

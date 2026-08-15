@@ -17,17 +17,22 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── modules/                   ← 板级 crate（依赖 rt-async 的 platform 契约层）
 │   ├── chip-k3-rt24/          ←   K3 RT24 rcpu1 板级驱动（pinctrl/uart/clint/plic/...）
 │   ├── chip-qemu-virt-rt/     ←   QEMU virt 仿真板级驱动
+│   ├── ov-shm/                ←   跨核共享内存抽象（DT probe 认领共享窗）
 │   └── ov-rpc/                ←   跨核 RPC
 ├── apps/
-│   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，构建产物 → build/*.elf）
-│   ├── rt-async-app/          ←   QEMU virt 固件
-│   └── rt-async-k3-app/       ←   K3 用户态应用
+│   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，产物 → build/k3-com260/*.elf）
+│   └── rt-async-app/          ←   QEMU virt 固件
+├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
+│   ├── user-test-{ipc,mbox,rpc,sched}/   ←   AMP 测试程序
+│   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
-├── xtask/                     ←   构建工具链（cargo xtask build/run/flash/...）
-├── amp.toml                   ←   地址布局 + 构建参数 single source of truth
+├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
+├── scripts/flash/             ←   K3 ITB 打包脚本（k3-pack-itb.sh）+ 固定 payload
+├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
+├── amp.toml                   ←   QEMU 运行所需地址布局 + 上游 pin（其余地址在 DT/dts）
 ├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
-└── build/                     ←   构建产物（.elf/.bin/.dtb，不入 git）
+└── build/                     ←   构建产物（.elf/.bin/.dtb/.itb/.uimg，不入 git）
 ```
 
 - **子模块 `rt-async`**：内核 + 平台抽象，独立 workspace，集成分支 `main`。
@@ -43,12 +48,20 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 
 ### 推荐：xtask（处理 target、产物拷贝、地址布局等）
 
+环境是一等公民（`envs/<name>.toml`）：`qemu-plic`（快速冒烟）、`qemu-aia`
+（AIA 中断架构仿真，K3 对应物；**仅 AP 侧可跑**——rt-async 暂不支持 AIA，
+RP 侧会挂，见 envs/qemu-aia.toml）、`k3-com260`（真板）。产物按环境隔离在
+`build/<env>/` 下。
+
 ```bash
-cargo xtask build k3-sched-demo    # 构建 K3 sched_demo → build/rt-async-k3-sched-demo.elf
-cargo xtask build qemu-demo        # 构建 QEMU demo
-cargo xtask run    k3-sched-demo   # 构建 + 运行（QEMU 仿真）
-cargo xtask flash  k3-sched-demo   # 构建 + 刷写到 K3 真板
+cargo xtask build qemu-plic        # 环境聚合：opensbi + starryos + 全部 qemu bins + user-apps
+cargo xtask run                     # 启动 QEMU 双核 AMP（默认 qemu-plic，可 --env qemu-aia）
+cargo xtask build k3-com260         # K3 环境聚合：bins + esos.itb + starryos.uimg 两个交付产物
+cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
 ```
+
+K3 刷写为手动 U-Boot fastboot 序列（见 README「使用方法 · K3 真板」），
+xtask 职责到产物为止。
 
 ### 直接 cargo（需手动指定 target）
 
@@ -134,7 +147,7 @@ dtc -I dtb -O dts /tmp/k3.dtb | grep "pinctrl-single,pins"   # 反编译核对�
 4. 如引入新功能 trait（如 `I2cBus`），先在子模块 `rt-async` 的 `device.rs` 定义，
    `driver.rs` 加 Slot + 访问器——这会同时改两个仓库，走"双仓开发流程"。
 
-### K3 关键地址（详见 `amp.toml`）
+### K3 关键地址（详见 `its/rt-async-k3.dts`，运行时 DT probe）
 
 | 外设 | 基址 | 说明 |
 |------|------|------|
@@ -258,10 +271,14 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 - 共享状态读写必须在 `critical_section::with()` 中；手动 `Sync` impl 须注释安全性依据；
   每个 `unsafe` 块上方注释说明为何安全。
 - `log::info!()`/`log::error!()` 输出到 console UART，阻塞写，**中断上下文勿高频打印**。
-- 构建产物（`build/*.elf`、`*.bin`、`*.dtb`）不入 git，由 build.rs / xtask 派生。
+- 构建产物（`build/*.elf`、`*.bin`、`*.dtb`、`*.itb`、`*.uimg`）不入 git，由 build.rs / xtask 派生。
 - **过程中产生的设计文档、计划文档不入 git**（如 `docs/superpowers/`），除非用户明确要求。
-- `amp.toml` 是地址布局 + 构建参数的 single source of truth，driver 硬编码地址时与
-  之保持一致并加注释。
+- **地址布局的真相源分层**：`amp.toml` 只管 QEMU 运行所需（引导链 + 补丁 +
+  loader + 上游 pin，均为"能解析 DT 之前"就要用的值）；共享内存窗口以
+  `its/rt-async-shm.dtsi`（qemu）/ `its/rt-async-k3.dts` + tgoskits AP dts
+  （K3）为准，运行时双端 DT probe；K3 链接参数在 `apps/rt-async-k3/build.rs`；
+  `/dev/rt_shm` ioctl ABI 在 `user-apps/rtshm-abi`（内核侧 tgoskits
+  `rt_shm.rs` 保持同值，双仓对齐义务）。
 
 ---
 
@@ -274,14 +291,25 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 ### 添加新构建目标（app/bin）
 
 1. 在 `apps/<app>/src/bin/` 加 bin 文件，`Cargo.toml` 加 `[[bin]]`。
-2. `xtask/src/build.rs` 的 `TARGETS` 数组加一项（`name` / `target_name` / `out` /
-   `app_dir` / `package`）。
+2. `xtask/src/build.rs` 的 `RTASYNC_BINS` 注册表加一项（`name` / `target_name` /
+   `platform` / `out` / `app_dir` / `package` / `target` / `artifact`）。
 3. `cargo xtask build <target_name>` 验证。
 
 ### 刷写 K3 真板
 
+手动 U-Boot fastboot 序列（完整步骤见 README「使用方法 · K3 真板」）：
+
 ```bash
-cargo xtask flash k3-sched-demo    # 构建 + 通过 scripts/flash 刷写
+# RP（esos.itb → esos MTD 分区）：
+#   U-Boot: fastboot -l $loadaddr -s 0x100000 usb 0
+#   Host:   fastboot stage build/k3-com260/esos.itb
+#   U-Boot: Ctrl-C 后：mtd erase esos && mtd write esos $loadaddr && reset
+# AP（starryos.uimg，bootm 直接引导，不落 flash）：
+#   U-Boot: fastboot -l 0x180000000 -s 0x04000000 usb 0
+#   Host:   fastboot stage build/k3-com260/starryos.uimg
+#   U-Boot: Ctrl-C 后：bootm 0x180000000
 ```
 
-详见 `scripts/flash`。
+注意：U-Boot 的 `fastboot` stage 传输完成后不会自动退出，需 **Ctrl+C** 回提示符。
+换打包 bin：`ELF_SRC=build/k3-com260/rt-async-k3-<bin>.elf bash scripts/flash/k3-pack-itb.sh`。
+板侧程序部署：局域网 HTTP 服务器 wget（见 README user-apps 小节）。

@@ -1,33 +1,19 @@
 use std::io::BufRead;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use xtask::config::Config;
 
 use crate::build::RtAsyncBin;
+use crate::env_profile::{DtbSource, EnvProfile, QemuMachine};
 
 const TMUX_SESSION: &str = "rt-async-amp";
 const UART_SOCK: &str = "/tmp/rt-async-uart.sock";
 
-/// Path to the DTS source and the compiled DTB inside build/.
-const QEMU_DTS: &str = "its/qemu-virt-amp.dts";
-const QEMU_DTB: &str = "qemu-virt-amp.dtb";
-
-/// rt-async 专属 DTB（hart1 + UART1 视角）。经 QEMU loader 摆到
+/// rt-async 专属 DTB（hart1 + UART1 视角）源。经 QEMU loader 摆到
 /// RTASYNCDTBBASE，board_init 的 esos 同款扫描从此地址认领
 /// compatible="ov,rt-async" 的 DTB。
 const RTASYNC_DTS: &str = "its/rt-async-qemu-virt-amp.dts";
-const RTASYNC_DTB: &str = "rt-async.dtb";
-
-/// Compile the QEMU AMP device-tree source to DTB (uses `dtc`).
-fn ensure_dtb(root: &Path) -> std::path::PathBuf {
-    compile_dtb(root, QEMU_DTS, QEMU_DTB)
-}
-
-/// Compile the rt-async专属 device-tree source to DTB (uses `dtc`).
-fn ensure_rtasync_dtb(root: &Path) -> std::path::PathBuf {
-    compile_dtb(root, RTASYNC_DTS, RTASYNC_DTB)
-}
 
 /// 共享的 dts→dtb 编译逻辑：按 mtime 增量编译。
 ///
@@ -35,12 +21,12 @@ fn ensure_rtasync_dtb(root: &Path) -> std::path::PathBuf {
 /// `cc -E`（展开 #include/#define，-I its/）→ `dtc`（求值算术表达式）。
 /// DTS 经 `#include "rt-async-shm.dtsi"` 引用跨核共享内存节点单一真相源，
 /// 故依赖追踪需包含 its/ 下所有 .dts/.dtsi 的 mtime。
-fn compile_dtb(root: &Path, dts_rel: &str, dtb_rel: &str) -> std::path::PathBuf {
+fn compile_dtb(root: &Path, out_dir: &Path, dts_rel: &str, dtb_rel: &str) -> PathBuf {
     let its_dir = root.join("its");
     // dts_rel 形如 "its/<name>.dts"，含 its/ 前缀，故从 root join（勿与 its_dir 再拼）。
     let dts = root.join(dts_rel);
-    let dtb = root.join("build").join(dtb_rel);
-    let pp_dts = root.join("build").join(format!("{}.pp.dts", dtb_rel));
+    let dtb = out_dir.join(dtb_rel);
+    let pp_dts = out_dir.join(format!("{}.pp.dts", dtb_rel));
 
     let inputs: Vec<_> = std::fs::read_dir(&its_dir)
         .expect("its/ dir missing")
@@ -57,7 +43,7 @@ fn compile_dtb(root: &Path, dts_rel: &str, dtb_rel: &str) -> std::path::PathBuf 
 
     if stale {
         eprintln!("DTB: compiling {} -> {}", dts.display(), dtb.display());
-        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::create_dir_all(out_dir).unwrap();
 
         // 1. C 预处理：展开 #include/#define（与 K3 build.rs 一致）。
         let cpp_out = Command::new("cc")
@@ -86,37 +72,243 @@ fn compile_dtb(root: &Path, dts_rel: &str, dtb_rel: &str) -> std::path::PathBuf 
     dtb
 }
 
-pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
-    let build = root.join("build");
+/// AP 侧 DTB：按环境 profile 声明的来源生成（dts 编译 / dumpdtb+overlay）。
+fn ensure_ap_dtb(root: &Path, profile: &EnvProfile, machine: &QemuMachine) -> PathBuf {
+    let out_dir = profile.env_build_dir(root);
+    match profile.dtb.as_ref().expect("qemu 环境的 env toml 缺 [dtb] 节") {
+        DtbSource::Dts(dts) => compile_dtb(root, &out_dir, dts, "ap.dtb"),
+        DtbSource::DumpdtbOverlay { overlay } => {
+            dumpdtb_overlay(root, &out_dir, machine, overlay)
+        }
+    }
+}
+
+/// dumpdtb + overlay：从本环境机器导出基线 DTB（自带正确的 imsics/aplic
+/// 节点，中断拓扑自动跟随 -machine 参数），再叠加共享窗 overlay。
+///
+/// 基线随 machine 字符串变化（如 aia 开关），stamp 文件记录生成参数，
+/// 参数不一致即重新导出。fdtoverlay 不携带 /memreserve/——StarryOS 全链
+/// 不解析 memreserve（qemu-plic 手写 dts 里的条目同样无效），行为等价。
+fn dumpdtb_overlay(root: &Path, out_dir: &Path, machine: &QemuMachine, overlay_dts: &str) -> PathBuf {
+    let dtb = out_dir.join("ap.dtb");
+    let base = out_dir.join("qemu-base.dtb");
+    let dtbo = out_dir.join("ap.overlay.dtbo");
+    let stamp = out_dir.join("ap.dtb.stamp");
+
+    let its_newest = newest_mtime(&root.join("its"), &["dts", "dtsi"]);
+    let up_to_date = std::fs::read_to_string(&stamp)
+        .ok()
+        .map(|s| {
+            s.trim()
+                == format!("{}\n{}\n{}\n{}", machine.machine, machine.smp, machine.ram, overlay_dts)
+        })
+        .unwrap_or(false)
+        && std::fs::metadata(&dtb)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .zip(its_newest)
+            .is_some_and(|(d, t)| t < d);
+
+    if !up_to_date {
+        std::fs::create_dir_all(out_dir).unwrap();
+        let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
+        assert!(
+            qemu_bin.exists(),
+            "定制 QEMU 缺失: {}（先 'cargo xtask qemu'）",
+            qemu_bin.display()
+        );
+
+        // 1. 基线 DTB：-machine <machine>,dumpdtb=<file> 导出后 QEMU 立即退出。
+        //    必须带运行时同款 -smp/-m，CPU/memory 节点才与实际机器一致
+        //    （缺省 1 核会把 CPU 节点 dump 成 1 个，OpenSBI 就只见到 1 个 hart）。
+        eprintln!(
+            "DTB: dumpdtb (machine={}, smp={}, ram={}) -> {}",
+            machine.machine,
+            machine.smp,
+            machine.ram,
+            base.display()
+        );
+        let st = Command::new(&qemu_bin)
+            .args([
+                "-machine", &format!("{},dumpdtb={}", machine.machine, base.display()),
+                "-smp", &machine.smp,
+                "-m", &machine.ram,
+                "-display", "none",
+            ])
+            .output()
+            .unwrap_or_else(|e| panic!("qemu: {e}"));
+        assert!(
+            st.status.success() && base.exists(),
+            "dumpdtb failed:\n{}",
+            String::from_utf8_lossy(&st.stderr)
+        );
+
+        // 2. overlay 源编译（cc -E → dtc，target-path fragment 无需 -@ 符号表；
+        //    reg_format 等警告源于 fragment 上下文的 cells 缺省，叠加后按根节点
+        //    cells（2/2）解释，值不变）。
+        let its_dir = root.join("its");
+        let dts = root.join(overlay_dts);
+        let pp = out_dir.join("ap.overlay.pp.dts");
+        let cpp_out = Command::new("cc")
+            .args(["-E", "-P", "-nostdinc", "-undef", "-x", "assembler-with-cpp"])
+            .arg("-I").arg(&its_dir).arg(&dts)
+            .output()
+            .expect("cc (C compiler) not found");
+        assert!(cpp_out.status.success(), "overlay preprocess failed");
+        std::fs::write(&pp, &cpp_out.stdout).unwrap();
+        let out = Command::new("dtc")
+            .args(["-I", "dts", "-O", "dtb", "-o", &dtbo.to_string_lossy(), &pp.to_string_lossy()])
+            .output()
+            .expect("dtc not found");
+        assert!(out.status.success(), "overlay dtc failed");
+
+        // 3. 叠加。
+        let out = Command::new("fdtoverlay")
+            .args(["-i", &base.to_string_lossy(), "-o", &dtb.to_string_lossy(), &dtbo.to_string_lossy()])
+            .output()
+            .expect("fdtoverlay not found. Install device-tree-compiler");
+        assert!(
+            out.status.success(),
+            "fdtoverlay failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        std::fs::write(&stamp, format!("{}\n{}\n{}\n{}\n", machine.machine, machine.smp, machine.ram, overlay_dts))
+            .unwrap();
+    }
+    dtb
+}
+
+fn newest_mtime(dir: &Path, exts: &[&str]) -> Option<std::time::SystemTime> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+        })
+        .filter_map(|p| p.metadata().ok())
+        .filter_map(|m| m.modified().ok())
+        .max()
+}
+
+/// QEMU 启动参数唯一构造点：前台与 tmux 共用同一 argv 生成逻辑。
+///
+/// 两种模式的差异只有两处：
+///   - UART1 chardev：前台 server=on,wait=off（QEMU 监听，socat 事后连）；
+///     tmux server=off（socat 先监听、QEMU 作客户端连，不丢启动期输出）。
+///   - tmux 结尾多 -nographic（等价 -display none + stdio 重定向，保持既有行为）。
+#[allow(clippy::too_many_arguments)]
+fn qemu_argv(
+    qemu_bin: &Path,
+    machine: &QemuMachine,
+    dtb: &Path,
+    opensbi_fw: &Path,
+    starryos_bin: &Path,
+    app_bin: &Path,
+    rtasync_dtb: &Path,
+    rtasync_base: &str,
+    rtasync_dtb_base: &str,
+    rootfs: &Path,
+    uart_chardev_mode: &str,
+    nographic: bool,
+) -> Vec<String> {
+    let mut argv: Vec<String> = [
+        "-machine", &machine.machine,
+        "-display", "none",
+        "-serial", "mon:stdio",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    argv.push("-chardev".into());
+    argv.push(format!("socket,id=uart1,path={UART_SOCK},{uart_chardev_mode}"));
+    argv.extend(["-serial", "chardev:uart1"].map(String::from));
+    argv.extend(["-smp", &machine.smp, "-m", &machine.ram].map(String::from));
+    argv.extend(["-dtb", &dtb.to_string_lossy()].map(String::from));
+    argv.extend(["-bios", &opensbi_fw.to_string_lossy()].map(String::from));
+    argv.extend(["-kernel", &starryos_bin.to_string_lossy()].map(String::from));
+    argv.push("-device".into());
+    argv.push(format!("loader,addr={rtasync_base},file={}", app_bin.display()));
+    argv.push("-device".into());
+    argv.push(format!(
+        "loader,addr={rtasync_dtb_base},file={}",
+        rtasync_dtb.display()
+    ));
+    argv.push("-drive".into());
+    argv.push(format!("file={},format=raw,if=none,id=hd0", rootfs.display()));
+    argv.push("-device".into());
+    argv.push("nvme,drive=hd0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65".into());
+    if nographic {
+        argv.push("-nographic".into());
+    }
+    argv.insert(0, qemu_bin.to_string_lossy().to_string());
+    argv
+}
+
+/// 环境启动前的公共准备：断言产物存在 + 编译两侧 DTB。
+struct AmpImage {
+    app_bin: PathBuf,
+    dtb: PathBuf,
+    rtasync_dtb: PathBuf,
+}
+
+fn prepare_image(root: &Path, profile: &EnvProfile, bin: &RtAsyncBin) -> AmpImage {
+    let build = profile.env_build_dir(root);
     let opensbi_fw = build.join("fw_dynamic.bin");
     let app_bin = build.join(bin.out);
-    let starryos_bin = build.join("starryos.bin");
-    let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
-
+    let starryos_bin = build.join(&profile.starry_artifact);
     assert!(
         opensbi_fw.exists(),
-        "Run 'cargo xtask build opensbi' first."
+        "Run 'cargo xtask build {}'（或 build opensbi）first.",
+        profile.name
     );
     assert!(
         app_bin.exists(),
         "Run 'cargo xtask build {}' first.",
-        bin.name
+        bin.target_name
     );
     if !starryos_bin.exists() {
-        eprintln!("Warning: no StarryOS binary.");
+        eprintln!("Warning: no StarryOS binary ({})", starryos_bin.display());
     }
+
+    let machine = profile.qemu.as_ref().expect("qemu 环境的 env toml 缺 [qemu] 节");
+    let dtb = ensure_ap_dtb(root, profile, machine);
+    let rtasync_dtb = compile_dtb(root, &build, RTASYNC_DTS, "rt-async.dtb");
+    AmpImage { app_bin, dtb, rtasync_dtb }
+}
+
+/// rootfs 解析失败时的统一提示（tgoskits 正统准备方式）。
+fn rootfs_or_die(root: &Path) -> std::path::PathBuf {
+    crate::util::resolve_rootfs(root).unwrap_or_else(|| {
+        panic!(
+            "rootfs 镜像缺失。准备方式（tgoskits 正统流程）：\n  \
+             cd tgoskits && cargo xtask starry rootfs --arch riscv64\n  \
+             （legacy 备选：make -C tgoskits/os/StarryOS rootfs）"
+        )
+    })
+}
+
+pub fn run_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsyncBin) {
+    let machine = profile.qemu.as_ref().expect("qemu 环境的 env toml 缺 [qemu] 节");
+    let img = prepare_image(root, profile, bin);
+    let build = profile.env_build_dir(root);
+    let opensbi_fw = build.join("fw_dynamic.bin");
+    let starryos_bin = build.join(&profile.starry_artifact);
+    let rootfs = rootfs_or_die(root);
+    let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
 
     let rtasync_base = cfg.get("RTASYNCBASE");
     let rtasync_dtb_base = cfg.get("RTASYNCDTBBASE");
-    let smp = cfg.get("QEMUSMP");
-    let ram = cfg.get("QEMURAM");
-    let dtb = ensure_dtb(root);
-    let rtasync_dtb = ensure_rtasync_dtb(root);
 
     let _ = std::fs::remove_file(UART_SOCK);
 
-    eprintln!("Starting QEMU ({smp} cores, {ram} RAM) [bin={}]...", bin.name);
+    eprintln!(
+        "Starting QEMU [env={}, machine={}, {} cores, {} RAM, bin={}]...",
+        profile.name, machine.machine, machine.smp, machine.ram, bin.name
+    );
     eprintln!("  UART0 → stdio (OpenSBI/StarryOS)");
     eprintln!(
         "  UART1 → unix socket {} (rt-async, bidirectional)",
@@ -124,44 +316,27 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     );
     eprintln!(
         "  rt-async DTB → {rtasync_dtb_base} ({} bytes)",
-        rtasync_dtb.metadata().map(|m| m.len()).unwrap_or(0)
+        img.rtasync_dtb.metadata().map(|m| m.len()).unwrap_or(0)
     );
     eprintln!("  Connect with: socat - UNIX-CONNECT:{}", UART_SOCK);
 
-    let st = Command::new(&qemu_bin)
-        .args([
-            "-machine",
-            "virt",
-            "-display",
-            "none",
-            "-serial",
-            "mon:stdio",
-            "-chardev",
-            &format!("socket,id=uart1,path={UART_SOCK},server=on,wait=off"),
-            "-serial",
-            "chardev:uart1",
-            "-smp",
-            smp,
-            "-m",
-            ram,
-            "-dtb",
-            &dtb.to_string_lossy(),
-            "-bios",
-            &opensbi_fw.to_string_lossy(),
-            "-kernel",
-            &starryos_bin.to_string_lossy(),
-            "-device",
-            &format!("loader,addr={rtasync_base},file={}", app_bin.display()),
-            "-device",
-            &format!(
-                "loader,addr={rtasync_dtb_base},file={}",
-                rtasync_dtb.display()
-            ),
-            "-drive",
-            &format!("file={},format=raw,if=none,id=hd0", rootfs.display()),
-            "-device",
-            "nvme,drive=hd0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65",
-        ])
+    let argv = qemu_argv(
+        &qemu_bin,
+        machine,
+        &img.dtb,
+        &opensbi_fw,
+        &starryos_bin,
+        &img.app_bin,
+        &img.rtasync_dtb,
+        rtasync_base,
+        rtasync_dtb_base,
+        &rootfs,
+        "server=on,wait=off",
+        false,
+    );
+
+    let st = Command::new(&argv[0])
+        .args(&argv[1..])
         .status()
         .expect("qemu not found");
 
@@ -170,33 +345,23 @@ pub fn run_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     }
 }
 
-pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
-    let _ = Command::new("tmux")
-        .args(["kill-session", "-t", TMUX_SESSION])
-        .status();
-
-    let _ = std::fs::remove_file(UART_SOCK);
-
-    let build = root.join("build");
+pub fn run_tmux_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsyncBin) {
+    let machine = profile.qemu.as_ref().expect("qemu 环境的 env toml 缺 [qemu] 节");
+    let img = prepare_image(root, profile, bin);
+    let build = profile.env_build_dir(root);
     let opensbi_fw = build.join("fw_dynamic.bin");
-    let app_bin = build.join(bin.out);
-    let starryos_bin = build.join("starryos.bin");
+    let starryos_bin = build.join(&profile.starry_artifact);
+    let rootfs = rootfs_or_die(root);
     let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
-
-    assert!(opensbi_fw.exists(), "Run 'cargo xtask build opensbi' first.");
-    assert!(app_bin.exists(), "Run 'cargo xtask build {}' first.", bin.name);
-    if !starryos_bin.exists() {
-        eprintln!("Warning: no StarryOS binary.");
-    }
 
     let rtasync_base = cfg.get("RTASYNCBASE");
     let rtasync_dtb_base = cfg.get("RTASYNCDTBBASE");
-    let smp = cfg.get("QEMUSMP");
-    let ram = cfg.get("QEMURAM");
-    let dtb = ensure_dtb(root);
-    let rtasync_dtb = ensure_rtasync_dtb(root);
     let root_str = root.to_string_lossy().to_string();
+
+    let _ = Command::new("tmux")
+        .args(["kill-session", "-t", TMUX_SESSION])
+        .status();
+    let _ = std::fs::remove_file(UART_SOCK);
 
     // Pane 2 (right): socat listens on the Unix socket so it's ready
     // BEFORE QEMU starts.  QEMU connects as a client, so no data is lost.
@@ -210,27 +375,26 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, bin: &RtAsyncBin) {
     assert!(st.success(), "tmux new-session (socat) failed");
 
     // Pane 1 (left): QEMU with UART1 connecting to socat's socket.
-    let qemu_cmd = format!(
-        "{} -machine virt -display none \
-         -serial mon:stdio \
-         -chardev socket,id=uart1,path={},server=off \
-         -serial chardev:uart1 \
-         -smp {} -m {} \
-         -dtb {} \
-         -bios {} -kernel {} \
-         -device loader,addr={},file={} \
-         -device loader,addr={},file={} \
-         -drive file={},format=raw,if=none,id=hd0 \
-         -device nvme,drive=hd0,serial=tgoskits,max_ioqpairs=64,msix_qsize=65 \
-         -nographic",
-        qemu_bin.display(),
-        UART_SOCK, smp, ram,
-        dtb.display(),
-        opensbi_fw.display(), starryos_bin.display(),
-        rtasync_base, app_bin.display(),
-        rtasync_dtb_base, rtasync_dtb.display(),
-        rootfs.display(),
+    let argv = qemu_argv(
+        &qemu_bin,
+        machine,
+        &img.dtb,
+        &opensbi_fw,
+        &starryos_bin,
+        &img.app_bin,
+        &img.rtasync_dtb,
+        rtasync_base,
+        rtasync_dtb_base,
+        &rootfs,
+        "server=off",
+        true,
     );
+    // 单引号包裹每个参数（tmux 内 sh -c 拼接），防含空格路径被拆分
+    let qemu_cmd = argv
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let st = Command::new("tmux")
         .args([

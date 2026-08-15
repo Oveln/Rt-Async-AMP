@@ -32,6 +32,9 @@ name = "demo"
 [[bin]]
 name = "console"
 
+[[bin]]
+name = "console_interrupt"
+
 [profile.dev]
 panic = "abort"
 

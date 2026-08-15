@@ -5,18 +5,14 @@ use std::os::unix::io::IntoRawFd;
 use ov_channels::{ChannelId, Message, MsgType, SharedMemory};
 
 #[allow(dead_code)]
-mod amp {
-    include!(concat!(env!("OUT_DIR"), "/amp_gen.rs"));
-}
+const RT_SHM_IOC_NOTIFY: libc::c_ulong = rtshm_abi::IOC_NOTIFY as libc::c_ulong;
+const RT_SHM_IOC_AWAIT: libc::c_ulong = rtshm_abi::IOC_AWAIT as libc::c_ulong;
+const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = rtshm_abi::IOC_CLR_PENDING as libc::c_ulong;
 
-const RT_SHM_IOC_NOTIFY: libc::c_ulong = amp::RTSHM_IOC_NOTIFY as libc::c_ulong;
-const RT_SHM_IOC_AWAIT: libc::c_ulong = amp::RTSHM_IOC_AWAIT as libc::c_ulong;
-const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = amp::RTSHM_IOC_CLR_PENDING as libc::c_ulong;
-
-// K3 共享窗大小（amp.toml K3_SHMSIZE=0x19000，经 amp_gen 生成）。
+// K3 共享窗大小（真源 its/rt-async-k3.dts + tgoskits AP dts，值 0x19000）。
 // 必须 ≥ ov-channels SharedMemory::<3> footprint 0x18700——ch1.magic 在
 // +0x8300、ch2.magic 在 +0x10500，mmap 小于全窗时用户态访问会越界。
-const SHM_SIZE: usize = amp::K3_SHMSIZE;
+const SHM_SIZE: usize = rtshm_abi::K3_SHM_SIZE;
 
 fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Result<libc::c_int> {
     let ret = unsafe { libc::ioctl(fd, cmd as _, arg) };

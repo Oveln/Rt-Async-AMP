@@ -1,0 +1,36 @@
+# 环境二：QEMU virt 双核 AMP（AIA：APLIC+IMSIC，MSI 模式）。
+#
+# K3 X100 侧中断架构（APLIC MSI + IMSIC）的仿真对应物：AIA 相关的 AP 侧
+# 行为（MSI 投递、stopei EOI、menvcfg 类特性）先在此环境验证再到真板。
+# 机器参数即当初 feat/riscv-aia 验证用的 virt,aia=aplic-imsic（当时是
+# 临时改 qemu toml 跑的，本 profile 把它固化下来）。
+#
+# 【当前边界（事实状态，暂不解决）】AIA 是 StarryOS 侧的支持；rt-async
+# 暂不支持 AIA（RP 侧只有 PLIC 驱动）。该机器无 PLIC → RP 侧 PLIC probe
+# 写不存在地址触发 access fault，静默挂死。故 run --env qemu-aia 目前
+# 只有 AP 侧可用（OpenSBI/StarryOS/rt_shm 正常），RP 侧会挂起；等
+# rt-async 补 APLIC/IMSIC 驱动后再启用完整双端。
+
+[env]
+platform = "qemu"
+desc = "QEMU virt 双核 AMP（AIA，K3 中断架构仿真对应物；RP 侧暂不可跑）"
+
+[starry]
+# 与 qemu-plic 同一份：somehal 运行时按 FDT 探测 PLIC vs IMSIC/APLIC。
+config = "os/StarryOS/configs/board/qemu-riscv64.toml"
+smp = 1
+artifact = "starryos.bin"
+
+[qemu]
+machine = "virt,aia=aplic-imsic"
+smp = 2
+ram = "256M"
+
+[dtb]
+# AP 侧 DTB：从本环境机器 dumpdtb 导出基线（自动携带正确的 imsics/aplic
+# 节点），fdtoverlay 叠加共享窗 overlay。基线 DTB 里 clint@2000000 仍在，
+# rt_shm 的 clint-msip-notifier 后端照常工作。
+# 注：fdtoverlay 不携带 /memreserve/，但 StarryOS 全链不解析 memreserve
+# （qemu-plic 手写 dts 里的该条目本就无效），行为等价。
+source = "dumpdtb"
+overlay = "its/rt-async-ap.overlay.dts"

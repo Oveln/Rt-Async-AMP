@@ -5,6 +5,7 @@
 /qemu
 *.bin
 *.elf
+*.lzo
 apps/user-test-ipc/target/
 node_modules
 # 工具残留目录（不入库）

@@ -6,369 +6,76 @@
 - **技术报告**：<https://rtos.oveln.icu/技术报告/>　·　**项目计划**：<https://rtos.oveln.icu/项目计划/>
 - **rt-async 内核**：<https://github.com/Oveln/rt-async>　·　**StarryOS**：<https://github.com/Oveln/StarryOS>
 
----
-
-## 目录
-
-- [一、目标描述](#一目标描述)
-- [二、技术调研](#二技术调研)
-- [三、系统框架设计](#三系统框架设计)
-- [四、开发计划](#四开发计划)
-- [五、开发里程碑](#五开发里程碑)
-- [六、系统测试情况](#六系统测试情况)
-- [七、遇到的主要问题和解决方法](#七遇到的主要问题和解决方法)
-- [八、仓库结构](#八仓库结构)
-- [附录：快速开始与构建](#附录快速开始与构建)
+> 技术调研、开发计划与里程碑、测试记录、问题复盘等详细内容在上述文档网站（blogs）中维护，本 README 只保留简介、架构与使用方法。
 
 ---
 
-## 一、目标描述
+## 简介
 
-### 1.1 要解决的问题
+机器人、具身智能等新一代智能装备同时需要两类截然不同的计算能力：Linux 生态的通用算力（AI 推理、网络、文件系统）与微秒级确定性实时（电机控制、传感器采样）。单一 Linux（即使 PREEMPT_RT）难以同时满足，本项目的答案是**异构双内核 AMP**：
 
-机器人、具身智能等新一代智能装备同时存在两类截然不同的计算需求：
+- **StarryOS**（大核，S 态）：Linux 系统调用兼容内核，承接通用负载；
+- **rt-async**（小核，M 态）：自研 Rust async RTOS——无动态内存、async/await 任务模型、优先级抢占 + 时间片调度，承接实时负载；
+- 两核**只经共享内存通道（ov-channels）+ IPI 门铃**协作，实时侧不受通用侧抖动影响。
 
-- **通用计算 / AI 推理**：视觉识别、路径规划、大模型推理，需要丰富生态（Linux、文件系统、网络、AI 框架），但对延迟不敏感；
-- **硬实时控制**：电机 PWM、IMU 采样、闭环 PID，要求**微秒级确定性**，受不得调度抖动与 GC 影响。
+三个运行环境同构管理（`envs/<name>.toml`，详见使用方法）：
 
-把这两类负载塞进同一个 系统内核，实时性会被调度器、缓存、中断合并层层削弱；而纯 RTOS 又缺乏通用计算与 AI 生态。**单一内核无法同时兼顾"生态丰富"与"实时确定性"。**
+| 环境 | 硬件 | 定位 |
+|---|---|---|
+| `qemu-plic` | QEMU virt 双核（PLIC） | 日常快速冒烟，秒级迭代 |
+| `qemu-aia` | QEMU virt 双核（APLIC+IMSIC） | K3 AP 侧中断架构的仿真对应物（当前仅 AP 侧可跑） |
+| `k3-com260` | 进迭时空 K3 COM260（X100 + RT24 rcpu1） | 真板：实时硬件操控落地 |
 
-### 1.2 项目目标
+## 架构
 
-构建一套基于Rust的**异步异构多核双内核 AMP（非对称多处理）系统**，用物理隔离彻底解决上述矛盾：
-
-1. **实时内核 rt-async**：基于 Rust 的 `#![no_std]` async RTOS，优先级抢占 + 共享系统栈 + O(1) 调度，零额外栈切换开销；
-2. **通用内核 StarryOS**：承载 AI 推理与用户态应用；
-3. **跨核通信框架** `ov-channels`（共享内存无锁通道）+ `ov-rpc`（postcard 序列化 RPC），辅以 IPI 通知，实现两核低延迟协作；
-4. **qemu与真实硬件**：从 QEMU virt 仿真验证，移植到 **进迭时空 K3 SoC 的 RT24 实时小核**，并通过对比实验量化"实时核"的价值。
-
-### 1.3 核心价值
-
-| 维度 | 单内核（Linux）方案 | 本项目双内核方案 |
-|------|---------------------|------------------|
-| 实时确定性 | 受调度/缓存/GC 影响，抖动大 | **物理隔离，大核负载不影响小核** |
-| 跨核通信延迟 | — | IPI + 共享内存，**微秒级** |
-| 内核语言 | C | **Rust async** |
-
----
-
-## 二、技术调研
-
-### 2.1 现有方案调研
-
-#### 实时内核
-
-| 方案 | 特点 | 与本项目的关系 |
-|------|------|----------------|
-| FreeRTOS / RT-Thread | C 实现，成熟生态 | 传统任务模型，逐任务分配栈 |
-| Zephyr | 高度可配置 RTOS | 生态偏 MCU |
-| embassy | Rust async 执行器 | **协程高效但无抢占、无优先级**——本项目参考对象 |
-| uC/OS-II | 经典抢占式 RTOS | 借鉴其优先级抢占与任务切换思想 |
-
-#### embassy 的不足与本项目的"折衷"
-
-embassy 用 Rust 协程极大提升了栈利用率，但**协程之间无法抢占、缺乏优先级裁决**，多任务场景下实时性差。而传统 RTOS（uC/OS-II）每个任务独占私有栈，主动让权时栈空间浪费。本项目在二者之间折衷：
-
-- 混合调度：**跨优先级抢占 + 同优先级协程协作**；
-- 共享系统栈：所有 executor 共用一个栈，主动让权时栈复用，被抢占时在当前栈上嵌套压栈——既保实时性，又近乎零额外栈开销。
-
-#### 异构 AMP / 跨核通信
-
-- **OpenAMP / RPMsg**：Linux 侧成熟的 remoteproc/RPMsg 框架，但依赖较重、与 Linux 内核强耦合；
-- **本项目的选择**：因为目标主系统是 StarryOS，所以使用自己编写的 `ov-channels` + `ov-rpc`，**不依赖 RPMsg/OpenAMP**，rt-async 侧纯裸机即可收发，主核继续跑 StarryOS。设计细节参见 [`docs/architecture.html`](docs/architecture.html) 的 [§3 通讯全流程](docs/architecture.html#flow)、[§4 SHM 与通道状态机](docs/architecture.html#shm)、[§5 RPC 协议](docs/architecture.html#rpc)。
-
-### 2.2 目标硬件调研：进迭时空 K3
-
-K3 采用大小核 + 实时核的异构设计：
-
-| 核 | 类型 | 数量 | 职责 |
-|----|------|------|------|
-| X100 | 通用大核（RV64GV，乱序 2.4GHz） | 8 | 跑 StarryOS / Linux |
-| A100 | AI 核 | 8 | 60 TOPS，能运行 30B 模型 |
-| **RT24** | **实时小核（CVA6，RV64GC，顺序 6 级，614.4MHz）** | **2** | **使用rcpu1跑 rt-async 实时任务** |
-
-主要参考资源：
-
-- [K3 User Manual（PDF）](https://cdn-resource.spacemit.com/file/chip/K3/k3_um_en.pdf)
-- [esos 官方 RT24 固件（RT-Thread 4.0.4）](https://github.com/spacemit-com/esos)
-- [K3 U-Boot（uboot-2022.10, tag k3-br-v1.0.0）](https://github.com/spacemit-com/uboot-2022.10)
-- RISC-V AIA / ACLINT / APLIC 规范；[CVA6 开源核心](https://github.com/openhwgroup/cva6)
-
----
-
-## 三、系统框架设计
-
-### 3.1 总体架构
-
-当前系统运行在 QEMU virt RISC-V 平台上（对于k3会有另外相应的适配），两个硬件线程（hart）各自运行不同的软件栈：
+两个硬件线程（hart）各自运行不同的软件栈，**仅通过共享内存交换数据、通过 IPI 互相通知**：
 
 - **Hart 0** 运行完整操作系统 **StarryOS**（Linux 系统调用、文件系统、用户进程）；
-- **Hart 1** 运行裸金属异步执行器 **rt-async**，具有确定性实时调度能力，**无操作系统**；
-- 两者**仅通过共享内存通道**交换数据，通过 **IPI（核间中断）** 互相通知。
+- **Hart 1** 运行裸金属异步执行器 **rt-async**，具有确定性实时调度能力，**无操作系统**。
 
 ![系统架构总览](docs/assets/arch-overview.svg)
 
-> 📐 **完整架构文档** 见 [`docs/architecture.html`](docs/architecture.html)，下文各小节亦会引用其中对应图示。
-
-### 3.2 QEMU virt 验证平台（当前已跑通）
-
-双核 AMP，OpenSBI 完成异构分流：
+QEMU virt 环境双核 AMP，OpenSBI 完成异构分流：
 
 ```
 QEMU virt (-smp 2 -m 256M)
 ├─ hart 0: OpenSBI → sret S-mode → StarryOS @ 0x80200000  (UART0 @ 0x10000000)
 └─ hart 1: OpenSBI → mret M-mode → rt-async @ 0x82800000  (UART1 @ 0x10002000)
 
-共享内存 IPC @ 0x88000000 (ov-channels, ~68KB)
+共享内存 IPC @ 0x88000000 (ov-channels SharedMemory<3>, 100KB)
 ```
 
 - **OpenSBI 补丁**（`patches/opensbi-amp.patch`）：hart 1 直接 mret 到 rt-async（M-mode）、默认下一地址指向 StarryOS、禁 PIE、IPI 转发（直写 MSIP → SSIP）、允许 S-mode 写 CLINT MSIP；
 - **QEMU 补丁**（`patches/qemu-uart1.patch`）：在 `0x10002000` 增加第二路 NS16550A UART（IRQ 12）供 rt-async 独立输出。
 
-### 3.3 rt-async 实时内核设计
+K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，经 FIT uimg 启动），RP 侧 RT24 rcpu1（CVA6）跑 rt-async（SPL 从 esos.itb 拉起，RCPU SRAM 共享窗 + mailbox4 门铃）。
 
-核心是 **"executor = 线程" + 共享系统栈** 的混合调度模型（详见[技术文档](https://rtos.oveln.icu/docs/)）：
+📐 **完整架构文档**（executor 流程、任务状态机、RPC 模式、shm 结构、内存布局、模块依赖等 7 节交互式图表）见 [`docs/architecture.html`](docs/architecture.html)。
 
-- **优先级抢占**：每个 executor 绑定固定优先级，高优先级抢占低优先级，直接在共享栈上**嵌套压栈**运行（如同嵌套函数调用），完成后栈帧自然归还——**零额外栈切换开销，不经汇编上下文切换**；
-- **同优先级协作**：同 executor 内任务通过 `.await` 让权，FIFO 执行；
-- **O(1) 调度**：两级位图 `PriorityBitmap<G>`（G∈[1,64]，最多 4096 个优先级），`trailing_zeros()` 常数时间定位最高优先级就绪 executor；
-- **Pend ISR 调度循环**：抢占由软中断触发，`run()` 期间开中断允许更高优先级继续嵌套抢占；
-- **声明式 API**：`#[task]`、`#[main]`、`#[interrupt]` 过程宏自动生成 ISR 与调度器接线；
-- **任务数量无上限**：栈由 executor 调用链自然分配，不逐 task 分配栈。
+## 使用方法
 
-> 执行器内部流程与任务状态机图见 [`architecture.html` §6 执行器](docs/architecture.html#executor)。
+本项目使用 [`cargo xtask`](xtask/) 作为构建编排器（取代 Makefile），所有克隆/打补丁、构建、运行、安装、清理均通过 xtask 子命令完成，子命令一览用 `cargo xtask --help` 查看。
 
-### 3.4 跨核 IPC 通信设计
+### 环境模型
 
-```
-StarryOS → rt-async:  SBI ecall / 直写 → OpenSBI → CLINT MSIP hart 1 → MachineSoft ISR
-rt-async → StarryOS:  CLINT MSIP0 → OpenSBI → SSIP → S-mode SWI handler
-```
+**环境（environment）是一等公民**：`envs/<name>.toml` 声明该环境的 QEMU 机器参数、StarryOS 板级配置（tgoskits 内路径）、AP 侧 DTB 来源与 K3 打包 bin。产物按环境隔离在 `build/<env>/` 下，互不干扰。
 
-- **数据通路**：`ov-channels` 共享内存无锁 SPSC 环形缓冲（CH0 请求 / CH1 响应 / CH2 急停），每通道 128 条 × 256B；
-- **RPC 框架**：`ov-rpc` 支持 `call`（请求-响应）/ `call_poll`（高频 busy-poll）/ `send`（单向推送）/ `urgent`（急停，走 CH2 高优先级通道）四种调用模式；
-- **用户态接口**：StarryOS 侧 `/dev/rt_shm` 字符设备，`open → mmap → ioctl(NOTIFY/AWAIT)`，对应用透明。
+| 环境 | 构建命令 | 运行/刷写 | `build/<env>/` 产物 |
+|---|---|---|---|
+| `qemu-plic` | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb`（dtb 首次 run 时自动生成） |
+| `qemu-aia` | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见下） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
+| `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（RP/AP 各一套，见下文 K3 小节） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
 
-端到端通讯流程、SHM/通道状态机与 RPC 协议图见 [`docs/architecture.html`](docs/architecture.html)（[§3 通讯全流程](docs/architecture.html#flow)、[§4 SHM 与通道状态机](docs/architecture.html#shm)、[§5 RPC 协议](docs/architecture.html#rpc)）。
-
-### 3.5 K3 实体板架构（已跑通）
-
-迁移到 K3 时**整个通信方案不变**，仅底层寄存器地址与外设模型替换。K3 线已在新 driver model（`Board` + 设备树 probe）下跑通抢占调度：
-
-| 层次 | QEMU virt | K3 RT24（rcpu1） |
-|------|-------------------|----------------|
-| 数据通路 / RPC / 用户态接口 | ov-channels / ov-rpc / `/dev/rt_shm` | **完全不变** |
-| IPI 通知 | CLINT MSIP | SysTimer MSIP（`systimer + hart<<27`，上板实测） |
-| 定时器 | CLINT mtime/mtimecmp | SysTimer mtime（`base+0xbff8` 全局）/ mtimecmp（`win+0x4000`） |
-| 中断控制器 | PLIC `0x0c000000` | PLIC `0xe0000000`（自定义布局：priority/enable/threshold 全带 `hart<<27` 偏移） |
-| UART | NS16550A（stride=1） | R_UART0（PXA-UART `0xc0881000`，stride=4，需 UUE+MCR OUT2） |
-| 共享内存 | QEMU 物理内存固定区 | SRAM（512KB）或 DDR |
-| 启动 | OpenSBI mret 分流 | U-Boot SPL `rproc_load` + `rproc_start`（无 DTB handoff，DTB 内嵌进 ELF） |
-| 板级接入 | `default_drivers()`（ns16550a / CLINT） | 自定义 `K3_DRIVERS`（pxa-uart / SysTimer / PLIC），DTB 经 `include_bytes!` 内嵌 |
-
-K3 的 SysTimer 实为 CLINT 风格的**非标准布局**：per-hart 窗口步长 `hart<<27`（而非 SiFive 的 `hart*8`），MSIP 地址经上板实测确定为 `0xec000000`（= `systimer + (rcpu1<<27)`）。
-
----
-
-## 四、开发计划
-
-> 完整计划见[项目计划](https://rtos.oveln.icu/项目计划/)，核心原则：**每个功能完成后立即补充对应测试，不做集中测试阶段。**
-
-### 阶段一：RTOS 内核完善（5 月 12 日 – 6 月 15 日）✅
-
-- [x] 核心调度器（Spawner / Executor / RunQueue）
-- [x] O(1) 两级优先级位图 `PriorityBitmap`
-- [x] 过程宏 `#[task]` / `#[main]` / `#[interrupt]`
-- [x] 平台抽象（`Board` trait + Driver Model，设备树 probe 实例化）、QEMU virt 平台实现
-- [x] Timer / TimerQueue、`JoinHandle<T>`
-- [x] 集成测试（14 个）
-
-### 阶段二：双内核通信（6 月 1 日 – 6 月 30 日）✅
-
-- [x] `ov-channels` 共享内存通信（Notification + Message Queue）
-- [x] `ov-rpc` 调用框架（call / call_poll / send / urgent）
-- [x] `amp.toml` 统一配置（地址自动生成）
-- [x] StarryOS `rt_shm` 设备驱动
-- [x] OpenSBI / QEMU 补丁，QEMU 双核 AMP 跑通
-
-### 阶段三：K3 实体板移植与驱动（6 月 15 日 – 至今）🚧
-
-- [x] K3 RT24 启动机制全链路调研
-- [x] 实体板上手、刷机、RT24 UART 输出点亮
-- [x] 极简 Rust 固件替换官方 ESOS，打通 SPL → RT24 加载链
-- [x] `chip-k3-rt24` 模块迁移到 driver model：PXA-UART / SysTimer（Timer+MSIP）/ PLIC，DTB 内嵌
-- [x] 抢占调度全链路在 K3 真板跑通（sched_demo：SysTimer 唤醒 + 优先级抢占 + MSIP 自中断）
-- [x] **pinctrl-single driver**（DTS 宏编译链：`K3_PADCONF` / `MUX_MODE4` / `k3-pinctrl.h` + cc 预处理 → dtc 求值）
-- [x] **CCU 时钟链**：`ClockProvider` trait + CLOCK slot + handshake 拆分，DTS `ccu` 节点 + serial `clocks` 属性 + `k3-clock.h` ID 宏，外设 probe 前自动使能功能时钟
-- [x] **K3 Mailbox 驱动**：去特化多实例 + `recv().await` 异步收发，配合 platform 侧 `IrqLatch` + `IrqFuture` 通用 ISR→async 桥接原语，附高优 await / 低优 signal 自测任务
-- [x] **tock-registers 重构**：K3/QEMU 7 个驱动（pinctrl / clock / handshake / pxa_uart / clint / plic / mailbox + qemu virt 裸 MMIO）+ platform 5 个 generic driver 全面语义化寄存器访问，告别裸指针 MMIO
-- [x] **tgoskits 上游切换**：从 StarryOS 切换到 Dirinkbottle `dev-k3com260kit` 分支，rt-shm/AMP 工作迁移完成
-- [ ] 外设驱动：GPIO / PWM / I2C / SPI（机器人控制所需）
-
-### 阶段四：实验与性能验证（持续）
-
-通过**对比实验**量化实时核价值（详见[项目计划-20260528](https://rtos.oveln.icu/项目计划/项目计划-20260528)）：
-
-1. **控制周期确定性**：StarryOS `timerfd` 1ms vs rt-async 定时器 1ms，对比抖动直方图；
-2. **负载下实时性退化**：大核跑 stress-ng / AI 推理时，小核控制周期抖动是否依旧稳定；
-3. **IPC 延迟与吞吐**：`call` / `urgent` 往返延迟分布与 P99；
-4. **跨核设备操控**：StarryOS 经 ov-rpc 远程读写 RT24 的 UART / I2C（AT24C02），端到端验证全链路。
-
----
-
-## 五、开发里程碑
-
-> 完整记录见[开发周报](https://rtos.oveln.icu/周报-Oveln/)与[技术报告](https://rtos.oveln.icu/技术报告/)。
-
-| 时间 | 成果 |
-|------|--------|
-| 2025-11 | 从前身 [embassy_preempt](https://github.com/oveln/embassy_preempt) 出发，启动内核模块化重构，确立跨平台 HAL 设计，将其从stm32芯片解耦，能够在riscv平台运行 |
-| 2026-04 | rt-async 内核重新设计：优先级抢占 + 共享系统栈 + O(1) 位图调度，过程宏 API，QEMU virt 平台 |
-| 2026-05 | 同步原语、`JoinHandle`；确定 StarryOS + rt-async 双内核架构方案 |
-| 2026-06 | **QEMU 双核 AMP 跑通**：ov-channels + ov-rpc + rt_shm 驱动； |
-| 2026-07 上旬 | **K3 RT24 真板跑通**：driver model 重构（Board + 设备树 probe），MSIP 地址上板实测，sched_demo 跑通抢占调度 + SysTimer + MSIP 全链路；pinctrl-single driver + DTS 宏编译链落地 |
-| 2026-07 中旬 | **时钟与中断链完善**：CCU driver + `ClockProvider` trait + handshake 拆分；K3 Mailbox driver（异步收发 + IrqLatch/IrqFuture 通用 ISR→async 桥接原语）；全驱动 tock-registers 寄存器语义化重构；tgoskits 上游切换到 Dirinkbottle dev-k3com260kit |
-
----
-
-## 六、系统测试情况
-
-### 6.1 rt-async 内核（QEMU 集成测试）
-
-14 个集成测试位于 `rt-async/apps/test/src/bin/`，以独立 bin 在 QEMU（`riscv64imac-unknown-none-elf` + `qemu-virt` feature）上执行，每个测试输出 `PASS`/`FAIL`。在 `rt-async/` 子模块目录下运行：
-
-```bash
-# 单个测试（.cargo/config.toml 已配置 qemu-system-riscv64 为 runner）
-cargo run --bin preempt_spawn --features qemu-virt --target riscv64imac-unknown-none-elf -p test
-
-# 在rt-async文件夹内，全部测试：rt-async 自带的 Makefile 便捷封装（make test / make test.<bin>）
-make test
-```
-
-### 6.2 跨核通信库
-
-| 组件 | 测试数 | 覆盖 |
-|------|--------|------|
-| `ov-channels` | 33 | `std` + `flags` feature 组合，环形缓冲正确性、容量边界、中断上下文收发 |
-| `ov-rpc` | 35 | call / send / urgent 各模式、多通道、序列化往返 |
-
-### 6.3 端到端 AMP 测试（StarryOS 用户态）
-
-`user-apps/` 下三个交叉编译的 Linux 用户态程序，经 `/dev/rt_shm` 驱动与 rt-async 完成真实 RPC 往返：
-
-- `user-test-ipc` —— 基础 IPC（Notification + Message Queue）握手与收发；
-- `user-test-rpc` —— RPC 四种调用模式正确性；
-- `user-test-sched` —— **三明治计时**：测量 StarryOS 发请求 → IPI → rt-async 处理 → IPI → StarryOS 收响应的端到端延迟（也是发现并修复 IPC 死锁的用例）。
-
-构建与部署均经 xtask：`cargo xtask build user-test-ipc|user-test-rpc|user-test-sched` 编译，`cargo xtask install --all` 装入 StarryOS rootfs，`cargo xtask run` 启动后在 StarryOS 用户态执行。
-
-### 6.4 硬件测试（K3 RT24）
-
-- **sched_demo**（`apps/rt-async-k3/src/bin/sched_demo.rs`）：K3 RT24 真板抢占调度验证。task_high（优先级 3）与 task_low（优先级 1）各每 50ms 输出 `H`/`L`，上板观察到稳定交替（H 出现频率 ≥ L）、计数对等上涨，证明 SysTimer 唤醒 + 优先级抢占 + MSIP 自中断全链路在 K3 真板跑通。
-- **MSIP 地址实测**：RT24 的 MSIP 地址为 `0xec000000`（= SysTimer `0xe4000000` + `(rcpu1<<27)`），写 1 触发 MachineSoft（mip=0x8），已固化进 `clint_k3.rs` 的 K3Msip 驱动。
-- **Mailbox 异步收发自测**（`apps/rt-async-k3/src/bin/` 配合 mailbox driver）：高优先级 task `mailbox.recv().await` 阻塞等待、低优先级 task `signal()` 触发硬件中断唤醒高优任务，验证 IrqLatch + IrqFuture 桥接原语在 K3 真板的中断→async 路径。
-
-构建：`cargo xtask build k3-sched-demo` → `build/rt-async-k3-sched-demo.elf`；刷写：`./scripts/flash/k3-flash.sh`（一键编译+打包 itb+fastboot 刷写）；串口观察：R_UART0，115200 8N1。
-
----
-
-## 七、遇到的主要问题和解决方法
-
-### 7.1 AMP IPC 死锁：`spin::Mutex` 不关中断
-
-**现象**：`user-test-sched` 三明治计时中，StarryOS 侧 `ioctl(AWAIT)` 永久阻塞，仅在完整 RPC 流程（DELAY + ECHO 连续调用）出现，单步调用正常。
-
-**根因**：`PollSet` 用 `spin::Mutex`（裸自旋锁，**不关中断**）保护 waker 队列。Task 持锁注册 waker 时，同一 hart 的 IPI 中断到达，中断 handler 调 `wake()` 请求同一把锁——**中断 handler 等待被中断的代码释放锁，锁永不被释放**。连续 RPC 使 IPI 频率翻倍，竞争窗口显著增大。
-
-**解决**（详见[AMP 死锁排查技术报告](https://rtos.oveln.icu/技术报告/2026-06-03-AMP死锁排查)）：
-
-1. 用 `kspin::SpinNoIrq`（`lock()` 自动关中断、`drop` 恢复）替换 `PollSet`，把"关中断"编码进类型系统，无法遗漏；
-2. **移除中间标志 `IPC_PENDING`**，改为直接读 CH1 环形缓冲 `read/write` 原子变量判定消息可用性——环形缓冲成为唯一真相源，`spurious wakeup` 天然安全。
-
-**经验**：① 中断上下文共享的锁必须关中断——`spin::Mutex` 的 API 与 `std::sync::Mutex` 一模一样，bare metal 下"锁"多一个 IRQ 安全维度，极易被忽略；② 消除冗余中间状态，减少不一致的出错面积；③ 类型系统是防并发 bug 的最好工具。
-
-### 7.2 OpenSBI / QEMU 异构分流与第二路 UART
-
-QEMU virt 默认只有一路 UART、OpenSBI 把所有 hart 都引向 S-mode 下一地址。通过两份补丁解决：
-
-- **OpenSBI**：hart 1 直接 mret 到 rt-async（M-mode）而非 S-mode、IPI 转发、允许 S-mode 写 CLINT MSIP；
-- **QEMU**：新增第二路 NS16550A UART（`0x10002000`，IRQ 12）供 rt-async 独立输出，避免双核抢同一串口。
-
-### 7.3 K3 RT24 UART 输入乱码（疑似硬件）
-
-**现象**：K3 实体板上 RT24 经 R_UART0 的**输出完全正常**，但主机下发的**输入字符乱码**，且乱码模式随主机端 USB 转串口芯片变化（如 `abcd`→`aabbccdd` 的字符翻倍，指向 RX 采样率不符）。
-
-**排查**：换回官方 ESOS 固件**复现同样乱码**（排除自写固件 bug）；主核 UART0 完全正常（隔离到 RT24 RX 通路）；换多台电脑/多块串口硬件现象一致。结论：**疑似 RT24 RX 引脚 pinctrl 配置（驱动强度/上下拉）或硬件本身问题**。
-
-**当前处理**：输出方向不受影响，暂以"仅输出"方式继续调试（与过往调试方式一致），已购新 CH340 芯片待对照。
-
----
-
-## 八、仓库结构
-
-本仓库（`rt-async-amp`）为项目主仓库，整合双内核、通信框架、用户态测试与构建系统。两个内核分别以独立 GitHub 仓库作为 submodule 引入。
-
-```
-rt-async-amp/
-├── rt-async/                     # 【submodule】rt-async 实时 RTOS 内核 (github.com/Oveln/rt-async)
-│   ├── modules/executor/         #   核心调度器：Spawner / Executor / PriorityBitmap / task
-│   ├── modules/executor-macro/   #   过程宏 #[task] #[main] #[interrupt]
-│   ├── modules/platform*/        #   Board trait + Driver Model（设备树 probe）+ 平台实现
-│   └── apps/test/                #   14 个 QEMU 集成测试
-├── tgoskits/                     # 【submodule】集成构建框架（fork 自 Dirinkbottle dev-k3com260kit，含 os/StarryOS 通用内核、os/arceos、os/axvisor）
-│   └── os/StarryOS/              #   StarryOS 通用内核（本项目在其 kernel/src/pseudofs/dev/rt_shm.rs 新增 IPC 设备）
-├── apps/
-│   ├── rt-async-app/             # rt-async 侧应用（QEMU virt）
-│   │   └── src/                  #   intercom.rs(IPI 策略) ipc_wait.rs uart_wait.rs bin/(console/demo)
-│   └── rt-async-k3/              # rt-async 侧应用（K3 RT24，sched_demo 抢占调度验证）
-├── user-apps/                    # StarryOS 用户态测试程序（musl 交叉编译）
-│   ├── user-test-ipc/            #   基础 IPC 收发
-│   ├── user-test-rpc/            #   RPC 四种调用模式
-│   └── user-test-sched/          #   三明治计时（端到端延迟 / 死锁复现用例）
-├── modules/
-│   ├── chip-qemu-virt-rt/        # QEMU virt 平台支持（UART1 / CLINT / IPI / PLIC，tock-registers）
-│   ├── chip-k3-rt24/             # K3 RT24 平台支持（PXA-UART / SysTimer / MSIP / PLIC / pinctrl / CCU / Mailbox，DTB 内嵌，tock-registers）
-│   │   ├── pinctrl_k3.rs         #   pinctrl-single driver（K3_PADCONF 宏编译链）
-│   │   ├── clock.rs              #   CCU driver（ClockProvider，末端 CLK_RST gate/mux/div/reset）
-│   │   ├── handshake.rs          #   SPL 握手 + 早期时钟/pinmux 配置
-│   │   ├── clint_k3.rs           #   SysTimer（mtime + mtimecmp + K3Msip）
-│   │   ├── plic_k3.rs            #   PLIC（per-hart 窗口 stride = hart<<27）
-│   │   ├── pxa_uart.rs           #   R_UART0（PXA 派生，stride=4，UUE+MCR OUT2）
-│   │   └── mailbox.rs            #   K3 Mailbox（去特化多实例 + recv().await 异步收发）
-│   └── ov-rpc/                   # RPC 框架（postcard 序列化，call/send/urgent）
-├── patches/
-│   ├── opensbi-amp.patch         # OpenSBI：hart 路由 + PIE 修复 + IPI 转发
-│   └── qemu-uart1.patch          # QEMU：第二路 UART @ 0x10002000 (IRQ 12)
-├── its/                          # 设备树源 + 宏头（编译期 cc -E → dtc 生成 .dtb，内嵌进 ELF .rodata）
-│   ├── rt-async-k3.dts           #   K3 RT24 rcpu1 设备树（U-Boot 不 handoff DTB）
-│   ├── qemu-virt-amp.dts         #   QEMU virt AMP 设备树
-│   ├── k3-pinctrl.h              #   K3_PADCONF / MUX_MODE* / EDGE_* / PULL_* / PAD_DS* 宏
-│   └── k3-clock.h                #   K3_CLK_* ID 宏（CCU 末端 gate 索引）
-├── scripts/flash/                # K3 一键刷写（编译+打包 itb+fastboot）
-├── xtask/                        # 【构建编排器】setup/build/run/install/clean/qemu 子命令
-├── docs/
-│   ├── architecture.html         # 交互式架构文档（7 节图表，README §3 引用）
-│   └── assets/                   # 架构图 SVG / excalidraw 源文件
-├── amp.toml                      # 地址布局/构建参数/仓库 pin 的单一真相源
-├── Cargo.toml                    # workspace 定义（ov-channels v0.2.0 等依赖）
-├── AGENTS.md                     # AI 编程助手协作指引（仓库结构 + 双仓工作流 + 开发规范）
-└── README.md                     # 本文件
-```
-
-**约定**：`amp.toml` 是所有地址常量的单一真相源，patch 文件中的 `{VAR}` 模板变量在 `cargo xtask setup` 时由其顶层取值替换，避免多处硬编码不一致。
-
----
-
-## 附录：快速开始与构建
-
-本项目使用 [`cargo xtask`](xtask/) 作为构建编排器（取代 Makefile），所有克隆/打补丁、构建、运行、安装、清理均通过 xtask 子命令完成。子命令一览可用 `cargo xtask --help` 查看。
+> user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管 QEMU 运行所需的引导链地址与上游 repo pin；机器参数等环境属性在 `envs/`，共享内存窗口等其余地址布局以设备树为准（运行时双端 DT probe）。
 
 ### 前置依赖
 
 - **Rust 工具链**：`rustup`（安装见 [rustup.rs](https://rustup.rs)）+ `rustup target add riscv64imac-unknown-none-elf`
-- `riscv64-elf-gcc`（Homebrew：`brew install riscv64-elf-gcc`）
-- **Musl 工具链**：交叉编译 `user-apps` 所需（StarryOS 用），安装见下方
-- Ninja / Meson（构建定制 QEMU：`brew install ninja meson`）、Python 3
+- `riscv64-elf-gcc`（Homebrew：`brew install riscv64-elf-gcc`；Ubuntu：`gcc-riscv64-unknown-elf`）
+- **Musl 工具链**：交叉编译 `user-apps` 与 StarryOS 的 C 依赖（lwprintf）所需，安装见下
+- Ninja / Meson（构建定制 QEMU：`brew install ninja meson` / `sudo apt install ninja-build meson`）、Python 3
+- `cc` + `dtc`（设备树编译链；`sudo apt install device-tree-compiler`）
+- 仅 K3 刷写需要：`mkimage` / `lzop` / `fastboot`
 
 #### 安装 Musl 工具链
 
@@ -376,54 +83,142 @@ rt-async-amp/
 
 1. 从 [setup-musl releases](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 下载 `riscv64-linux-musl-cross`；
 2. 解压到某路径，例如 `/opt/riscv64-linux-musl-cross`；
-3. 将 `bin` 目录加入 `PATH`，例如：
+3. 加入 `PATH`：
 
    ```bash
    export PATH=/opt/riscv64-linux-musl-cross/bin:$PATH
+   # 也可 export RISCV64_MUSL_CROSS=/opt/riscv64-linux-musl-cross（xtask 会自动前置其 bin）
    ```
 
-安装后即可获得 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等工具。
-
-### 一键构建运行
+### 首次搭建（qemu-plic 全链路）
 
 ```bash
-git submodule update --init --recursive   # 1. 初始化子模块
-cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU
-cargo xtask qemu                           # 3. 构建运行环境qemu
-cargo xtask build                          # 4. 构建全部组件（等同 build all）
-cd StarryOS && make rootfs && cd ..       # 5. 下载并准备 StarryOS rootfs 镜像
-cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS rootfs
-cargo xtask run                            # 7. 启动双核 AMP（可选 --tmux 同时观察 UART1）
+git submodule update --init --recursive   # 1. 初始化子模块（rt-async / tgoskits）
+cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU（amp.toml pin 版本）
+cargo xtask qemu                           # 3. 源码构建定制 QEMU（含 rt-async 专用 UART1）
+cargo xtask build qemu-plic                # 4. 环境聚合构建（OpenSBI + StarryOS + RP bins + user-apps）
+cd tgoskits && cargo xtask starry rootfs --arch riscv64 && cd ..   # 5. 准备 rootfs（tgoskits 正统流程）
+cargo xtask install --all                # 6. 将 user-apps 安装进 rootfs
+cargo xtask run                            # 7. 启动双核 AMP
 ```
 
-### K3 实体板构建与刷写
+### 日常开发循环（QEMU 环境）
+
+启动后两路串口的观察方式：
+
+- **UART0 → 本终端 stdin/stdout**：OpenSBI 启动横幅 → StarryOS 启动日志 → `root@starry:/root #` 交互 shell。
+- **UART1（rt-async 侧）→ Unix socket** `/tmp/rt-async-uart.sock`，两种接法：
+  - `cargo xtask run`（前台）：另开终端 `socat - UNIX-CONNECT:/tmp/rt-async-uart.sock`。注意 QEMU 是 socket 服务端，**连接之前的启动期输出会丢**；
+  - `cargo xtask run --tmux`：tmux 左右分屏（左 QEMU、右 UART1），socat 先监听、QEMU 作客户端连接，**不丢启动期输出**（推荐）。
+
+想持续留档 UART1 日志给 `cargo xtask log` 跟踪，把 socat 输出 tee 到约定文件：
 
 ```bash
-cargo xtask build k3-sched-demo            # 构建 K3 RT24 rcpu1 固件 → build/rt-async-k3-sched-demo.elf
-./scripts/flash/k3-flash.sh                # 一键：编译 + 打包 itb（rcpu0 esos + rcpu1 rt-async）+ fastboot 刷写
-# 串口观察 R_UART0（115200 8N1）：sched_demo 输出交替的 H/L
+socat - UNIX-CONNECT:/tmp/rt-async-uart.sock | tee build/rt-async-uart.log
 ```
 
-> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 U-Boot 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。详见 [`scripts/flash/README.md`](scripts/flash/README.md)。
+**正常冒烟标志**：UART0 上 OpenSBI 横幅 + StarryOS shell + `rt_shm: device initialized, phys base 0x88000000`；UART1 上 `[heartbeat] tick #N` 每 500ms 一条（demo bin）。
 
-### 常用子命令
+换 rt-async 固件（run 用 cargo 短名，不带平台前缀）：
 
 ```bash
+cargo xtask run --bin console              # demo / console / console_interrupt
+```
+
+### qemu-aia：AIA 仿真环境（当前仅 AP 侧）
+
+机器参数 `virt,aia=aplic-imsic`，StarryOS 侧 somehal 运行时按 FDT 探测，自动走 IMSIC+APLIC 路径（`OpenSBI: Platform IPI Device : aia-imsic` 即为生效标志）；AP 侧 DTB 由本环境机器 dumpdtb 导出基线、`fdtoverlay` 叠加共享窗节点（`its/rt-async-ap.overlay.dts`），中断拓扑自动正确，无需手写 imsic 节点。
+
+**当前边界（事实状态）**：AIA 是 StarryOS 侧的支持，**rt-async 暂不支持 AIA**（RP 侧只有 PLIC 驱动，而该机器无 PLIC，RP 侧会静默挂死）。因此 `run --env qemu-aia` 目前用于 **AP 侧 AIA 行为验证**（MSI 投递、stopei EOI 等先在仿真确认再到 K3 真板）；等 rt-async 补 APLIC/IMSIC 驱动后启用完整双端。详见 `envs/qemu-aia.toml` 注释。
+
+### K3 真板（k3-com260）
+
+**构建（xtask 职责到产物为止）**：
+
+```bash
+cargo xtask build k3-com260
+# 交付两个产物：
+#   build/k3-com260/esos.itb       RP 侧：rcpu0 握手占位 + rcpu1 rt-async（默认 k3-sched-demo）
+#   build/k3-com260/starryos.uimg  AP 侧：StarryOS FIT（kernel + dtb）
+```
+
+换打包的 rcpu1 bin（打包脚本保留在 `scripts/flash/k3-pack-itb.sh`）：
+
+```bash
+cargo xtask build k3-ipc-demo
+ELF_SRC=build/k3-com260/rt-async-k3-ipc-demo.elf bash scripts/flash/k3-pack-itb.sh
+```
+
+**刷写/引导（手动，U-Boot 串口 + 主机 fastboot）**
+
+> ⚠️ U-Boot 的 `fastboot` 在 stage 传输完成后**不会自动退出**，必须 **Ctrl+C** 回到提示符才能执行下一条命令。
+
+刷 RP 固件（写入 `esos` MTD 分区，掉电保留）：
+
+```bash
+fastboot -l $loadaddr -s 0x100000 usb 0     # U-Boot：进入 fastboot（阻塞命令）
+fastboot stage build/k3-com260/esos.itb     # Host：上传 itb
+# ↓ U-Boot：Ctrl-C 退出 fastboot 后逐条执行：
+mtd erase esos
+mtd write esos $loadaddr
+reset
+```
+
+引导 AP 内核（StarryOS 不落 flash，`bootm` 直接启动；FIT 上传地址 `0x180000000` 与 kernel/fdt 加载地址错开）：
+
+```bash
+fastboot -l 0x180000000 -s 0x04000000 usb 0   # U-Boot
+fastboot stage build/k3-com260/starryos.uimg  # Host：上传 uimg
+# ↓ U-Boot：Ctrl-C 退出 fastboot 后：
+bootm 0x180000000
+```
+
+> K3 的 rcpu0 跑**本仓库的握手占位固件**（`scripts/flash/payloads/rt24_os0_rcpu.S`：入口写 BOOT_ENTRY 寄存器解锁 AP 的 6s 启动轮询后永久 wfi，不参与 AMP 通信；mailbox3 留给未来），rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb（沿用官方 `esos` 分区命名）的不同节点加载，无 DTB handoff（DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像；bootargs 已固化在设备树 chosen 节点，无需 setenv。
+
+### 用户态应用（user-apps）开发循环
+
+user-apps 是 StarryOS 侧的 musl 静态二进制，两个环境的上板方式不同：
+
+```bash
+cargo xtask build user-test-rpc      # 单独构建（环境聚合构建也会带上）
+# qemu-plic：注入 rootfs 后在 StarryOS shell 里运行
+cargo xtask install --all            # 全部注入（或 install build/user-test-rpc --dst /user-test-rpc）
+cargo xtask run                      # shell 里执行 /user-test-rpc
+```
+
+k3-com260：板上经**局域网 HTTP 服务器 wget** 拉取——主机在产物目录起服务，板上 wget 后直接执行：
+
+```bash
+python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
+# 板上（StarryOS shell，IP 按实际网络填写）：
+#   wget http://<host-ip>:8000/user-test-ipc -O /tmp/user-test-ipc
+#   chmod +x /tmp/user-test-ipc && /tmp/user-test-ipc
+```
+
+### 常用子命令速查
+
+```bash
+# 环境聚合构建（一个环境一条命令，产物落 build/<env>/）
+cargo xtask build qemu-plic  #   OpenSBI + StarryOS + 全部 qemu bins + user-apps
+cargo xtask build qemu-aia   #   同上（AIA 机器；AP DTB 由 dumpdtb+overlay 自动生成）
+cargo xtask build k3-com260  #   全部 k3 bins + esos.itb + starryos.uimg
 # 构建单个目标：组件（opensbi / starryos / user-test-*）或 rt-async bin
-cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名：
+cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名（落平台默认环境目录）：
                              #     qemu-demo / qemu-console / qemu-console-interrupt → flat bin（QEMU loader）
                              #     k3-sched-demo → ELF（esos 脚本整合进 itb）
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
-cargo xtask run --bin demo   # 指定 rt-async bin 启动（默认 demo；run 用短名）
-cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志
+cargo xtask run --env qemu-aia # 启动指定环境的 QEMU AMP（--bin demo 换 RP bin，run 用短名）
+                              #   注：qemu-aia 目前仅 AP 侧可跑（见上文）
+cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志（tee 到 build/rt-async-uart.log）
 cargo xtask install --all    # 将 user-apps 安装进 StarryOS rootfs
 cargo xtask qemu             # 从源码构建带 UART1 的定制 QEMU
 cargo xtask clean --dist     # 清理构建产物（--dist 连带删除 opensbi/ 与 qemu/）
 cargo xtask completions fish # 生成 shell 补全脚本（bash/zsh/fish/...）
 ```
 
-### 说明
+### 约定说明
 
-- Musl 工具链（提供 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等）：从 [setup-musl](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 预编译包安装，详见上方「安装 Musl 工具链」；
-- `amp.toml` 是所有地址常量的单一真相源，xtask 读取它驱动地址/layout 生成与 patch 模板渲染。
+- 地址布局真相源分层：`amp.toml` 只保留 QEMU 运行所需（OpenSBI/QEMU 补丁的 `{VAR}` 模板变量、loader 摆放地址、DTB 扫描起点——均为"能解析 DT 之前"就要用的值）；共享内存窗口等其余地址以设备树为准（`its/rt-async-shm.dtsi` / `its/rt-async-k3.dts`，运行时 DT probe）；`/dev/rt_shm` 的 ioctl ABI 在 `user-apps/rtshm-abi`。机器参数等**环境属性**在 `envs/*.toml`。
+- 修改 `.dts`/`.dtsi` 后无需手动编译：`run` 时按 mtime 增量编译 DTB（`cc -E → dtc` 链，与 K3 `build.rs` 一致）。
+- 仓库结构与开发规范（分支工作流、提交约定、双仓流程）见 [`AGENTS.md`](AGENTS.md)。

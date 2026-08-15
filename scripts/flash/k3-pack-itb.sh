@@ -2,7 +2,8 @@
 # Pack a new rcpu1 ELF into esos.itb —— 完全自包含，不依赖 esos 仓库或 output/esos/。
 #
 # 所有 payload 都在 scripts/flash/payloads/ 下：
-#   - rt24_os0_rcpu.elf         (rcpu0 esos 固件，固定复用)
+#   - rt24_os0_rcpu.elf         (rcpu0 握手占位固件——写 BOOT_ENTRY 解锁 AP 轮询后 wfi，
+#                                 源码同目录 rt24_os0_rcpu.S，非官方 esos)
 #   - k3_rt240_com260_ifx.dtb   (本板型 rcpu0 设备树，固定复用)
 #   - k3_rt241_com260_ifx.dtb   (本板型 rcpu1 设备树，固定复用)
 #   - null.spacemit             (AP 交互 blob，固定复用)
@@ -11,21 +12,22 @@
 # ITS 模板用本目录下的 esos_k3_com260_ifx.its（精简版，仅 com260_ifx 节点）。
 # mkimage 在本目录（scripts/flash/）执行，ITS 的 incbin 路径 payloads/... 相对于此。
 #
-# 输出：scripts/flash/esos.itb
+# 输出：build/k3-com260/esos.itb（环境产物目录，与 xtask build k3-com260 同一落点）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PAYLOADS="$SCRIPT_DIR/payloads"
 ITS="$SCRIPT_DIR/esos_k3_com260_ifx.its"
-ITB_OUT="$SCRIPT_DIR/esos.itb"
+ENV_DIR="$REPO_ROOT/build/k3-com260"
+ITB_OUT="$ENV_DIR/esos.itb"
 
-ELF_SRC="${ELF_SRC:-build/rt-async-k3-sched-demo.elf}"   # 相对 repo 根
+ELF_SRC="${ELF_SRC:-build/k3-com260/rt-async-k3-sched-demo.elf}"   # 相对 repo 根
 
 # ── 0. preflight ────────────────────────────────────────────────────────────
 for t in mkimage lzop; do
     if ! command -v "$t" >/dev/null 2>&1; then
-        echo "✗ 缺少工具: $t (brew install u-boot-tools lzop)" >&2
+        echo "✗ 缺少工具: $t（Debian/Ubuntu: apt install u-boot-tools lzop；macOS: brew install u-boot-tools lzop）" >&2
         exit 1
     fi
 done
@@ -68,6 +70,7 @@ done
 # ── 3. mkimage（在本目录执行，ITS 的 payloads/... 相对路径才对）──────────────
 echo "▶ mkimage (cwd=$SCRIPT_DIR)"
 cd "$SCRIPT_DIR"
+mkdir -p "$ENV_DIR"
 mkimage -f "$ITS" "$ITB_OUT" >&2
 
 [ -f "$ITB_OUT" ] || { echo "✗ mkimage 未产出 itb: $ITB_OUT" >&2; exit 1; }

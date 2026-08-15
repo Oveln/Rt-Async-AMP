@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+rtshm-abi = { path = "../rtshm-abi" }
 ov-channels = { workspace = true, features = ["std", "flags"] }
 ov-rpc = { path = "../../modules/ov-rpc" }
 serde = { workspace = true }
@@ -12,5 +13,3 @@ postcard = { workspace = true }
 portable-atomic = { version = "1.13", default-features = false }
 libc = "0.2"
 
-[build-dependencies]
-xtask = { path = "../../xtask" }
