@@ -260,7 +260,7 @@ fn prepare_image(root: &Path, profile: &EnvProfile, bin: &RtAsyncBin) -> AmpImag
     let opensbi_fw = build.join("fw_dynamic.bin");
     let app_bin = build.join(bin.out);
     let starryos_bin = build.join(&profile.starry_artifact);
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
+    let _rootfs = crate::util::resolve_rootfs(root);
 
     assert!(
         opensbi_fw.exists(),
@@ -275,14 +275,22 @@ fn prepare_image(root: &Path, profile: &EnvProfile, bin: &RtAsyncBin) -> AmpImag
     if !starryos_bin.exists() {
         eprintln!("Warning: no StarryOS binary ({})", starryos_bin.display());
     }
-    if !rootfs.exists() {
-        eprintln!("Warning: no rootfs ({})，make -C tgoskits/os/StarryOS rootfs", rootfs.display());
-    }
 
     let machine = profile.qemu.as_ref().expect("qemu 环境的 env toml 缺 [qemu] 节");
     let dtb = ensure_ap_dtb(root, profile, machine);
     let rtasync_dtb = compile_dtb(root, &build, RTASYNC_DTS, "rt-async.dtb");
     AmpImage { app_bin, dtb, rtasync_dtb }
+}
+
+/// rootfs 解析失败时的统一提示（tgoskits 正统准备方式）。
+fn rootfs_or_die(root: &Path) -> std::path::PathBuf {
+    crate::util::resolve_rootfs(root).unwrap_or_else(|| {
+        panic!(
+            "rootfs 镜像缺失。准备方式（tgoskits 正统流程）：\n  \
+             cd tgoskits && cargo xtask starry rootfs --arch riscv64\n  \
+             （legacy 备选：make -C tgoskits/os/StarryOS rootfs）"
+        )
+    })
 }
 
 pub fn run_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsyncBin) {
@@ -291,7 +299,7 @@ pub fn run_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsyncBin
     let build = profile.env_build_dir(root);
     let opensbi_fw = build.join("fw_dynamic.bin");
     let starryos_bin = build.join(&profile.starry_artifact);
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
+    let rootfs = rootfs_or_die(root);
     let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
 
     let rtasync_base = cfg.get("RTASYNCBASE");
@@ -345,7 +353,7 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsy
     let build = profile.env_build_dir(root);
     let opensbi_fw = build.join("fw_dynamic.bin");
     let starryos_bin = build.join(&profile.starry_artifact);
-    let rootfs = root.join("tgoskits/os/StarryOS/rootfs-riscv64.img");
+    let rootfs = rootfs_or_die(root);
     let qemu_bin = root.join("qemu/build/qemu-system-riscv64-unsigned");
 
     let rtasync_base = cfg.get("RTASYNCBASE");

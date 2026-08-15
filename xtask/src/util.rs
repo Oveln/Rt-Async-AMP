@@ -1,5 +1,19 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// 解析 QEMU 用的 StarryOS rootfs 镜像路径。
+///
+/// 优先 tgoskits 正统流程产物（`cd tgoskits && cargo xtask starry rootfs
+/// --arch riscv64`，下载解压到 tmp/axbuild/rootfs/ 下）；回退 legacy
+/// Makefile 下载位置（os/StarryOS/rootfs-riscv64.img）。两处都无则 None。
+pub fn resolve_rootfs(root: &Path) -> Option<PathBuf> {
+    let candidates = [
+        // tg-xtask 托管目录：rootfs-riscv64-alpine.img 是目录，镜像同名文件在其中
+        root.join("tgoskits/tmp/axbuild/rootfs/rootfs-riscv64-alpine.img/rootfs-riscv64-alpine.img"),
+        root.join("tgoskits/os/StarryOS/rootfs-riscv64.img"),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
 
 pub fn run(cwd: &Path, program: &str, args: &[&str]) {
     let st = Command::new(program)
