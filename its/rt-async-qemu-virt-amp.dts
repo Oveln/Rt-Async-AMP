@@ -67,9 +67,14 @@
 #define OV_MSIP_HART 0
 #include "rt-async-shm.dtsi"
 
+    // PLIC 节点可被 -DOV_NO_PLIC 裁剪（qemu-aia 环境：该机器无 PLIC，声明
+    // 此节点会让 driver probe 写不存在的地址 → access fault 静默挂死）。
+    // 裁剪后 INTC 槽位为空，setup_console_irq 自动跳过，外部中断不可用。
+#ifndef OV_NO_PLIC
     plic@c000000 {
         compatible = "riscv,plic0";
         reg = <0 0x0C000000 0 0x4000000>;
         riscv,ndev = <53>;
     };
+#endif
 };

@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: MIT
+//
+// AP 侧共享窗 overlay（dumpdtb 模式用）。
+//
+// 用途：qemu-aia 环境的 AP DTB 由 QEMU dumpdtb 导出基线（自带正确的
+// imsics/aplic 节点），本 overlay 经 fdtoverlay 叠加跨核共享内存节点。
+// 节点本体复用 rt-async-shm.dtsi 单一真相源，AP 侧宏：
+//   OV_MSIP_HART=1（本端写对端 hart1 的 MSIP1 唤醒 rt-async）
+//   OV_AP_SIDE（增加 S-mode 独有的 SSI cause 属性）
+//
+// 注：fdtoverlay 不携带 /memreserve/；StarryOS 全链不解析 memreserve
+// （qemu-plic 手写 dts 里的条目同样无效），故此处不写。
+
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/";
+		__overlay__ {
+#define OV_MSIP_HART 1
+#define OV_AP_SIDE 1
+#include "rt-async-shm.dtsi"
+		};
+	};
+};

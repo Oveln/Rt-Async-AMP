@@ -1,0 +1,26 @@
+# 环境三：K3 COM260 Kit 真板。
+#
+# X100 大核@StarryOS(S 态，经 FIT uimg + fastboot bootm 启动)
+# + RT24 rcpu1@rt-async(M 态，SPL 从 esos.itb 的 rcpu1-fw 节点拉起)。
+# AP 与 RP 是两套独立镜像，本环境 build 的终点产物即两件：
+#   build/k3-com260/esos.itb     RP 侧（k3-pack-itb.sh 打包）
+#   build/k3-com260/starryos.uimg  AP 侧（tg-xtask 构建）
+# 刷写不进 xtask：RP 走 scripts/flash/k3-flash.sh，AP 走手动 fastboot 序列
+# （见 scripts/flash/README.md 与 docs/envs/k3-com260.md）。
+
+[env]
+platform = "k3"
+default = true
+desc = "K3 COM260 真板（X100@StarryOS + RT24 rcpu1@rt-async）"
+
+[starry]
+# 板级 .its 同名存在 → tg-xtask 构建后自动 mkimage 出 starryos.uimg。
+config = "os/StarryOS/configs/board/spacemitk3-com260kit.toml"
+# K3 上 StarryOS 跑 X100 大核，不限制 smp（rcpu1 不在 StarryOS 视野内）。
+# 产物：.uimg（FIT：kernel+dtb）
+artifact = "starryos.uimg"
+
+[pack]
+# 打包进 esos.itb rcpu1-fw 节点的默认 bin（RTASYNC_BINS target_name）。
+# 刷其他 bin：K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh
+bin = "k3-sched-demo"

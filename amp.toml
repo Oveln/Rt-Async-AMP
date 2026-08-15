@@ -45,9 +45,8 @@ RTSHM_IOC_CLR_PENDING  = "0x735003"
 SBI_EXT_IPI       = "0x735049"
 SBI_FUNC_SEND_IPI = "0x00"
 
-# ── QEMU configuration ─────────────────────────────────────────────────────
-QEMUSMP = 2
-QEMURAM = "256M"
+# 注：QEMU 机器参数（machine/smp/ram）已移入 envs/<env>.toml 的 [qemu] 节——
+# 它们是环境属性而非地址布局；amp.toml 只管地址 + 上游 pin。
 
 # ── K3 RT24 rcpu1 ───────────────────────────────────────────────────────────
 RT24RCPU1BASE = "0x100804000"

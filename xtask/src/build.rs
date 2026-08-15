@@ -3,6 +3,7 @@ use std::path::Path;
 
 use xtask::config::Config;
 
+use crate::env_profile::EnvProfile;
 use crate::util;
 
 /// 产物类型：`Bin` = objcopy 成 flat binary（供 QEMU loader 加载）；
@@ -21,9 +22,9 @@ pub struct RtAsyncBin {
     pub name: &'static str,
     /// xtask `build` 的 target 名（带平台前缀，如 "qemu-demo"、"k3-sched-demo"）。
     pub target_name: &'static str,
-    /// 平台："qemu" / "k3"。用于 `build qemu` / `build k3` 聚合。
+    /// 平台："qemu" / "k3"。用于 `build qemu` / `build k3` 聚合与环境归属。
     pub platform: &'static str,
-    /// `build/` 下产物文件名（如 "rt-async.bin"、"rt-async-k3-sched-demo.elf"）。
+    /// `build/<env>/` 下产物文件名（如 "rt-async.bin"、"rt-async-k3-sched-demo.elf"）。
     pub out: &'static str,
     /// app crate 目录（如 "apps/rt-async-app"、"apps/rt-async-k3"）。
     pub app_dir: &'static str,
@@ -111,7 +112,8 @@ pub fn find_by_name(name: &str) -> Option<&'static RtAsyncBin> {
 }
 
 /// 构建一个 rt-async bin：cargo build 后按 artifact 类型产出。
-pub fn build_rt_async(root: &Path, bin: &RtAsyncBin) {
+/// 产物落 `build/<env_name>/`（单 bin 构建传平台默认环境名）。
+pub fn build_rt_async(root: &Path, bin: &RtAsyncBin, env_name: &str) {
     util::run(
         &root.join(bin.app_dir),
         "cargo",
@@ -127,7 +129,7 @@ pub fn build_rt_async(root: &Path, bin: &RtAsyncBin) {
         ],
     );
 
-    let build_dir = root.join("build");
+    let build_dir = root.join("build").join(env_name);
     fs::create_dir_all(&build_dir).unwrap();
 
     let elf = root
@@ -148,10 +150,10 @@ pub fn build_rt_async(root: &Path, bin: &RtAsyncBin) {
         }
     }
 
-    eprintln!("rt-async ({}) → build/{}", bin.target_name, bin.out);
+    eprintln!("rt-async ({}) → build/{}/{}", bin.target_name, env_name, bin.out);
 }
 
-pub fn opensbi(root: &Path, cfg: &Config) {
+pub fn opensbi(root: &Path, cfg: &Config, env_name: &str) {
     let dir = root.join("opensbi");
     assert!(
         dir.join(".patched").exists(),
@@ -176,7 +178,7 @@ pub fn opensbi(root: &Path, cfg: &Config) {
         ],
     );
 
-    let build_dir = root.join("build");
+    let build_dir = root.join("build").join(env_name);
     fs::create_dir_all(&build_dir).unwrap();
 
     let src = dir.join("build/platform/generic/firmware/fw_dynamic.bin");
@@ -185,7 +187,8 @@ pub fn opensbi(root: &Path, cfg: &Config) {
     eprintln!("OpenSBI → {}", dst.display());
 }
 
-pub fn starryos(root: &Path, _cfg: &Config) {
+/// 构建环境对应的 StarryOS（经 tg-xtask，板级配置来自环境 profile）。
+pub fn starryos(root: &Path, profile: &EnvProfile) {
     let tgoskits_root = root.join("tgoskits");
     let starry_dir = tgoskits_root.join("os/StarryOS");
     assert!(
@@ -195,12 +198,14 @@ pub fn starryos(root: &Path, _cfg: &Config) {
 
     // tgoskits 新版已移除 make/axconfig 流程，StarryOS 构建统一走 tg-xtask：
     //   cargo starry build --config os/StarryOS/configs/board/<board>.toml
-    // 板级配置（features/log/target）由 tgoskits 侧 checked-in 的 board TOML 声明。
-    let board_config = starry_dir.join("configs/board/qemu-riscv64.toml");
+    // 板级配置（features/log/target）由 tgoskits 侧 checked-in 的 board TOML 声明，
+    // 由环境 profile 指定（envs/<env>.toml 的 [starry].config）。
+    let board_config = tgoskits_root.join(&profile.starry_config);
     assert!(
         board_config.is_file(),
-        "StarryOS board config not found: {}. Check tgoskits/os/StarryOS/configs/board/.",
-        board_config.display()
+        "StarryOS board config not found: {}. Check envs/{}.toml 与 tgoskits checkout.",
+        board_config.display(),
+        profile.name
     );
 
     let config_arg = board_config.to_string_lossy().to_string();
@@ -212,13 +217,15 @@ pub fn starryos(root: &Path, _cfg: &Config) {
         "run", "--release", "-p", "tg-xtask", "--",
         "starry", "build",
         "--config", &config_arg,
-        // AMP 场景 hart 1 归属 rt-async（OpenSBI mret 到 M-mode），StarryOS
-        // 必须单核。不传则 StarryOS 从 FDT 探测到 2 个 hart 并尝试启动
-        // CPU 1，与 rt-async 抢占同一核导致启动卡死。
-        "--smp", "1",
-    ])
-    .env_remove("RUSTUP_TOOLCHAIN")
-    .current_dir(&tgoskits_root);
+    ]);
+    // AMP 场景 hart 1 归属 rt-async（OpenSBI mret 到 M-mode），StarryOS
+    // 必须单核。不传则 StarryOS 从 FDT 探测到 2 个 hart 并尝试启动
+    // CPU 1，与 rt-async 抢占同一核导致启动卡死。
+    if let Some(smp) = profile.starry_smp {
+        cmd.arg("--smp").arg(smp.to_string());
+    }
+    cmd.env_remove("RUSTUP_TOOLCHAIN")
+        .current_dir(&tgoskits_root);
     // lwprintf-rs（starry-kernel 的 C 依赖）构建脚本直接调
     // riscv64-linux-musl-gcc，需保证 musl 工具链 bin 在 PATH 上。
     if let Ok(cross) = std::env::var("RISCV64_MUSL_CROSS") {
@@ -232,16 +239,102 @@ pub fn starryos(root: &Path, _cfg: &Config) {
     let st = cmd.status().expect("cargo not found");
     assert!(st.success(), "StarryOS build failed");
 
-    let build_dir = root.join("build");
+    let build_dir = profile.env_build_dir(root);
     fs::create_dir_all(&build_dir).unwrap();
 
     // tg-xtask 产物（固定包 starryos）落在 tgoskits/target/riscv64gc-unknown-none-elf/release/
-    // 下；.bin 在 kallsyms 后由 tg-xtask 用 rust-objcopy 刷新，直接拷给 QEMU loader。
-    let bin_src = tgoskits_root
-        .join("target/riscv64gc-unknown-none-elf/release/starryos.bin");
-    let bin = build_dir.join("starryos.bin");
-    fs::copy(&bin_src, &bin).unwrap();
-    eprintln!("StarryOS → {}", bin.display());
+    // 下；qemu 用 .bin（kallsyms 后 rust-objcopy 刷新，供 QEMU loader），
+    // k3 用 .uimg（board toml 同名 .its 触发 mkimage，供 fastboot bootm）。
+    let artifact_src = tgoskits_root
+        .join("target/riscv64gc-unknown-none-elf/release")
+        .join(&profile.starry_artifact);
+    assert!(
+        artifact_src.exists(),
+        "tg-xtask 产物缺失: {}（board config 旁是否缺同名 .its？）",
+        artifact_src.display()
+    );
+    let dst = build_dir.join(&profile.starry_artifact);
+    fs::copy(&artifact_src, &dst).unwrap();
+    eprintln!("StarryOS → {}", dst.display());
+}
+
+/// 环境聚合构建：一个环境一条命令产出全部可运行产物。
+///
+/// qemu 环境：OpenSBI + StarryOS + 全部 qemu bins + user-apps（rootfs 注入用）。
+/// k3 环境：全部 k3 bins + esos.itb（pack.bin）+ starryos.uimg——两个交付产物。
+pub fn build_env(root: &Path, cfg: &Config, profile: &EnvProfile, envs: &[EnvProfile]) {
+    let bins: Vec<_> = RTASYNC_BINS
+        .iter()
+        .filter(|b| b.platform == profile.platform)
+        .collect();
+
+    match profile.platform.as_str() {
+        "qemu" => {
+            opensbi(root, cfg, &profile.name);
+            starryos(root, profile);
+            for bin in &bins {
+                build_rt_async(root, bin, &profile.name);
+            }
+            user_test(root, cfg);
+            user_test_mbox(root, cfg);
+            user_test_rpc(root, cfg);
+            user_test_sched(root, cfg);
+            eprintln!(
+                "Env {} build complete. Run 'cargo xtask run --env {}' to start QEMU.",
+                profile.name, profile.name
+            );
+        }
+        "k3" => {
+            for bin in &bins {
+                build_rt_async(root, bin, &profile.name);
+            }
+            pack_itb(root, profile);
+            starryos(root, profile);
+            eprintln!(
+                "Env {} build complete. Deliverables: build/{}/{{esos.itb, {}}}",
+                profile.name, profile.name, profile.starry_artifact
+            );
+        }
+        other => panic!("unknown platform in env profile: {other}"),
+    }
+    let _ = envs; // 预留：后续按 env 间依赖扩展（如共享产物复用）
+}
+
+/// k3：把 [pack].bin 打包进 esos.itb（调用 scripts/flash/k3-pack-itb.sh）。
+/// 脚本负责 cp ELF + lzo + mkimage，产物落 build/<env>/esos.itb。
+pub fn pack_itb(root: &Path, profile: &EnvProfile) {
+    let target_name = profile
+        .pack_bin
+        .as_deref()
+        .unwrap_or_else(|| panic!("envs/{}.toml 缺 [pack].bin（k3 环境必填）", profile.name));
+    let bin = find_by_target(target_name)
+        .unwrap_or_else(|| panic!("envs/{}.toml [pack].bin 未知 target: {target_name}", profile.name));
+    assert!(
+        bin.platform == profile.platform,
+        "envs/{}.toml [pack].bin {target_name} 不属于平台 {}",
+        profile.name, profile.platform
+    );
+
+    let elf_rel = format!("build/{}/{}", profile.name, bin.out);
+    let elf = root.join(&elf_rel);
+    assert!(
+        elf.exists(),
+        "rcpu1 ELF 缺失: {}（先构建 {}）",
+        elf.display(),
+        target_name
+    );
+
+    let script = root.join("scripts/flash/k3-pack-itb.sh");
+    let st = std::process::Command::new("bash")
+        .arg(&script)
+        .env("ELF_SRC", &elf_rel)
+        .current_dir(root)
+        .status()
+        .unwrap_or_else(|e| panic!("bash: {e}"));
+    assert!(st.success(), "k3-pack-itb.sh failed");
+    let itb = profile.env_build_dir(root).join("esos.itb");
+    assert!(itb.exists(), "k3-pack-itb.sh 未产出 {}", itb.display());
+    eprintln!("esos.itb → {}", itb.display());
 }
 
 pub fn user_test(root: &Path, _cfg: &Config) {
@@ -267,6 +360,7 @@ fn build_user_app(root: &Path, app_dir: &str, bin_name: &str) {
         "cargo",
         &["build", "--target", target, "--release"],
     );
+    // user-apps 与环境无关（qemu rootfs 注入 / k3 串口传输共用），落 build/ 顶层。
     let build_dir = root.join("build");
     fs::create_dir_all(&build_dir).unwrap();
     let src = root

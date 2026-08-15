@@ -26,7 +26,7 @@ cd "$REPO_ROOT"
 [ -f "$SCRIPT_DIR/flash.conf" ] && source "$SCRIPT_DIR/flash.conf" || true
 
 CONSOLE=(python3 "$SCRIPT_DIR/k3-console.py")
-ITB="$SCRIPT_DIR/esos.itb"
+ITB="$REPO_ROOT/build/k3-com260/esos.itb"   # 与 xtask build k3-com260 同一落点
 
 # ── arg parse ───────────────────────────────────────────────────────────────
 BOOT=0
@@ -59,9 +59,9 @@ if [ "$NO_BUILD" -eq 0 ]; then
 
     step "pack esos.itb (cp ELF + lzo + mkimage)"
     # ELF_SRC 由 k3-pack-itb.sh 读取：target_name 已含 k3- 前缀，
-    # 产物文件名 = rt-async-<target_name>.elf（如 k3-ipc-demo →
-    # build/rt-async-k3-ipc-demo.elf），不再剥离 k3- 前缀。
-    ELF_SRC="build/rt-async-${K3_TARGET}.elf" bash "$SCRIPT_DIR/k3-pack-itb.sh"
+    # 产物落环境目录 build/k3-com260/（如 k3-ipc-demo →
+    # build/k3-com260/rt-async-k3-ipc-demo.elf）。
+    ELF_SRC="build/k3-com260/rt-async-${K3_TARGET}.elf" bash "$SCRIPT_DIR/k3-pack-itb.sh"
 else
     step "skip build (--no-build); reusing $ITB"
     [ -f "$ITB" ] || { echo "✗ itb 不存在: $ITB (先去掉 --no-build)" >&2; exit 1; }

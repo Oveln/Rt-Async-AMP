@@ -11,16 +11,17 @@
 # ITS 模板用本目录下的 esos_k3_com260_ifx.its（精简版，仅 com260_ifx 节点）。
 # mkimage 在本目录（scripts/flash/）执行，ITS 的 incbin 路径 payloads/... 相对于此。
 #
-# 输出：scripts/flash/esos.itb
+# 输出：build/k3-com260/esos.itb（环境产物目录，与 xtask build k3-com260 同一落点）
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 PAYLOADS="$SCRIPT_DIR/payloads"
 ITS="$SCRIPT_DIR/esos_k3_com260_ifx.its"
-ITB_OUT="$SCRIPT_DIR/esos.itb"
+ENV_DIR="$REPO_ROOT/build/k3-com260"
+ITB_OUT="$ENV_DIR/esos.itb"
 
-ELF_SRC="${ELF_SRC:-build/rt-async-k3-sched-demo.elf}"   # 相对 repo 根
+ELF_SRC="${ELF_SRC:-build/k3-com260/rt-async-k3-sched-demo.elf}"   # 相对 repo 根
 
 # ── 0. preflight ────────────────────────────────────────────────────────────
 for t in mkimage lzop; do
@@ -68,6 +69,7 @@ done
 # ── 3. mkimage（在本目录执行，ITS 的 payloads/... 相对路径才对）──────────────
 echo "▶ mkimage (cwd=$SCRIPT_DIR)"
 cd "$SCRIPT_DIR"
+mkdir -p "$ENV_DIR"
 mkimage -f "$ITS" "$ITB_OUT" >&2
 
 [ -f "$ITB_OUT" ] || { echo "✗ mkimage 未产出 itb: $ITB_OUT" >&2; exit 1; }
