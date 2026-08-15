@@ -391,7 +391,7 @@ git submodule update --init --recursive   # 1. 初始化子模块
 cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU
 cargo xtask qemu                           # 3. 构建运行环境qemu
 cargo xtask build                          # 4. 构建全部组件（等同 build all）
-cd StarryOS && make rootfs && cd ..       # 5. 下载并准备 StarryOS rootfs 镜像
+make -C tgoskits/os/StarryOS rootfs  # 5. 下载 StarryOS rootfs 镜像（Starry-OS 官方 release）
 cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS rootfs
 cargo xtask run                            # 7. 启动双核 AMP（可选 --tmux 同时观察 UART1）
 ```

@@ -23,7 +23,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 │   ├── rt-async-app/          ←   QEMU virt 固件
 │   └── rt-async-k3-app/       ←   K3 用户态应用
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
-├── xtask/                     ←   构建工具链（cargo xtask build/run/flash/...）
+├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
 ├── amp.toml                   ←   地址布局 + 构建参数 single source of truth
 ├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
@@ -46,8 +46,8 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ```bash
 cargo xtask build k3-sched-demo    # 构建 K3 sched_demo → build/rt-async-k3-sched-demo.elf
 cargo xtask build qemu-demo        # 构建 QEMU demo
-cargo xtask run    k3-sched-demo   # 构建 + 运行（QEMU 仿真）
-cargo xtask flash  k3-sched-demo   # 构建 + 刷写到 K3 真板
+cargo xtask run [--bin demo]       # 启动 QEMU 双核 AMP（run 仅服务 QEMU，--bin 用短名）
+./scripts/flash/k3-flash.sh        # K3 真板一键：构建 + 打包 itb + fastboot 刷写
 ```
 
 ### 直接 cargo（需手动指定 target）
@@ -274,14 +274,15 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 ### 添加新构建目标（app/bin）
 
 1. 在 `apps/<app>/src/bin/` 加 bin 文件，`Cargo.toml` 加 `[[bin]]`。
-2. `xtask/src/build.rs` 的 `TARGETS` 数组加一项（`name` / `target_name` / `out` /
-   `app_dir` / `package`）。
+2. `xtask/src/build.rs` 的 `RTASYNC_BINS` 注册表加一项（`name` / `target_name` /
+   `platform` / `out` / `app_dir` / `package`）。
 3. `cargo xtask build <target_name>` 验证。
 
 ### 刷写 K3 真板
 
 ```bash
-cargo xtask flash k3-sched-demo    # 构建 + 通过 scripts/flash 刷写
+./scripts/flash/k3-flash.sh           # 一键：构建 + 打包 itb + fastboot 刷写
+K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh   # 刷其他 rcpu1 bin
 ```
 
-详见 `scripts/flash`。
+详见 `scripts/flash/README.md`。
