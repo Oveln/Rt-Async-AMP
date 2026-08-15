@@ -19,8 +19,10 @@ RTASYNCSIZE  = "0x800000"
 RTASYNCDTBBASE = "0x83000000"
 
 # ── IPC shared memory ───────────────────────────────────────────────────────
+# 大小必须 ≥ ov-channels SharedMemory::<3> footprint 0x18700（同 K3_SHMSIZE
+# 注释）；与 its/rt-async-shm.dtsi reg、its/qemu-virt-amp.dts memreserve 同步。
 SHMBASE = "0x88000000"
-SHMSIZE = 69632
+SHMSIZE = "0x19000"
 
 # ── rt-async hart (core) assignment ─────────────────────────────────────────
 RTASYNCHART = 1
