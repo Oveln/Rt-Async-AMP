@@ -18,7 +18,7 @@
 - [六、系统测试情况](#六系统测试情况)
 - [七、遇到的主要问题和解决方法](#七遇到的主要问题和解决方法)
 - [八、仓库结构](#八仓库结构)
-- [附录：快速开始与构建](#附录快速开始与构建)
+- [九、使用方法](#九使用方法)
 
 ---
 
@@ -323,6 +323,7 @@ rt-async-amp/
 │   └── rt-async-k3/              # rt-async 侧应用（K3 RT24，sched_demo 抢占调度验证）
 ├── user-apps/                    # StarryOS 用户态测试程序（musl 交叉编译）
 │   ├── user-test-ipc/            #   基础 IPC 收发
+│   ├── user-test-mbox/           #   mailbox 自测（ioctl 软件注入 → APLIC → handler 全链路）
 │   ├── user-test-rpc/            #   RPC 四种调用模式
 │   └── user-test-sched/          #   三明治计时（端到端延迟 / 死锁复现用例）
 ├── modules/
@@ -339,17 +340,21 @@ rt-async-amp/
 ├── patches/
 │   ├── opensbi-amp.patch         # OpenSBI：hart 路由 + PIE 修复 + IPI 转发
 │   └── qemu-uart1.patch          # QEMU：第二路 UART @ 0x10002000 (IRQ 12)
-├── its/                          # 设备树源 + 宏头（编译期 cc -E → dtc 生成 .dtb，内嵌进 ELF .rodata）
-│   ├── rt-async-k3.dts           #   K3 RT24 rcpu1 设备树（U-Boot 不 handoff DTB）
-│   ├── qemu-virt-amp.dts         #   QEMU virt AMP 设备树
+├── its/                          # 设备树源 + 宏头（编译期 cc -E → dtc 生成 .dtb）
+│   ├── rt-async-k3.dts           #   K3 RT24 rcpu1 设备树（DTB 内嵌进 ELF .rodata）
+│   ├── qemu-virt-amp.dts         #   QEMU virt AMP 设备树（AP 视角，PLIC）
+│   ├── rt-async-qemu-virt-amp.dts#   QEMU virt AMP 设备树（RP 视角）
+│   ├── rt-async-shm.dtsi         #   跨核共享内存节点单一真相源（AP/RP 两端引用）
+│   ├── rt-async-ap.overlay.dts   #   共享窗 overlay（qemu-aia 的 dumpdtb 基线叠加用）
 │   ├── k3-pinctrl.h              #   K3_PADCONF / MUX_MODE* / EDGE_* / PULL_* / PAD_DS* 宏
 │   └── k3-clock.h                #   K3_CLK_* ID 宏（CCU 末端 gate 索引）
+├── envs/                         # 环境 profile（一等公民：qemu-plic / qemu-aia / k3-com260）
 ├── scripts/flash/                # K3 一键刷写（编译+打包 itb+fastboot）
 ├── xtask/                        # 【构建编排器】setup/build/run/install/clean/qemu 子命令
 ├── docs/
 │   ├── architecture.html         # 交互式架构文档（7 节图表，README §3 引用）
 │   └── assets/                   # 架构图 SVG / excalidraw 源文件
-├── amp.toml                      # 地址布局/构建参数/仓库 pin 的单一真相源
+├── amp.toml                      # 地址布局 + 上游 repo pin 的单一真相源（环境属性在 envs/）
 ├── Cargo.toml                    # workspace 定义（ov-channels v0.2.0 等依赖）
 ├── AGENTS.md                     # AI 编程助手协作指引（仓库结构 + 双仓工作流 + 开发规范）
 └── README.md                     # 本文件
@@ -359,16 +364,30 @@ rt-async-amp/
 
 ---
 
-## 附录：快速开始与构建
+## 九、使用方法
 
-本项目使用 [`cargo xtask`](xtask/) 作为构建编排器（取代 Makefile），所有克隆/打补丁、构建、运行、安装、清理均通过 xtask 子命令完成。子命令一览可用 `cargo xtask --help` 查看。
+本项目使用 [`cargo xtask`](xtask/) 作为构建编排器（取代 Makefile），所有克隆/打补丁、构建、运行、安装、清理均通过 xtask 子命令完成，子命令一览用 `cargo xtask --help` 查看。
 
-### 前置依赖
+### 9.1 环境模型
+
+**环境（environment）是一等公民**：`envs/<name>.toml` 声明该环境的 QEMU 机器参数、StarryOS 板级配置（tgoskits 内路径）、AP 侧 DTB 来源与 K3 打包 bin。产物按环境隔离在 `build/<env>/` 下，互不干扰。
+
+| 环境 | 定位 | 构建命令 | 运行/刷写 | `build/<env>/` 产物 |
+|---|---|---|---|---|
+| `qemu-plic` | 日常快速冒烟（秒级迭代） | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb` |
+| `qemu-aia` | AIA（APLIC+IMSIC）仿真，K3 AP 侧中断架构的对应物 | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见 9.5） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
+| `k3-com260` | K3 COM260 真板 | `cargo xtask build k3-com260` | RP：`./scripts/flash/k3-flash.sh`；AP：手动 fastboot+bootm（见 9.6） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
+
+> user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管地址布局与上游 repo pin；机器参数等环境属性在 `envs/`。
+
+### 9.2 前置依赖
 
 - **Rust 工具链**：`rustup`（安装见 [rustup.rs](https://rustup.rs)）+ `rustup target add riscv64imac-unknown-none-elf`
-- `riscv64-elf-gcc`（Homebrew：`brew install riscv64-elf-gcc`）
-- **Musl 工具链**：交叉编译 `user-apps` 所需（StarryOS 用），安装见下方
-- Ninja / Meson（构建定制 QEMU：`brew install ninja meson`）、Python 3
+- `riscv64-elf-gcc`（Homebrew：`brew install riscv64-elf-gcc`；Ubuntu：`gcc-riscv64-unknown-elf`）
+- **Musl 工具链**：交叉编译 `user-apps` 与 StarryOS 的 C 依赖（lwprintf）所需，安装见下
+- Ninja / Meson（构建定制 QEMU：`brew install ninja meson` / `sudo apt install ninja-build meson`）、Python 3
+- `cc` + `dtc`（设备树编译链；`sudo apt install device-tree-compiler`）
+- 仅 K3 刷写需要：`mkimage` / `lzop` / `fastboot` / pyserial（`pip3 install pyserial`）
 
 #### 安装 Musl 工具链
 
@@ -376,41 +395,104 @@ rt-async-amp/
 
 1. 从 [setup-musl releases](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 下载 `riscv64-linux-musl-cross`；
 2. 解压到某路径，例如 `/opt/riscv64-linux-musl-cross`；
-3. 将 `bin` 目录加入 `PATH`，例如：
+3. 加入 `PATH`：
 
    ```bash
    export PATH=/opt/riscv64-linux-musl-cross/bin:$PATH
+   # 也可 export RISCV64_MUSL_CROSS=/opt/riscv64-linux-musl-cross（xtask 会自动前置其 bin）
    ```
 
 安装后即可获得 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等工具。
 
-### 一键构建运行
-
-环境（environment）是一等公民：`envs/<name>.toml` 声明机器参数、StarryOS 板级配置与 DTB 来源，产物按环境隔离在 `build/<env>/`。三个环境：`qemu-plic`（快速冒烟）、`qemu-aia`（APLIC+IMSIC，K3 中断架构的仿真对应物）、`k3-com260`（真板）。
+### 9.3 首次搭建（qemu-plic 全链路）
 
 ```bash
-git submodule update --init --recursive   # 1. 初始化子模块
-cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU
-cargo xtask qemu                           # 3. 构建运行环境qemu
-cargo xtask build qemu-plic                # 4. 环境聚合构建（opensbi + starryos + bins + user-apps）
+git submodule update --init --recursive   # 1. 初始化子模块（rt-async / tgoskits）
+cargo xtask setup                          # 2. 克隆 + 打补丁 OpenSBI 与 QEMU（amp.toml pin 版本）
+cargo xtask qemu                           # 3. 源码构建定制 QEMU（含 rt-async 专用 UART1）
+cargo xtask build qemu-plic                # 4. 环境聚合构建（OpenSBI + StarryOS + RP bins + user-apps）
 make -C tgoskits/os/StarryOS rootfs  # 5. 下载 StarryOS rootfs 镜像（Starry-OS 官方 release）
-cargo xtask install --all                # 6. 将 user-apps 安装进 StarryOS rootfs
-cargo xtask run                            # 7. 启动双核 AMP（默认 qemu-plic；--env qemu-aia / --tmux 可选）
+cargo xtask install --all                # 6. 将 user-apps 安装进 rootfs
+cargo xtask run                            # 7. 启动双核 AMP
 ```
 
-### K3 实体板构建与刷写
+### 9.4 日常开发循环（QEMU 环境）
+
+启动后两路串口的观察方式：
+
+- **UART0 → 本终端 stdin/stdout**：OpenSBI 启动横幅 → StarryOS 启动日志 → `root@starry:/root #` 交互 shell。
+- **UART1（rt-async 侧）→ Unix socket** `/tmp/rt-async-uart.sock`，两种接法：
+  - `cargo xtask run`（前台）：另开终端 `socat - UNIX-CONNECT:/tmp/rt-async-uart.sock`。注意 QEMU 是 socket 服务端，**连接之前的启动期输出会丢**；
+  - `cargo xtask run --tmux`：tmux 左右分屏（左 QEMU、右 UART1），socat 先监听、QEMU 作客户端连接，**不丢启动期输出**（推荐）。
+
+想持续留档 UART1 日志给 `cargo xtask log` 跟踪，把 socat 输出 tee 到约定文件：
 
 ```bash
-cargo xtask build k3-com260    # 环境聚合：全部 rcpu1 bins + 打包 + StarryOS
-                              #   交付产物：build/k3-com260/esos.itb（RP 侧）
-                              #             build/k3-com260/starryos.uimg（AP 侧，fastboot bootm 用）
-./scripts/flash/k3-flash.sh                # RP 一键：编译 + 打包 itb + fastboot 刷写（K3_TARGET= 可换 bin）
-# 串口观察 R_UART0（115200 8N1）：sched_demo 输出交替的 H/L
+socat - UNIX-CONNECT:/tmp/rt-async-uart.sock | tee build/rt-async-uart.log
 ```
 
-> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 U-Boot 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 侧 StarryOS 经 `starryos.uimg` + fastboot `bootm` 启动（手动序列见 [`scripts/flash/README.md`](scripts/flash/README.md)）。刷写不进 xtask——xtask 的职责到产物为止。
+**正常冒烟标志**：UART0 上 OpenSBI 横幅 + StarryOS shell + `rt_shm: device initialized, phys base 0x88000000`；UART1 上 `[heartbeat] tick #N` 每 500ms 一条（demo bin）。
 
-### 常用子命令
+换 rt-async 固件（run 用 cargo 短名，不带平台前缀）：
+
+```bash
+cargo xtask run --bin console              # demo / console / console_interrupt
+```
+
+### 9.5 qemu-aia：AIA 仿真环境（当前仅 AP 侧）
+
+机器参数 `virt,aia=aplic-imsic`，StarryOS 侧 somehal 运行时按 FDT 探测，自动走 IMSIC+APLIC 路径（`OpenSBI: Platform IPI Device : aia-imsic` 即为生效标志）；AP 侧 DTB 由本环境机器 dumpdtb 导出基线、`fdtoverlay` 叠加共享窗节点（`its/rt-async-ap.overlay.dts`），中断拓扑自动正确，无需手写 imsic 节点。
+
+**当前边界（事实状态）**：AIA 是 StarryOS 侧的支持，**rt-async 暂不支持 AIA**（RP 侧只有 PLIC 驱动，而该机器无 PLIC，RP 侧会静默挂死）。因此 `run --env qemu-aia` 目前用于 **AP 侧 AIA 行为验证**（MSI 投递、stopei EOI 等先在仿真确认再到 K3 真板）；等 rt-async 补 APLIC/IMSIC 驱动后启用完整双端。详见 `envs/qemu-aia.toml` 注释。
+
+### 9.6 K3 真板（k3-com260）
+
+**构建（xtask 职责到产物为止）**：
+
+```bash
+cargo xtask build k3-com260
+# 交付两个产物：
+#   build/k3-com260/esos.itb       RP 侧：rcpu0 官方 esos + rcpu1 rt-async（默认 k3-sched-demo）
+#   build/k3-com260/starryos.uimg  AP 侧：StarryOS FIT（kernel + dtb）
+```
+
+**刷 RP 固件（一键，串口 fastboot）**：
+
+```bash
+./scripts/flash/k3-flash.sh                     # 构建 + 打包 itb + 刷写，板子最终停在 U-Boot 提示符
+K3_TARGET=k3-ipc-demo ./scripts/flash/k3-flash.sh   # 换其他 rcpu1 bin
+./scripts/flash/k3-flash.sh --no-build          # 复用已打包的 itb 重刷
+```
+
+**刷/启 AP 内核（手动三步，同一串口会话）**：
+
+```bash
+# U-Boot 侧：进入 fastboot，FIT 上传到 0x180000000（与 kernel/fdt 加载地址错开）
+fastboot -l 0x180000000 -s 0x04000000 usb 0
+# Host 侧：上传 starryos.uimg
+fastboot stage build/k3-com260/starryos.uimg
+# U-Boot 侧：Ctrl-C 退回提示符后启动（bootargs 已固化在设备树，无需 setenv）
+bootm 0x180000000
+```
+
+串口设备名在 `scripts/flash/flash.conf` 配置（Linux 默认 `/dev/ttyUSB0`=主 UART、`/dev/ttyUSB1`=R_UART0，115200）。
+
+> K3 的 rcpu0 跑固定复用的官方 esos，rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb 的不同节点加载（无 DTB handoff，DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像。详见 [`scripts/flash/README.md`](scripts/flash/README.md)。
+
+### 9.7 用户态应用（user-apps）开发循环
+
+user-apps 是 StarryOS 侧的 musl 静态二进制，两个环境的上板方式不同：
+
+```bash
+cargo xtask build user-test-rpc      # 单独构建（环境聚合构建也会带上）
+# qemu-plic：注入 rootfs 后在 StarryOS shell 里运行
+cargo xtask install --all            # 全部注入（或 install build/user-test-rpc --dst /user-test-rpc）
+cargo xtask run                      # shell 里执行 /user-test-rpc
+# k3-com260：板上无编译环境/网络时经串口传 base64 还原
+bash scripts/serial_send.sh build/user-test-ipc /tmp/user-test-ipc   # 输出脚本粘到板子串口
+```
+
+### 9.8 常用子命令速查
 
 ```bash
 # 环境聚合构建（一个环境一条命令，产物落 build/<env>/）
@@ -424,16 +506,16 @@ cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名（落平
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
 cargo xtask run --env qemu-aia # 启动指定环境的 QEMU AMP（--bin demo 换 RP bin，run 用短名）
-                              #   注：qemu-aia 目前仅 AP 侧可跑——rt-async 暂不支持
-                              #   AIA（RP 侧 PLIC 驱动在该机器挂死），见 envs/qemu-aia.toml
-cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志
+                              #   注：qemu-aia 目前仅 AP 侧可跑（见 9.5）
+cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志（tee 到 build/rt-async-uart.log）
 cargo xtask install --all    # 将 user-apps 安装进 StarryOS rootfs
 cargo xtask qemu             # 从源码构建带 UART1 的定制 QEMU
 cargo xtask clean --dist     # 清理构建产物（--dist 连带删除 opensbi/ 与 qemu/）
 cargo xtask completions fish # 生成 shell 补全脚本（bash/zsh/fish/...）
 ```
 
-### 说明
+### 9.9 约定说明
 
-- Musl 工具链（提供 `riscv64-linux-musl-gcc` / `riscv64-linux-musl-objcopy` 等）：从 [setup-musl](https://github.com/arceos-org/setup-musl/releases/tag/prebuilt) 预编译包安装，详见上方「安装 Musl 工具链」；
-- `amp.toml` 是所有地址常量的单一真相源，xtask 读取它驱动地址/layout 生成与 patch 模板渲染。
+- `amp.toml` 是地址常量与上游 repo pin 的单一真相源：patch 文件中的 `{VAR}` 模板变量在 `cargo xtask setup` 时由其顶层取值替换；板级 crate 的 `build.rs` 亦由它生成 `amp_gen.rs` 常量。机器参数等**环境属性**在 `envs/*.toml`。
+- 修改 `.dts`/`.dtsi` 后无需手动编译：`run` 时按 mtime 增量编译 DTB（`cc -E → dtc` 链，与 K3 `build.rs` 一致）。
+- AI 编程助手协作指引（仓库结构、双仓工作流、提交约定）见 [`AGENTS.md`](AGENTS.md)。
