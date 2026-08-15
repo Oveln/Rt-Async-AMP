@@ -51,6 +51,14 @@ QEMURAM = "256M"
 RT24RCPU1BASE = "0x100804000"
 RT24RCPU1SIZE = "0x300000"     # 3M，与 esos baremetal.ld 一致
 
+# K3 跨核共享内存窗（RCPU SRAM 起始；its/rt-async-k3.dts 与 tgoskits AP dts 的
+# rt-async-amp reg 与此对齐）。大小必须 ≥ ov-channels SharedMemory::<3>
+# footprint = 0x100 + 3×0x8200 = 0x18700（每 Channel = magic/version +
+# RingBuffer<128> 128×256B 消息），取整 0x19000。勿缩——AP 内核 is_valid()
+# 会遍历到 ch2.magic@+0x10500，用户态也要 mmap 全窗。
+K3_SHMBASE = "0xc0800000"
+K3_SHMSIZE = "0x19000"
+
 # K3 RT24 外设基址（rcpu1 视角，单一真相源；driver 当前硬编码但保持约定）
 K3_SYSTIMER  = "0xe4000000"   # SysTimer：mtime(+0xbff8全局)/mtimecmp(+0x4000+hart<<27)/MSIP(+0x0+hart<<27)
 K3_PLIC      = "0xe0000000"   # PLIC（自定义布局，stride hart<<27）

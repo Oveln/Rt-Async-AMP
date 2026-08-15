@@ -122,14 +122,24 @@
 		reg = <0x0 0xe0000000 0x0 0x4000000>;
 	};
 
-	// 跨核共享内存（与 AP 侧 rt_shm_ddr 对齐：DDR 0x104430000，68KB）。
-	// 已从 Audio SRAM 搬到 DDR——rcpu1 写 Audio SRAM 的数据 AP 读不到（疑似
-	// Secure/IOPMP 过滤或 dcache 一致性，未深查；官方 rpmsg 虽用 rcpu1+SRAM 但
-	// AP 经不同访问路径）。DDR 两核均能可靠读写（与官方 rpmsg data buffer 同在
-	// DDR，架构一致）。ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小。
-	// K3 的通知后端是硬件 mailbox（chip-k3-rt24 在 setup_interrupts 注册 NOTIFIER）。
-	rt-async@104430000 {
+	// 跨核共享内存（与 AP 侧 rt-async-amp/reserved rt_shm 对齐：RCPU SRAM 起始
+	// 0xc0800000，0x19000）。ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小。
+	// K3 通知后端是硬件 mailbox（setup_interrupts 注册）。
+	//
+	// 大小由 ov-channels SharedMemory::<3> 的实际 footprint 决定（勿缩）：
+	//   busy@+0x0（1B）；+0x100 起 3×Channel，每 Channel = magic/version(4B) +
+	//   RingBuffer<128> (128×256B 消息 + 索引) = 0x8200 → 总 footprint =
+	//   0x100 + 3×0x8200 = 0x18700，取整 0x19000。
+	//   （旧 16KB 窗口装不下：AP 内核 is_valid() 遍历到 ch1.magic@+0x8300 越出
+	//   窗口落入未映射页 → Supervisor Page Fault，2026-08-14 实锤。）
+	//
+	// 基址放 SRAM 起始：0xc086c000+0x19000 会超出 SRAM 末端 0xc0880000 且吞掉
+	// rcpu0 的 vring 保留区。代价：本窗在启动头 ~1s 是**还在执行的 SPL 代码**
+	// （SPL text 0xc0801000 起），且 U-Boot board_late_init 的 k3_clear_sram()
+	// 在 RP 上线 ~1.5s 会 memset 整个 512KB —— 故 RP 侧所有窗口写入必须延迟到
+	// 上线 3s 之后（见 shm_ping.rs），自愈重初始化作后备。
+	rt-async@c0800000 {
 		compatible = "ov,rt-async-amp";
-		reg = <0x1 0x04430000 0x0 0x11000>;
+		reg = <0x0 0xc0800000 0x0 0x19000>;
 	};
 };

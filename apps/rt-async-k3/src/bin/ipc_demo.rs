@@ -4,7 +4,7 @@
 //!   - 收：AP 写 mailbox4（0xCAC91000）FIFO ch0 → rcpu1 IRQ 69 → mbox_isr
 //!     → MBX3.recv().await 唤醒
 //!   - 发：intercom::send_notify_ipi() → MBX3.signal(1)（ch1）→ AP IRQ 217
-//! 共享内存 0x104430000（DDR，ov,rt-async-amp 节点，ov-shm 驱动 probe）。
+//! 共享内存 0xc0800000（RCPU SRAM，ov,rt-async-amp 节点，ov-shm 驱动 probe）。
 //!
 //! mailbox 通道约定：物理 **mailbox4**（esos 侧 DTB status "disabled"，空闲）
 //! 是 rt-async ↔ AP 的核间信令通道，Rust 变量名沿用 `MBX3`（= DT 唯一
@@ -25,6 +25,7 @@ use core::pin::Pin;
 use chip_k3_rt24::K3Rt24;
 use executor::priority::Priority;
 use executor::spawner::Spawner;
+use fugit::ExtU64;
 use platform::arch::TrapFrame;
 
 // ── 强制链接 chip crate ──────────────────────────────────────────────────
@@ -40,6 +41,10 @@ include!(concat!(env!("OUT_DIR"), "/build_time.rs"));
 /// 双核 IPC 服务任务：弹性忙等处理 + mailbox4 外部中断唤醒。
 #[executor::task]
 async fn task_ipc() {
+    // SRAM 写入门控（同 shm_ping.WRITE_GATE_MS）：窗口头 ~1s 是还在执行的
+    // SPL 代码、~1.5s 被 U-Boot k3_clear_sram() 整窗 memset，提前 init 写入
+    // 的 magic 会被抹掉、AP 侧 is_valid() 永假。
+    futures::timer::after(3000.millis()).await;
     rt_async_k3::intercom::init();
 
     loop {

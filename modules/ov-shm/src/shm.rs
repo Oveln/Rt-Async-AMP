@@ -4,9 +4,9 @@
 //! 运行期经 [`base`] / [`size`] 取用——取代旧 `amp.toml` → `amp_gen.rs`
 //! → `SHMBASE` 编译期常量的地址来源。
 //!
-//! 节点与 notifier 子节点统一由 `its/rt-async-shm.dtsi` 生成（单一真相源，
+//! 节点由各板 DTS 手写（K3：`its/rt-async-k3.dts`；QEMU virt：对应 dts），
 //! AP 侧 StarryOS rt_shm 与 rt-async 侧本驱动匹配同一个 compatible
-//! `ov,rt-async-amp`，两侧 DTS 经宏参数化引用同一 dtsi）。
+//! `ov,rt-async-amp`，地址/大小两侧对齐（K3 对齐 amp.toml K3_SHMBASE/SIZE）。
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -58,7 +58,7 @@ pub fn size() -> usize {
 
 /// 将共享内存写入对 AP 可见。
 ///
-/// AMP 无跨核一致性，RP 写共享内存后必须确保 store 到达物理内存（DDR），
+/// AMP 无跨核一致性，RP 写共享内存后必须确保 store 到达物理内存（K3 为 RCPU SRAM），
 /// 再发通知让 AP 读取。CVA6 的 store 可能滞留在 store/write buffer 或
 /// write-back dcache 中。`fence iorw,iorw` 是全内存屏障（对普通内存与 MMIO
 /// 均排序，与 `fence rw,rw` 对普通内存的排序能力等价），排空 store buffer
