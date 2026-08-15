@@ -5,13 +5,15 @@
 # 机器参数即当初 feat/riscv-aia 验证用的 virt,aia=aplic-imsic（当时是
 # 临时改 qemu toml 跑的，本 profile 把它固化下来）。
 #
-# 已知边界：该机器无 PLIC → rt-async(hart1) 的外部中断（UART1 IRQ12）不可用，
-# console 走轮询、IPI 走 CLINT MSIP（aia 机器仍保留 clint@2000000，实测 dumpdtb
-# 确认）。RP 侧若需中断需后续给 chip-qemu-virt-rt 补 APLIC-direct/IMSIC 驱动。
+# 【当前边界（事实状态，暂不解决）】AIA 是 StarryOS 侧的支持；rt-async
+# 暂不支持 AIA（RP 侧只有 PLIC 驱动）。该机器无 PLIC → RP 侧 PLIC probe
+# 写不存在地址触发 access fault，静默挂死。故 run --env qemu-aia 目前
+# 只有 AP 侧可用（OpenSBI/StarryOS/rt_shm 正常），RP 侧会挂起；等
+# rt-async 补 APLIC/IMSIC 驱动后再启用完整双端。
 
 [env]
 platform = "qemu"
-desc = "QEMU virt 双核 AMP（AIA，K3 中断架构仿真对应物）"
+desc = "QEMU virt 双核 AMP（AIA，K3 中断架构仿真对应物；RP 侧暂不可跑）"
 
 [starry]
 # 与 qemu-plic 同一份：somehal 运行时按 FDT 探测 PLIC vs IMSIC/APLIC。
@@ -32,7 +34,3 @@ ram = "256M"
 # （qemu-plic 手写 dts 里的该条目本就无效），行为等价。
 source = "dumpdtb"
 overlay = "its/rt-async-ap.overlay.dts"
-# RP 侧：该机器无 PLIC——dtb 裁掉 plic 节点（-DOV_NO_PLIC），否则 PLIC
-# driver probe 会写不存在的地址 → access fault → RP 侧静默挂死（实测）。
-# 裁剪后 INTC 槽位为空，setup_console_irq 自动跳过。
-rp_defines = ["OV_NO_PLIC"]

@@ -45,7 +45,8 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ### 推荐：xtask（处理 target、产物拷贝、地址布局等）
 
 环境是一等公民（`envs/<name>.toml`）：`qemu-plic`（快速冒烟）、`qemu-aia`
-（AIA 中断架构仿真，K3 对应物）、`k3-com260`（真板）。产物按环境隔离在
+（AIA 中断架构仿真，K3 对应物；**仅 AP 侧可跑**——rt-async 暂不支持 AIA，
+RP 侧会挂，见 envs/qemu-aia.toml）、`k3-com260`（真板）。产物按环境隔离在
 `build/<env>/` 下。
 
 ```bash

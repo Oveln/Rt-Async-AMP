@@ -424,6 +424,8 @@ cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名（落平
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
 cargo xtask run --env qemu-aia # 启动指定环境的 QEMU AMP（--bin demo 换 RP bin，run 用短名）
+                              #   注：qemu-aia 目前仅 AP 侧可跑——rt-async 暂不支持
+                              #   AIA（RP 侧 PLIC 驱动在该机器挂死），见 envs/qemu-aia.toml
 cargo xtask log              # 彩色前缀跟踪 rt-async 的 UART1 日志
 cargo xtask install --all    # 将 user-apps 安装进 StarryOS rootfs
 cargo xtask qemu             # 从源码构建带 UART1 的定制 QEMU

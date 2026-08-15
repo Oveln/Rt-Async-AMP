@@ -140,14 +140,6 @@ impl Board for QemuVirtRt {
 /// 重新 disable_all_sources 的逻辑，本方案需改为事件驱动（如 StarryOS
 /// 完成后主动 IPI 通知），否则 priority 会被二次覆盖。
 fn setup_console_irq() {
-    // 无 INTC（如 qemu-aia 环境：该机器无 PLIC，RP dtb 不声明 plic 节点，
-    // INTC 槽位为空）时跳过——对不存在的控制器写 MMIO 会触发 access fault。
-    // UART1 RX 中断在该环境下不可用，console 走轮询（见 envs/qemu-aia.toml）。
-    if platform::driver::INTC.get().is_none() {
-        log::info!("setup_console_irq: no INTC, skip (console IRQ unavailable)");
-        return;
-    }
-
     const TARGET_PRIO: u32 = 2;
     // 等 hart0 启动窗口（含 PLIC 初始化）。3 秒留足裕量。
     const HART0_BOOT_SECS: u64 = 3;

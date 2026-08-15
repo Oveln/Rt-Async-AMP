@@ -44,10 +44,6 @@ pub struct EnvProfile {
     pub starry_artifact: String,
     pub qemu: Option<QemuMachine>,
     pub dtb: Option<DtbSource>,
-    /// RP 侧 dts（缺省 its/rt-async-qemu-virt-amp.dts）。
-    pub rp_dts: Option<String>,
-    /// RP dts 额外 cpp 宏（如 qemu-aia 的 OV_NO_PLIC：裁掉 plic 节点）。
-    pub rp_defines: Vec<String>,
     /// k3：打包进 esos.itb rcpu1-fw 节点的默认 bin（RTASYNC_BINS target_name）。
     pub pack_bin: Option<String>,
 }
@@ -123,8 +119,7 @@ fn parse(name: &str, path: &Path) -> EnvProfile {
             .to_string(),
     });
 
-    let dtb_table = doc.get("dtb").and_then(|v| v.as_table());
-    let dtb = dtb_table.map(|t| {
+    let dtb = doc.get("dtb").and_then(|v| v.as_table()).map(|t| {
         let source = t.get("source").and_then(|v| v.as_str()).unwrap_or("dts");
         match source {
             "dts" => DtbSource::Dts(str_of(t, "dts", path)),
@@ -134,19 +129,6 @@ fn parse(name: &str, path: &Path) -> EnvProfile {
             other => panic!("{}: dtb.source 未知取值 {other}（dts | dumpdtb）", path.display()),
         }
     });
-    let rp_dts = dtb_table
-        .and_then(|t| t.get("rp_dts"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let rp_defines = dtb_table
-        .and_then(|t| t.get("rp_defines"))
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .map(|v| v.as_str().expect("dtb.rp_defines 必须是字符串数组").to_string())
-                .collect()
-        })
-        .unwrap_or_default();
 
     let pack_bin = doc
         .get("pack")
@@ -165,8 +147,6 @@ fn parse(name: &str, path: &Path) -> EnvProfile {
         starry_artifact,
         qemu,
         dtb,
-        rp_dts,
-        rp_defines,
         pack_bin,
     }
 }

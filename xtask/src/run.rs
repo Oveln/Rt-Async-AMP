@@ -10,24 +10,18 @@ use crate::env_profile::{DtbSource, EnvProfile, QemuMachine};
 const TMUX_SESSION: &str = "rt-async-amp";
 const UART_SOCK: &str = "/tmp/rt-async-uart.sock";
 
-/// rt-async 专属 DTB（hart1 + UART1 视角）缺省源。经 QEMU loader 摆到
+/// rt-async 专属 DTB（hart1 + UART1 视角）源。经 QEMU loader 摆到
 /// RTASYNCDTBBASE，board_init 的 esos 同款扫描从此地址认领
-/// compatible="ov,rt-async" 的 DTB。env toml 可用 [dtb].rp_dts 覆盖。
+/// compatible="ov,rt-async" 的 DTB。
 const RTASYNC_DTS: &str = "its/rt-async-qemu-virt-amp.dts";
 
 /// 共享的 dts→dtb 编译逻辑：按 mtime 增量编译。
 ///
 /// 编译链与 K3（`modules/chip-k3-rt24/build.rs`）一致：
-/// `cc -E`（展开 #include/#define，-I its/，可附 -D 宏）→ `dtc`（求值算术
-/// 表达式）。DTS 经 `#include "rt-async-shm.dtsi"` 引用跨核共享内存节点
-/// 单一真相源，故依赖追踪需包含 its/ 下所有 .dts/.dtsi 的 mtime。
-fn compile_dtb(
-    root: &Path,
-    out_dir: &Path,
-    dts_rel: &str,
-    dtb_rel: &str,
-    defines: &[String],
-) -> PathBuf {
+/// `cc -E`（展开 #include/#define，-I its/）→ `dtc`（求值算术表达式）。
+/// DTS 经 `#include "rt-async-shm.dtsi"` 引用跨核共享内存节点单一真相源，
+/// 故依赖追踪需包含 its/ 下所有 .dts/.dtsi 的 mtime。
+fn compile_dtb(root: &Path, out_dir: &Path, dts_rel: &str, dtb_rel: &str) -> PathBuf {
     let its_dir = root.join("its");
     // dts_rel 形如 "its/<name>.dts"，含 its/ 前缀，故从 root join（勿与 its_dir 再拼）。
     let dts = root.join(dts_rel);
@@ -51,16 +45,11 @@ fn compile_dtb(
         eprintln!("DTB: compiling {} -> {}", dts.display(), dtb.display());
         std::fs::create_dir_all(out_dir).unwrap();
 
-        // 1. C 预处理：展开 #include/#define（与 K3 build.rs 一致），
-        //    可附环境声明的 -D 宏（如 OV_NO_PLIC 裁剪 plic 节点）。
-        let mut cpp = Command::new("cc");
-        cpp.args(["-E", "-P", "-nostdinc", "-undef", "-x", "assembler-with-cpp"])
+        // 1. C 预处理：展开 #include/#define（与 K3 build.rs 一致）。
+        let cpp_out = Command::new("cc")
+            .args(["-E", "-P", "-nostdinc", "-undef", "-x", "assembler-with-cpp"])
             .arg("-I")
-            .arg(&its_dir);
-        for d in defines {
-            cpp.arg(format!("-D{d}"));
-        }
-        let cpp_out = cpp
+            .arg(&its_dir)
             .arg(&dts)
             .output()
             .unwrap_or_else(|_| panic!("cc (C compiler) not found"));
@@ -87,7 +76,7 @@ fn compile_dtb(
 fn ensure_ap_dtb(root: &Path, profile: &EnvProfile, machine: &QemuMachine) -> PathBuf {
     let out_dir = profile.env_build_dir(root);
     match profile.dtb.as_ref().expect("qemu 环境的 env toml 缺 [dtb] 节") {
-        DtbSource::Dts(dts) => compile_dtb(root, &out_dir, dts, "ap.dtb", &[]),
+        DtbSource::Dts(dts) => compile_dtb(root, &out_dir, dts, "ap.dtb"),
         DtbSource::DumpdtbOverlay { overlay } => {
             dumpdtb_overlay(root, &out_dir, machine, overlay)
         }
@@ -292,9 +281,7 @@ fn prepare_image(root: &Path, profile: &EnvProfile, bin: &RtAsyncBin) -> AmpImag
 
     let machine = profile.qemu.as_ref().expect("qemu 环境的 env toml 缺 [qemu] 节");
     let dtb = ensure_ap_dtb(root, profile, machine);
-    // RP 侧 DTB：缺省源 + 环境宏（qemu-aia 裁掉 plic 节点）。
-    let rp_dts = profile.rp_dts.as_deref().unwrap_or(RTASYNC_DTS);
-    let rtasync_dtb = compile_dtb(root, &build, rp_dts, "rt-async.dtb", &profile.rp_defines);
+    let rtasync_dtb = compile_dtb(root, &build, RTASYNC_DTS, "rt-async.dtb");
     AmpImage { app_bin, dtb, rtasync_dtb }
 }
 
