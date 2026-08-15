@@ -100,7 +100,7 @@ fn dumpdtb_overlay(root: &Path, out_dir: &Path, machine: &QemuMachine, overlay_d
         .ok()
         .map(|s| {
             s.trim()
-                == format!("{}\n{}\n{}", machine.machine, machine.smp, overlay_dts)
+                == format!("{}\n{}\n{}\n{}", machine.machine, machine.smp, machine.ram, overlay_dts)
         })
         .unwrap_or(false)
         && std::fs::metadata(&dtb)
@@ -173,7 +173,7 @@ fn dumpdtb_overlay(root: &Path, out_dir: &Path, machine: &QemuMachine, overlay_d
             String::from_utf8_lossy(&out.stderr)
         );
 
-        std::fs::write(&stamp, format!("{}\n{}\n{}\n", machine.machine, machine.smp, overlay_dts))
+        std::fs::write(&stamp, format!("{}\n{}\n{}\n{}\n", machine.machine, machine.smp, machine.ram, overlay_dts))
             .unwrap();
     }
     dtb
@@ -260,11 +260,9 @@ fn prepare_image(root: &Path, profile: &EnvProfile, bin: &RtAsyncBin) -> AmpImag
     let opensbi_fw = build.join("fw_dynamic.bin");
     let app_bin = build.join(bin.out);
     let starryos_bin = build.join(&profile.starry_artifact);
-    let _rootfs = crate::util::resolve_rootfs(root);
-
     assert!(
         opensbi_fw.exists(),
-        "Run 'cargo xtask build --env {}'（或 build opensbi）first.",
+        "Run 'cargo xtask build {}'（或 build opensbi）first.",
         profile.name
     );
     assert!(
@@ -391,7 +389,12 @@ pub fn run_tmux_bin(root: &Path, cfg: &Config, profile: &EnvProfile, bin: &RtAsy
         "server=off",
         true,
     );
-    let qemu_cmd = argv.join(" ");
+    // 单引号包裹每个参数（tmux 内 sh -c 拼接），防含空格路径被拆分
+    let qemu_cmd = argv
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     let st = Command::new("tmux")
         .args([

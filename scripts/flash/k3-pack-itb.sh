@@ -27,7 +27,7 @@ ELF_SRC="${ELF_SRC:-build/k3-com260/rt-async-k3-sched-demo.elf}"   # 相对 repo
 # ── 0. preflight ────────────────────────────────────────────────────────────
 for t in mkimage lzop; do
     if ! command -v "$t" >/dev/null 2>&1; then
-        echo "✗ 缺少工具: $t (brew install u-boot-tools lzop)" >&2
+        echo "✗ 缺少工具: $t（Debian/Ubuntu: apt install u-boot-tools lzop；macOS: brew install u-boot-tools lzop）" >&2
         exit 1
     fi
 done

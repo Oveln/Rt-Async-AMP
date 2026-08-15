@@ -99,6 +99,8 @@ fn parse(name: &str, path: &Path) -> EnvProfile {
 
     let starry = table(&doc, "starry", path);
     let starry_config = str_of(starry, "config", path);
+    // smp 必须写整数（如 smp = 1）；误写成字符串 "1" 会被 as_integer() 静默
+    // 忽略，qemu 环境将不传 --smp，StarryOS 抢占 hart1 导致 AMP 卡死。
     let starry_smp = starry.get("smp").and_then(|v| v.as_integer()).map(|v| v as u32);
     let starry_artifact = str_of(starry, "artifact", path);
 
