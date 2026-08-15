@@ -17,18 +17,22 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── modules/                   ← 板级 crate（依赖 rt-async 的 platform 契约层）
 │   ├── chip-k3-rt24/          ←   K3 RT24 rcpu1 板级驱动（pinctrl/uart/clint/plic/...）
 │   ├── chip-qemu-virt-rt/     ←   QEMU virt 仿真板级驱动
+│   ├── ov-shm/                ←   跨核共享内存抽象（DT probe 认领共享窗）
 │   └── ov-rpc/                ←   跨核 RPC
 ├── apps/
-│   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，构建产物 → build/*.elf）
-│   ├── rt-async-app/          ←   QEMU virt 固件
-│   └── rt-async-k3-app/       ←   K3 用户态应用
+│   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，产物 → build/k3-com260/*.elf）
+│   └── rt-async-app/          ←   QEMU virt 固件
+├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
+│   ├── user-test-{ipc,mbox,rpc,sched}/   ←   AMP 测试程序
+│   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
+├── scripts/flash/             ←   K3 ITB 打包脚本（k3-pack-itb.sh）+ 固定 payload
 ├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
 ├── amp.toml                   ←   QEMU 运行所需地址布局 + 上游 pin（其余地址在 DT/dts）
 ├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
-└── build/                     ←   构建产物（.elf/.bin/.dtb，不入 git）
+└── build/                     ←   构建产物（.elf/.bin/.dtb/.itb/.uimg，不入 git）
 ```
 
 - **子模块 `rt-async`**：内核 + 平台抽象，独立 workspace，集成分支 `main`。
@@ -267,7 +271,7 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 - 共享状态读写必须在 `critical_section::with()` 中；手动 `Sync` impl 须注释安全性依据；
   每个 `unsafe` 块上方注释说明为何安全。
 - `log::info!()`/`log::error!()` 输出到 console UART，阻塞写，**中断上下文勿高频打印**。
-- 构建产物（`build/*.elf`、`*.bin`、`*.dtb`）不入 git，由 build.rs / xtask 派生。
+- 构建产物（`build/*.elf`、`*.bin`、`*.dtb`、`*.itb`、`*.uimg`）不入 git，由 build.rs / xtask 派生。
 - **过程中产生的设计文档、计划文档不入 git**（如 `docs/superpowers/`），除非用户明确要求。
 - **地址布局的真相源分层**：`amp.toml` 只管 QEMU 运行所需（引导链 + 补丁 +
   loader + 上游 pin，均为"能解析 DT 之前"就要用的值）；共享内存窗口以
@@ -288,7 +292,7 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 
 1. 在 `apps/<app>/src/bin/` 加 bin 文件，`Cargo.toml` 加 `[[bin]]`。
 2. `xtask/src/build.rs` 的 `RTASYNC_BINS` 注册表加一项（`name` / `target_name` /
-   `platform` / `out` / `app_dir` / `package`）。
+   `platform` / `out` / `app_dir` / `package` / `target` / `artifact`）。
 3. `cargo xtask build <target_name>` 验证。
 
 ### 刷写 K3 真板

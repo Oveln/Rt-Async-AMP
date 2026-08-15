@@ -62,7 +62,7 @@ K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，�
 
 | 环境 | 构建命令 | 运行/刷写 | `build/<env>/` 产物 |
 |---|---|---|---|
-| `qemu-plic` | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb` |
+| `qemu-plic` | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb`（dtb 首次 run 时自动生成） |
 | `qemu-aia` | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见下） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
 | `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（RP/AP 各一套，见下文 K3 小节） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
 
@@ -75,7 +75,7 @@ K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，�
 - **Musl 工具链**：交叉编译 `user-apps` 与 StarryOS 的 C 依赖（lwprintf）所需，安装见下
 - Ninja / Meson（构建定制 QEMU：`brew install ninja meson` / `sudo apt install ninja-build meson`）、Python 3
 - `cc` + `dtc`（设备树编译链；`sudo apt install device-tree-compiler`）
-- 仅 K3 刷写需要：`mkimage` / `lzop` / `fastboot` / pyserial（`pip3 install pyserial`）
+- 仅 K3 刷写需要：`mkimage` / `lzop` / `fastboot`
 
 #### 安装 Musl 工具链
 
