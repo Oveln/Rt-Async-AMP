@@ -6,6 +6,8 @@ publish = false
 
 [dependencies]
 ov-channels = { workspace = true, features = ["std", "flags"] }
+# 仅用 NOTIFY_FLAG 等协议常量（method_id 标志位约定，单一真相源）
+ov-rpc = { path = "../../modules/ov-rpc" }
 serde = { workspace = true }
 postcard = { workspace = true }
 libc = "0.2"

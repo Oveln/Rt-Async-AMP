@@ -1006,6 +1006,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "ov-channels",
+ "ov-rpc",
  "postcard",
  "serde",
  "xtask",
