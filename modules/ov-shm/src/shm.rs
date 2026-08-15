@@ -7,7 +7,8 @@
 //! 节点定义：K3 手写在 `its/rt-async-k3.dts`；QEMU virt 两侧 DTS 经宏
 //! 参数化引用单一真相源 `its/rt-async-shm.dtsi`。AP 侧 StarryOS rt_shm 与
 //! rt-async 侧本驱动匹配同一个 compatible `ov,rt-async-amp`，地址/大小
-//! 两侧对齐（K3 对齐 amp.toml K3_SHMBASE/SIZE，QEMU 对齐 SHMBASE/SHMSIZE）。
+//! 两侧对齐：K3 对齐 its/rt-async-k3.dts + tgoskits AP dts，QEMU 对齐
+//! its/rt-async-shm.dtsi（amp.toml 不再持有这些值）。
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 

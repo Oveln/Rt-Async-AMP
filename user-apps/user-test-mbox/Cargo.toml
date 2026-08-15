@@ -8,5 +8,3 @@ publish = false
 rtshm-abi = { path = "../rtshm-abi" }
 libc = "0.2"
 
-[build-dependencies]
-xtask = { path = "../../xtask" }
