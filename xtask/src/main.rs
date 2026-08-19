@@ -102,6 +102,7 @@ fn main() {
                     build::user_test_mbox(&root, &cfg);
                     build::user_test_rpc(&root, &cfg);
                     build::user_test_sched(&root, &cfg);
+                    build::user_test_bench(&root, &cfg);
                     eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
                 }
                 "opensbi" => {
@@ -116,6 +117,8 @@ fn main() {
                 "user-test-mbox" => build::user_test_mbox(&root, &cfg),
                 "user-test-rpc" => build::user_test_rpc(&root, &cfg),
                 "user-test-sched" => build::user_test_sched(&root, &cfg),
+                "user-test-bench" => build::user_test_bench(&root, &cfg),
+                "user-test-bench-cbo" => build::user_test_bench_cbo(&root, &cfg),
                 // 平台聚合：构建该平台所有 rt-async bin（落平台默认环境目录）。
                 // qemu/k3 先于 env 名匹配，新增同名环境会被此分支遮蔽。
                 "qemu" | "k3" => {
@@ -145,7 +148,7 @@ fn main() {
                             eprintln!("  {}", b.target_name);
                         }
                         eprintln!("\nplatform aggregates: qemu, k3");
-                        eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-mbox, user-test-rpc, user-test-sched");
+                        eprintln!("\nother targets: all, opensbi, starryos, user-test-ipc, user-test-mbox, user-test-rpc, user-test-sched, user-test-bench");
                         std::process::exit(1);
                     });
                     let env = env_profile::default_for_platform(&envs, bin.platform);
@@ -186,7 +189,7 @@ fn main() {
         Cmd::Log => run::log(&root),
         Cmd::Install { file, dst, all } => {
             if all {
-                for name in ["user-test-ipc", "user-test-mbox", "user-test-rpc", "user-test-sched"] {
+                for name in ["user-test-ipc", "user-test-mbox", "user-test-rpc", "user-test-sched", "user-test-bench"] {
                     let src = root.join("build").join(name);
                     if src.exists() {
                         install::run(&root, &src.to_string_lossy(), &format!("/{name}"));

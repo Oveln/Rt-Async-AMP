@@ -4,7 +4,8 @@
 //!   - 收：AP 写 mailbox4（0xCAC91000）FIFO ch0 → rcpu1 IRQ 69 → mbox_isr
 //!     → MBX3.recv().await 唤醒
 //!   - 发：intercom::send_notify_ipi() → MBX3.signal(1)（ch1）→ AP IRQ 217
-//! 共享内存 0xc0800000（RCPU SRAM，ov,rt-async-amp 节点，ov-shm 驱动 probe）。
+//! 共享内存物理位于 RCPU SRAM 起始（主域视图 0xc0800000 / RP 本地别名 0x0，
+//! ov,rt-async-amp 节点，ov-shm 驱动 probe）。
 //!
 //! mailbox 通道约定：物理 **mailbox4**（esos 侧 DTB status "disabled"，空闲）
 //! 是 rt-async ↔ AP 的核间信令通道，Rust 变量名沿用 `MBX3`（= DT 唯一
@@ -25,7 +26,6 @@ use core::pin::Pin;
 use chip_k3_rt24::K3Rt24;
 use executor::priority::Priority;
 use executor::spawner::Spawner;
-use fugit::ExtU64;
 use platform::arch::TrapFrame;
 
 // ── 强制链接 chip crate ──────────────────────────────────────────────────
@@ -38,14 +38,13 @@ static _FORCE_LINK_CHIP_K3_RT24: K3Rt24 = K3Rt24;
 // 编译期生成的本 ELF 构建时间（build.rs → OUT_DIR/build_time.rs）。
 include!(concat!(env!("OUT_DIR"), "/build_time.rs"));
 
-/// 双核 IPC 服务任务：弹性忙等处理 + mailbox4 外部中断唤醒。
+/// 双核 IPC 服务任务：等待 AP 侧 init + 弹性忙等处理 + mailbox4 外部中断唤醒。
 #[executor::task]
 async fn task_ipc() {
-    // SRAM 写入门控（同 shm_ping.WRITE_GATE_MS）：窗口头 ~1s 是还在执行的
-    // SPL 代码、~1.5s 被 U-Boot k3_clear_sram() 整窗 memset，提前 init 写入
-    // 的 magic 会被抹掉、AP 侧 is_valid() 永假。
-    futures::timer::after(3000.millis()).await;
-    rt_async_k3::intercom::init();
+    // 共享窗 init 已迁至 AP 内核 rt_shm probe 期（时机确定性在 SPL /
+    // U-Boot memset / bootm 缓存 flush 之后），本侧只读等待；10s 回退兼容
+    // 旧内核（本地 init）。
+    rt_async_k3::intercom::wait_ready(10, 10_000).await;
 
     loop {
         // 弹性忙等处理所有消息，每个 Notify 响应立即回 IPI。
@@ -63,6 +62,10 @@ fn main(spawner: Pin<&'static Spawner<4>>) {
     platform::console().write(b")\n");
 
     spawner.spawn(Priority::new(2), task_ipc().unwrap());
+    // magic 自愈看门狗（P3，低于 IPC 服务任务）：启动链迟到脏行写回会在
+    // t≈7~24s 清掉通道 magic（板上实锤），无看门狗则 AP 侧 is_valid() 永假、
+    // 用户态程序 5s 超时。详见 watchdog.rs 模块文档。
+    spawner.spawn(Priority::new(3), rt_async_k3::watchdog::magic_watchdog().unwrap());
     platform::console().write(b"tasks spawned, scheduler running\n");
 }
 

@@ -123,8 +123,11 @@
 	};
 
 	// 跨核共享内存（与 AP 侧 rt-async-amp/reserved rt_shm 对齐：RCPU SRAM 起始
-	// 0xc0800000，0x19000）。ov-shm 的 ShmDriver probe 读本节点 reg 得基址/大小。
-	// K3 通知后端是硬件 mailbox（setup_interrupts 注册）。
+	// 0xc0800000，0x19000——AP 侧主域地址是物理真相源，本节点故意写 RP 侧
+	// **RCPU 本地 SRAM 别名窗口**地址：0x0..0x80000 镜像 0xC080_0000（手册 6.2，
+	// rtbench 实测本地端口冷读 101ns/行 vs 主域端口 708ns/行 = 7×，且绕开
+	// M2F 桥与 AP 流量的端口仲裁）。ov-shm 的 ShmDriver probe 读本节点 reg
+	// 得基址/大小。K3 通知后端是硬件 mailbox（setup_interrupts 注册）。
 	//
 	// 大小由 ov-channels SharedMemory::<3> 的实际 footprint 决定（勿缩）：
 	//   busy@+0x0（1B）；+0x100 起 3×Channel，每 Channel = magic/version(4B) +
@@ -133,13 +136,14 @@
 	//   （旧 16KB 窗口装不下：AP 内核 is_valid() 遍历到 ch1.magic@+0x8300 越出
 	//   窗口落入未映射页 → Supervisor Page Fault，2026-08-14 实锤。）
 	//
-	// 基址放 SRAM 起始：0xc086c000+0x19000 会超出 SRAM 末端 0xc0880000 且吞掉
-	// rcpu0 的 vring 保留区。代价：本窗在启动头 ~1s 是**还在执行的 SPL 代码**
-	// （SPL text 0xc0801000 起），且 U-Boot board_late_init 的 k3_clear_sram()
-	// 在 RP 上线 ~1.5s 会 memset 整个 512KB —— 故 RP 侧所有窗口写入必须延迟到
+	// 物理位置在 SRAM 起始（主域视图 0xc0800000，别名视图 0x0）：
+	// 0xc086c000+0x19000 会超出 SRAM 末端 0xc0880000 且吞掉 rcpu0 的 vring
+	// 保留区。代价：本窗在启动头 ~1s 是**还在执行的 SPL 代码**（SPL text
+	// 主域 0xc0801000 起），且 U-Boot board_late_init 的 k3_clear_sram() 在
+	// RP 上线 ~1.5s 会 memset 整个 512KB —— 故 RP 侧所有窗口写入必须延迟到
 	// 上线 3s 之后（见 shm_ping.rs），自愈重初始化作后备。
-	rt-async@c0800000 {
+	rt-async@0 {
 		compatible = "ov,rt-async-amp";
-		reg = <0x0 0xc0800000 0x0 0x19000>;
+		reg = <0x0 0x00000000 0x0 0x19000>;
 	};
 };

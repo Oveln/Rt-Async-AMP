@@ -20,6 +20,7 @@
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 
+pub mod cache;
 mod client;
 mod macros;
 mod server;
@@ -31,7 +32,14 @@ pub type RequestId = u64;
 
 pub use client::{RecvError, RpcClient};
 pub use ov_channels::SendError;
-pub use server::{DeserializeFailed, HandledKind, ProcessResult, RpcHandler, RpcServer};
+#[cfg(feature = "stamps")]
+pub use server::stamp;
+// stamp_idx 是纯常量表（dispatch 四截下标 ABI），无条件导出——PING 类
+// 固定 ABI 元组在无 stamps 构建下也要引用它（戳值恒 0）。
+pub use server::stamp_idx;
+pub use server::{
+    DeserializeFailed, HandledKind, ProcessResult, RESP_SEND_FAILS, RpcHandler, RpcServer,
+};
 
 // 为宏内部使用重新导出 paste
 #[doc(hidden)]

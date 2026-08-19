@@ -38,6 +38,7 @@ macro_rules! define_service {
         $(#[$meta:meta])*
         $vis:vis $name:ident {
             $(
+                $(#[cfg($fcfg:meta)])?
                 $const_name:ident : $mid:literal => $kind:ident $method:ident
                     ($($arg:ident : $aty:ty),* $(,)?) $(-> $ret:ty)?;
             )*
@@ -48,6 +49,7 @@ macro_rules! define_service {
 
         impl $name {
             $(
+                $(#[cfg($fcfg)])?
                 #[allow(non_upper_case_globals)]
                 pub const $const_name: $crate::MethodId = $mid;
             )*
@@ -60,6 +62,7 @@ macro_rules! define_service {
             ) -> Result<Option<ov_channels::Message>, $crate::DeserializeFailed> {
                 match method {
                     $(
+                        $(#[cfg($fcfg)])?
                         $mid => {
                             $crate::__dispatch!(
                                 msg, $name :: $method,

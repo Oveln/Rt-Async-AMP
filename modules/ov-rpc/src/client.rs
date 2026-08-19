@@ -1,6 +1,6 @@
 //! RPC 客户端
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::Ordering;
 
 use ov_channels::{ChannelId, Message, SharedMemory};
 
@@ -16,7 +16,9 @@ pub enum RecvError {
     DeserializeFailed,
 }
 
-static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+// portable-atomic：K3 专属 target（atomic-cas:false）下 core RMW 被 cfg
+// 掉，fetch_add 经 CS 回退；标准 target（AP 用户态等）别名 core 原生。
+static NEXT_REQUEST_ID: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(1);
 
 /// Response buffer capacity.
 ///
@@ -91,7 +93,21 @@ impl RpcClient {
 
         let shm = self.shm();
         let tx = shm.sender(ch).map_err(|_| ov_channels::SendError::Invalid)?;
+        // user-cbo：发送前刷新索引行（陈旧 read 索引 → 假 Full 活锁），
+        // 发送后按行发布槽位+索引（BUSY=1 跳过门铃时的写发布点，
+        // 替代内核 NOTIFY ioctl 的整窗 flush）。
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        let slot = {
+            let ch_addr = unsafe { shm.channel_unchecked(ch) } as *const _ as usize;
+            crate::cache::refresh_before_send(ch_addr);
+            crate::cache::ring_indices(ch_addr).1
+        };
         tx.try_send(&msg)?;
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        {
+            let ch_addr = unsafe { shm.channel_unchecked(ch) } as *const _ as usize;
+            crate::cache::publish_send(ch_addr, slot);
+        }
 
         Ok(rid)
     }
@@ -106,6 +122,11 @@ impl RpcClient {
         let rid = self.send_request(method_id, args, self.req_ch)?;
         // Full fence: guarantee the request write is visible before reading BUSY.
         // This prevents a lost-wakeup race between client write and server sleep.
+        // user-cbo：写发布已由 publish_send 完成（含 fence），这里只需刷新
+        // BUSY 行再读——陈旧 BUSY=1 会误跳过门铃（丢失唤醒）。
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        crate::cache::refresh_busy(self.shm_addr);
+        #[cfg(not(all(target_arch = "riscv64", feature = "user-cbo")))]
         core::sync::atomic::fence(Ordering::SeqCst);
         if !self.shm().is_busy() {
             notify();
@@ -149,6 +170,9 @@ impl RpcClient {
         notify: N,
     ) -> Result<(), ov_channels::SendError> {
         self.send_request(method_id | ONE_WAY_FLAG, args, self.req_ch)?;
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        crate::cache::refresh_busy(self.shm_addr);
+        #[cfg(not(all(target_arch = "riscv64", feature = "user-cbo")))]
         core::sync::atomic::fence(Ordering::SeqCst);
         if !self.shm().is_busy() {
             notify();
@@ -166,6 +190,9 @@ impl RpcClient {
         notify: N,
     ) -> Result<(), ov_channels::SendError> {
         self.send_request(method_id | ONE_WAY_FLAG, args, self.urgent_ch)?;
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        crate::cache::refresh_busy(self.shm_addr);
+        #[cfg(not(all(target_arch = "riscv64", feature = "user-cbo")))]
         core::sync::atomic::fence(Ordering::SeqCst);
         if !self.shm().is_busy() {
             notify();
@@ -191,6 +218,20 @@ impl RpcClient {
             return 0;
         };
 
+        // user-cbo：接收前按行刷新（索引 + 待读槽位——try_recv 的内部读
+        // 不自查新鲜度，陈旧槽位会解析出旧响应），接收后发布索引行
+        // （read 推进对 RP 的回包满判定可见）。替代 AWAIT 返回时的整窗
+        // clean+invalidate。
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        {
+            let ch_addr = unsafe { shm.channel_unchecked(self.resp_ch) } as *const _ as usize;
+            let (r, w) = crate::cache::refresh_before_recv(ch_addr);
+            let pending = w.wrapping_sub(r) % ov_channels::CHANNEL_CAPACITY;
+            for k in 0..pending {
+                crate::cache::refresh_slot(ch_addr, (r + k) % ov_channels::CHANNEL_CAPACITY);
+            }
+        }
+
         let mut count = 0;
         while self.buf_len < BUF_CAP {
             let Some(msg) = rx.try_recv() else { break };
@@ -199,6 +240,12 @@ impl RpcClient {
                 self.buf_len += 1;
                 count += 1;
             }
+        }
+
+        #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+        if count > 0 {
+            let ch_addr = unsafe { shm.channel_unchecked(self.resp_ch) } as *const _ as usize;
+            crate::cache::publish_recv(ch_addr);
         }
         count
     }

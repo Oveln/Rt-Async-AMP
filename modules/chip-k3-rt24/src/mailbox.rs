@@ -32,10 +32,10 @@
 //! 使能推迟到 [`setup_interrupts`]，由 `Board::late_init()` 调用——
 //! 此时 PLIC 已 probe（DFS 先序保证）。
 
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use fdt_parser::Node;
-use platform::device::{Driver, Mailbox};
+use platform::device::{Driver, Mailbox, Timer};
 use platform::irq::IrqLatch;
 use platform::Slot;
 use tock_registers::interfaces::{Readable, Writeable};
@@ -116,7 +116,11 @@ fn register_instance(irq: u32, mbox: &'static MboxK3) {
 
 /// ISR 经 IRQ 号取回实例指针。
 fn instance_for_irq(irq: u32) -> Option<&'static MboxK3> {
-    let ptr = INSTANCES[irq as usize].load(Ordering::Acquire);
+    // Relaxed 足够：注册发生在 setup_interrupts（开中断前、同 hart 串行），
+    // ISR 读取时写入早已按程序序完成；本表仅本核读写，无跨核同步需求。
+    // （Acquire 降级是热路径优化：K3 实测原子读经 Atomics Wrapper 序列化
+    // ~2.2µs/笔，是 ddrain/唤醒链的固定成本。）
+    let ptr = INSTANCES[irq as usize].load(Ordering::Relaxed);
     if ptr == 0 {
         None
     } else {
@@ -131,6 +135,11 @@ fn instance_for_irq(irq: u32) -> Option<&'static MboxK3> {
 ///
 /// 每个硬件 mailbox 单元对应一个 `static MBXn: MboxK3`。实例之间完全
 /// 对称——无硬编码基址/IRQ/方向分发。
+///
+/// 字段访问序约定：`base`/`irq`/`user_local`/`user_remote` 均由 probe
+/// （boot DFS、开中断前、同 hart 串行）写入一次后只读，运行期读取统一用
+/// `Relaxed`——同 hart 程序序已保证可见，Acquire 在 K3 上是 ~2.2µs/笔的
+/// Atomics Wrapper 序列化开销（热路径实测归因见 2026-08-17 延迟战役）。
 pub struct MboxK3 {
     base: AtomicUsize,
     irq: AtomicU32,
@@ -153,7 +162,12 @@ impl MboxK3 {
 
     /// 返回寄存器引用。probe 前调用为 panic（调用方应确保已 probe）。
     fn regs(&self) -> &MboxRegs {
-        let addr = self.base.load(Ordering::Acquire);
+        // Relaxed 足够：base 仅由本 hart 在 probe（boot DFS、开中断前）写入
+        // 一次，此后只读；同 hart 程序序保证可见，无跨核同步需求。热路径
+        // 必须避免 Acquire——2026-08-17 板上实测原子读经 Atomics Wrapper
+        // 序列化 ~2.2µs/笔（与地址无关），ISR 排空舞步与 signal 门铃路径
+        // 的历史成本主要来自此处及 user_local/user_remote 的 Acquire 读。
+        let addr = self.base.load(Ordering::Relaxed);
         assert!(addr != 0, "mailbox: not probed");
         // SAFETY: addr 来自 probe 写入的 DT reg，指向已验证的 MMIO 区域。
         // 单 hart 串行访问，无别名引用（tock-registers 内部用 volatile）。
@@ -191,21 +205,21 @@ impl MboxK3 {
 
     /// 读 IRQENABLE_SET 中指定通道的 NEW_MSG 位是否置位。
     pub fn irq_enabled(&self, channel: u8) -> bool {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         let en = self.regs().mbox_irq[user_local].irq_en_set.get();
         en & new_msg_mask(channel as usize) != 0
     }
 
     /// 读 IRQSTATUS_RAW 中指定通道的 NEW_MSG pending 位。
     pub fn irq_pending_raw(&self, channel: u8) -> bool {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         let raw = self.regs().mbox_irq[user_local].irq_status.get();
         raw & new_msg_mask(channel as usize) != 0
     }
 
     /// 写 IRQSTATUS_CLR 清除指定通道的 NEW_MSG pending 位。
     pub fn clear_irq_pending(&self, channel: u8) {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         self.regs().mbox_irq[user_local].irq_status_clr.set(new_msg_mask(channel as usize));
     }
 
@@ -218,7 +232,7 @@ impl MboxK3 {
     /// 1→9+ 持续增长）。本地自测请改用写 FIFO（触发对端）配合对端回写，或
     /// 直接等对端真实通知。
     pub fn trigger_local_irq(&self, channel: u8) {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         self.regs().mbox_irq[user_local].irq_status.set(new_msg_mask(channel as usize));
     }
 
@@ -354,7 +368,7 @@ impl Driver for MboxDriver {
 impl Mailbox for MboxK3 {
     fn signal(&self, channel: u8) {
         let ch = channel as usize;
-        let user_remote = self.user_remote.load(Ordering::Acquire) as usize;
+        let user_remote = self.user_remote.load(Ordering::Relaxed) as usize;
         let regs = self.regs();
 
         // 先使能对端 NEW_MSG 中断（确保对端能收到），再写 FIFO。
@@ -367,18 +381,18 @@ impl Mailbox for MboxK3 {
     }
 
     fn irq(&self) -> u32 {
-        self.irq.load(Ordering::Acquire)
+        self.irq.load(Ordering::Relaxed)
     }
 
     fn enable_new_msg_irq(&self, channel: u8) {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         self.regs().mbox_irq[user_local]
             .irq_en_set
             .set(new_msg_mask(channel as usize));
     }
 
     fn disable_new_msg_irq(&self, channel: u8) {
-        let user_local = self.user_local.load(Ordering::Acquire) as usize;
+        let user_local = self.user_local.load(Ordering::Relaxed) as usize;
         self.regs().mbox_irq[user_local]
             .irq_en_clr
             .set(new_msg_mask(channel as usize));
@@ -450,6 +464,22 @@ pub fn setup_interrupts() {
 
 // ── ISR ────────────────────────────────────────────────────────────
 
+/// 最近一次 mailbox ISR 入口的 mtime 时间戳（tick，24MHz，0 = 尚无中断）。
+///
+/// 延迟插桩用：intercom 读取该值拆分 D1（中断唤醒）路径的
+/// `t_sched − t_isr`（IRQ 进入 → IPC 任务恢复执行）分段。仅在 ISR 入口
+/// 单点写入，无锁；多次中断只保留最后一次（单请求在途的测量场景下精确）。
+pub static LAST_IRQ_TS: AtomicU64 = AtomicU64::new(0);
+
+/// 最近一次 mailbox ISR 排空舞步完成点的 mtime 时间戳（tick，0 = 尚无中断）。
+///
+/// 延迟插桩用：把 D1 的 `t_sched − t_isr`（板上实测 69.8µs，2026-08-17）
+/// 拆成「ISR 内 mailbox MMIO 排空舞步」（t_drain − t_isr）与「trap 返回 +
+/// 执行器派发 + 任务恢复」（t_sched − t_drain）两段，定位大头去向。
+/// 与 [`LAST_IRQ_TS`] 同款：仅在 ISR 内单点写入，无锁；单请求在途的
+/// 测量场景下精确。stamp 点在 latch.notify() 之前（舞步刚结束）。
+pub static LAST_ISR_DONE_TS: AtomicU64 = AtomicU64::new(0);
+
 /// 通用 Mailbox ISR。
 ///
 /// 经 IRQ 号查 [`INSTANCES`] 表取回实例。外层 while 循环处理 ISR 执行
@@ -459,12 +489,15 @@ pub fn setup_interrupts() {
 /// # Safety
 /// 中断上下文调用，关中断执行，不可阻塞。
 unsafe fn mbox_isr(irq: u32) {
+    // 入口时间戳（延迟插桩 D1 分段基准）。clint_k3::TIMER.now() 是固定
+    // 地址 MMIO 读（0xe400bff8），无 probe/slot 依赖，ISR 上下文安全。
+    LAST_IRQ_TS.store(crate::clint_k3::TIMER.now(), Ordering::Relaxed);
     let mbox = match instance_for_irq(irq) {
         Some(m) => m,
         None => return,
     };
     let regs = mbox.regs();
-    let user_local = mbox.user_local.load(Ordering::Acquire) as usize;
+    let user_local = mbox.user_local.load(Ordering::Relaxed) as usize;
 
     loop {
         let raw = regs.mbox_irq[user_local].irq_status.get();
@@ -500,6 +533,9 @@ unsafe fn mbox_isr(irq: u32) {
             }
         }
     }
+
+    // 排空舞步完成点（延迟插桩：t_drain，见 LAST_ISR_DONE_TS 文档）。
+    LAST_ISR_DONE_TS.store(crate::clint_k3::TIMER.now(), Ordering::Relaxed);
 
     // 唤醒等待中断的 async task（如有）。
     mbox.latch.notify();

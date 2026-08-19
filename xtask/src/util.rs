@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,7 +16,9 @@ pub fn resolve_rootfs(root: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.exists())
 }
 
-pub fn run(cwd: &Path, program: &str, args: &[&str]) {
+/// S 为 AsRef<OsStr>：调用方传 &[&str] 或 &[String]（自定义 target 的
+/// --target 参数是运行期拼出的 JSON 绝对路径）。
+pub fn run<S: AsRef<OsStr>>(cwd: &Path, program: &str, args: &[S]) {
     let st = Command::new(program)
         .args(args)
         .current_dir(cwd)

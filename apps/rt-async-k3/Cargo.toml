@@ -16,13 +16,37 @@ serde = { workspace = true }
 postcard = { workspace = true }
 fugit = "0.4"
 log = { version = "0.4", default-features = false }
+critical-section = "1.2"
+portable-atomic = { version = "1", default-features = false }
 
 [build-dependencies]
 chrono = "0.4"
 
 [features]
-default = ["riscv64"]
+default = ["riscv64", "cs-atomics"]
 riscv64 = ["platform/riscv64", "chip-k3-rt24/riscv64"]
+# 单核原子后端（K3 X100 生产优化，恒开）：配合本仓 targets/
+# riscv64imac-k3-none-elf.json（atomic-cas:false）——core 原生 RMW 被
+# cfg 掉，executor/platform 的任务状态机与 IrqLatch、本 app 的插桩计数
+# 器全部经 portable-atomic 的 critical-section 回退（riscv crate 单 hart
+# mstatus MIE 屏蔽，实测 ~90ns/笔）；原生 AMO 路径经 Atomics Wrapper
+# 序列化实测 ~2.2µs/笔（dseen 三段 dpre/drx/dserde 的主要成本，
+# 2026-08-19 归因）。soundness：RP 为单 hart M-mode 且上述原子均为本核
+# 本地数据；共享窗跨核原子在 ov-channels 上只用 core load/store。
+# QEMU 固件不启用（portable-atomic 别名 core 原生，行为零变化）。
+cs-atomics = [
+    "executor/cs-atomics",
+    "platform/cs-atomics",
+    "portable-atomic/critical-section",
+]
+# 延迟归因战役测量面（MEMBENCH / LITMUS 服务、STATS 扩展列、dispatch
+# 分解戳）。默认关闭：正常开发视角 intercom 只含生产服务（ECHO/ADD/
+# DELAY/PING/STATS 基础列）。xtask 的 k3 平台 bins 构建自动带上——
+# 板上固件恒有探针（dd/lit/mb 场景依赖），源码默认干净。
+probe = ["ov-rpc/stamps"]
+# RP 侧微架构基准 bin（fence/原子/桥单价，rtbench.rs）——纯测量件，
+# 默认不编译（required-features 门控），经 xtask `k3-rtbench` 单独构建。
+bench = []
 
 [[bin]]
 name = "sched_demo"
@@ -32,6 +56,10 @@ name = "ipc_demo"
 
 [[bin]]
 name = "shm_ping"
+
+[[bin]]
+name = "rtbench"
+required-features = ["bench"]
 
 [profile.dev]
 panic = "abort"

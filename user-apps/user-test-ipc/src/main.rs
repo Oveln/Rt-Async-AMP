@@ -95,6 +95,7 @@ fn main() {
     let shm = rt.shm();
     let timeout = std::time::Duration::from_secs(5);
     let start = std::time::Instant::now();
+    let mut ticks: u32 = 0;
     while !shm.is_valid() {
         if start.elapsed() > timeout {
             panic!(
@@ -102,6 +103,13 @@ fn main() {
                 timeout
             );
         }
+        // 用户态映射实际 cacheable（X100 PBMT 不生效）：RP 后到的 init /
+        // 自愈对裸轮询不可见，每 100ms 经 NOTIFY ioctl 的内核 CBO 同步点
+        // 刷新缓存视图（门铃无害，RP 至多空醒一轮）。
+        if ticks % 10 == 0 {
+            let _ = rt.notify();
+        }
+        ticks += 1;
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     println!("[test_ipc] shm valid");

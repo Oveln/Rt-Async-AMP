@@ -195,6 +195,125 @@ python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
 #   chmod +x /tmp/user-test-ipc && /tmp/user-test-ipc
 ```
 
+#### IPC 延迟基准（user-test-bench）
+
+路径分离的 IPC 延迟/正确性基准，与 RP 固件 intercom 内置插桩（`PING`/`STATS`
+服务，`apps/rt-async-k3/src/intercom.rs`）配对：按 RP 察觉请求的四种方式
+（D1 睡眠中断唤醒 / D2 弹性自旋命中 / D3 批处理追加 / D4 竞态闭环）分桶测量
+RTT 与 RP 内部分段（t_isr/t_sched/t_seen），并做端到端计数器对账（消息零丢失、
+路径分桶守恒、回显/rid 校验）。内置看门狗：AWAIT 挂死 10s 内被 SIGALRM 打断，
+带诊断退出，无需复位板子。
+
+```bash
+cargo xtask build user-test-bench
+# RP 侧需跑含插桩的 bin（k3-ipc-demo / k3-shm-ping 均可）：
+cargo xtask build k3-ipc-demo
+ELF_SRC=build/k3-com260/rt-async-k3-ipc-demo.elf bash scripts/flash/k3-pack-itb.sh
+
+# 板上（wget 部署同上）按序执行：
+/tmp/user-test-bench s0                        # 标定：弹性窗口 W + 计数器 dump
+/tmp/user-test-bench s1                        # 空闲唤醒路径（校验 100% D1）。默认 interval=2×W（W≈2s → 单轮 ~4s）、n=25 → 全程 ~2min
+/tmp/user-test-bench s2                        # 弹性自旋路径（校验 ≥90% D2）
+/tmp/user-test-bench s4                        # 竞态扫描：随机间隔 (0,2W)，D4 命中率。默认 n=50（均值 2s/轮）≈ 2min
+/tmp/user-test-bench s6                        # 边界流：间隔 W，D1/D2 混合 + 冗余门铃率。默认 n=50 ≈ 2min
+BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（300 轮 ≈ 20min）
+```
+
+用法 `user-test-bench <s0|s1|s2|s4|s6|raw|mb|dd> [iterations] [interval_ns] [warmup=50]`；
+退出码 0=全部通过 / 2=看门狗超时 / 3=数据校验失败 / 4=发送背压异常。
+逐样本 CSV 经 `# ---- csv begin/end ----` 标记嵌在 stdout（或 `BENCH_CSV` 落盘），
+列含 `sysc`（本轮 syscall 数）与 `ddrain/ddisp`（ISR 舞步 / 派发两段）。
+
+**延迟归因诊断（mb / dd / lit 场景，2026-08-17 新增）**：
+
+```bash
+/tmp/user-test-bench mb                 # RP 内存/MMIO 微基准（MEMBENCH 服务）
+/tmp/user-test-bench dd                 # D1 门铃投递分解（PING 8 戳 + 内核双戳）
+/tmp/user-test-bench dd 100             # 100 轮
+/tmp/user-test-bench lit                # 跨核免 fence 顺序性实验（LITMUS）
+```
+
+> 固件侧探针（MEMBENCH/LITMUS/STATS 扩展列/dispatch 分解戳）由 app feature
+> `probe` 门控，**默认关闭**（正常开发视角 intercom 只含生产服务）；xtask
+> 构建的 K3 板上产物恒带上（RTASYNC_BINS 表条目 `features = ["probe"]`），
+> dd/lit/mb 场景直接可用。裸 `cargo build -p rt-async-k3` 得到无探针固件。
+> 同理，RP 侧微架构基准 bin `rtbench`（fence/原子/桥单价）由 feature `bench`
+> 以 `required-features` 门控，默认不编译，经 `cargo xtask build k3-rtbench`
+> 单独构建。K3 bins 另有恒开的 `cs-atomics`（单核原子后端，详见
+> `targets/riscv64imac-k3-none-elf.json` 头注与 AGENTS §2）：本地原子
+> 经 portable-atomic critical-section 回退（mstatus 屏蔽 ~90ns/笔），
+> 共享窗跨核原子保持 core 原生语义。
+
+- `mb`：RP 侧单笔访问单价表——共享窗 vs 本地 .bss 的 8B 读 / 256B 块读
+  （= try_recv 消息取读）/ 写+fence / stride 扫描 / mailbox 只读寄存器与
+  mtime 的 MMIO 读。检验「无缓存 SRAM ~3.3µs/笔、256B 取读 ~105µs、
+  dsched 69.8µs = ISR MMIO 舞步」等归因假设，直接决定优化方向
+  （物理下限 vs 别名/瘦身）。
+- `dd`：每轮 D1 门铃唤醒，用 PING 回传的 RP mtime 8 戳（含 t_drain 与
+  dispatch 分解 t_ch_enter/t_recv_done——ov-rpc feature `stamps`）×
+  内核双戳（NOTIFY 门铃 MMIO 写前 / mailbox IRQ 入口，经 ioctl
+  `RD_KTS` 读出）做交叉分解。dseen 三段分解：弹性前缀（set_busy+urgent
+  探测）/ try_recv 取包 / dispatch+postcard 反序列化；svc 尾段（handler
+  与响应 try_send）经 STATS 20-23 锁存读出。钟差无关恒等式给出可作绝对
+  结论的量：`S = X+RP尾+Y`、`AP 回程`、闭环残差自检；`X+o` 只看抖动。
+  **前提：starryos.uimg 含内核双戳（RD_KTS ioctl）——需重刷 uimg。**
+- `lit`：跨核免 fence 顺序性实验（迁移前测量，2026-08-17）——L1 消费侧
+  （AP 顺序发布、RP 按读模式矩阵轮询：纯读/fence 读/邻址读）、L2 生产侧
+  （RP 免 fence 发布 + 裸门铃绕过 notify fence、AP cbo 轮询校验）、
+  L3 Dekker 对照。每组含正序判据 + 反序对照组（验证检测器有效）。
+  判读：L1 fence 读 PASS ⇒ RP 读新鲜度需每读一条 fence（≈Acquire 价，
+  邻址读已证无逐出效果）；L2 正序 PASS ⇒ RP 免 fence 写落地保序、
+  notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
+  （或换硬件 spinlock）。
+
+**user-cbo 变体（A/B 对照）**：`cargo xtask build user-test-bench-cbo` 产出
+`build/user-test-bench-cbo`——U 态 Zicbom 按行缓存维护（ov-rpc `user-cbo`
+feature：发送发布槽+索引 5 行、接收刷新索引+待读槽，NOTIFY/AWAIT 带
+`ARG_USER_CBO` 跳过内核整窗 0x19000 同步点）。前提：
+本 README 上方 starryos.uimg（内核 somehal 已置 senvcfg，随 zicbom 编译）。
+
+**RT24 微架构基准（rtbench，2026-08-17 新增）**：RP 本地自跑、不依赖 AP，
+上电自动执行全_suite 后打 R_UART0 串口，用于微架构单价定标与优化路径评估：
+
+```bash
+cargo xtask build k3-rtbench    # 产物 build/k3-com260/rt-async-k3-rtbench.elf
+ELF_SRC=build/k3-com260/rt-async-k3-rtbench.elf bash scripts/flash/k3-pack-itb.sh
+# 刷 RP 后看串口输出（AP 侧无需部署任何东西）
+```
+
+测试节（背景：代码生成对照实验证实 K3 上 Acquire 读 = `ld+fence r,rw`，
+~2.2µs 成本在 fence 等待未完成访存排空，非原子指令本身）：
+1. 时钟标定——mcycle/mtime 比值 → 核心真实频率（491.52 vs 614.4MHz 之争）；
+2. 时间戳/驱动基建——mtime / mcycle / `timer()` Slot 路径 / 驱动访问器
+   （验证去 Acquire 优化效果：msgstat 应从 ~2.5µs 降到 ~0.3µs）；
+3. fence 矩阵——变体（r,rw / rw,w / rw,rw / iorw）× 前置操作（纯 / ld 后
+   紧邻 / ld 后 32 拍延迟 / sd 后）× 目标（SHM / 本地 .bss），判定
+   「fence 成本 = 排空等待」假设与延迟距离效应；
+4. AMO 矩阵——amoswap（relaxed/aq/rl/aqrl）/ amoadd / amoor / lr.d.aq /
+   lr+sc CAS 环 × SHM / 本地，判定 aq/rl 位与地址相关性；
+5. critical-section 后端仿真——`csrrci mstatus`+普通 ld/sd（拟议
+   atomic-cas:false + portable-atomic CS 后端的目标形态），含真实
+   `critical_section::with()` 路径，直接外推优化②a 收益；
+6. SRAM 模式——同行/顺序行/512B 冷步进/256B 块读/写/写后读（同址 vs
+   跨址）/本地 .bss/0x0 低地址别名窗；
+7. 取指与 I$ 存在性——热调用 vs 16 函数散布冷调用，pass1 vs pass2
+   （dseen/svc 残余 ~85µs 的冷取指假设判别）；
+8. trap 与 WFI——MSIP 自环（entry/resume 分解）与 mtimecmp 唤醒误差。
+两个变体均需 K3 真板（QEMU 固件无插桩服务）；cbo 变体额外依赖 U 态
+Zicbom（senvcfg 已置）。
+
+K3 真板实测（2026-08-17，CPU2 pin，s1=4s 间隔 / s2=200µs 间隔，σ 均 <2µs）：
+
+| 指标 | ioctl 基线 | user-cbo | 收益 |
+|---|---|---|---|
+| D2 RTT p50 | 230.5µs | 209.0µs | −21.5µs（−9.3%） |
+| 发送段 p50（写+发布+BUSY 判定） | 20.4µs | 8.4µs | −12.0µs（−59%） |
+| syscall/轮（D2） | 2（FLUSH+AWAIT） | 1（仅 AWAIT） | 门铃决策零 syscall |
+| D1 RTT p50（cbo） | — | 288.5µs | 弹性窗口净省 ~80µs/轮 |
+
+标定结论：弹性窗口 W ≈ 2.0s（每次自旋迭代 ~20µs，无缓存 SRAM 读索引），
+间隔 < 2s 的稳态流量全走 D2；`ELASTIC_SPIN_LIMIT` 调整见 intercom.rs 注释。
+
 ### 常用子命令速查
 
 ```bash

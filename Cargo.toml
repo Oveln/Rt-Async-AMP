@@ -2,6 +2,7 @@
 members = [
     "modules/chip-qemu-virt-rt",
     "modules/chip-k3-rt24",
+    "modules/ov-channels",
     "modules/ov-rpc",
     "modules/ov-shm",
     "apps/rt-async-app",
@@ -11,9 +12,16 @@ members = [
     "user-apps/user-test-mbox",
     "user-apps/user-test-rpc",
     "user-apps/user-test-sched",
+    "user-apps/user-test-bench",
     "xtask",
 ]
 resolver = "3"
+
+[patch.crates-io]
+# ov-channels vendor 补丁：窗口原子 portable_atomic → core（K3 专属
+# atomic-cas:false target 下 CS 回退会丢跨核 fence 语义，详见
+# modules/ov-channels/src/lib.rs 头注）。上游修复后可移除。
+ov-channels = { path = "modules/ov-channels" }
 
 [workspace.dependencies]
 ov-channels = { version = "0.2.0", default-features = false, features = ["critical-section", "flags"] }

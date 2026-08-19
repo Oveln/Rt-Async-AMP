@@ -6,6 +6,7 @@
 //! mailbox3 归 esos(rcpu0) rproc 专用，rt-async 不触碰。
 
 #![no_std]
+#![feature(impl_trait_in_assoc_type)]
 
 // 强制链接板级 crate：`#[extern_trait] impl Board` 符号经此保持引用，
 // 否则 --gc-sections 会在链接期丢弃 chip-k3-rt24 的 Board 实现。
@@ -13,3 +14,4 @@
 pub use chip_k3_rt24 as _;
 
 pub mod intercom;
+pub mod watchdog;

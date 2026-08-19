@@ -1,0 +1,29 @@
+{
+  "arch": "riscv64",
+  "code-model": "medium",
+  "cpu": "generic-rv64",
+  "crt-objects-fallback": "false",
+  "data-layout": "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
+  "eh-frame-header": false,
+  "emit-debug-gdb-scripts": false,
+  "features": "+m,+a,+c",
+  "linker": "rust-lld",
+  "linker-flavor": "gnu-lld",
+  "llvm-abiname": "lp64",
+  "llvm-target": "riscv64",
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "K3 RT24 RP 固件专属：同 riscv64imac-unknown-none-elf 但 atomic-cas=false（core 原生 RMW 被 cfg 掉，迫使本地原子经 portable-atomic critical-section 回退 = mstatus MIE 屏蔽 ~90ns/笔，替代 X100 Atomics Wrapper 序列化的原生 AMO ~2.2µs/笔）。共享窗跨核原子（ov-channels）只用 load/store 不受影响；cordyceps/log 的 RMW 模块自带 target_has_atomic 门控。需 -Zbuild-std=core。",
+    "std": false,
+    "host_tools": false,
+    "tier": 3
+  },
+  "panic-strategy": "abort",
+  "relocation-model": "static",
+  "supported-sanitizers": [
+    "shadow-call-stack",
+    "kernel-address"
+  ],
+  "target-pointer-width": 64,
+  "atomic-cas": false
+}

@@ -16,7 +16,9 @@ use fdt_parser::Node;
 use platform::device::Driver;
 
 /// probe 写入的 SHM 基址。0 表示尚未 probe。
-static BASE: AtomicUsize = AtomicUsize::new(0);
+// 哨兵 usize::MAX：probe 前的「未初始化」标记——基址本身可为 0
+// （K3 RP 侧本地别名窗口，见 probe 注释），不能用 0 做哨兵。
+static BASE: AtomicUsize = AtomicUsize::new(usize::MAX);
 /// probe 写入的 SHM 大小。
 static SIZE: AtomicUsize = AtomicUsize::new(0);
 
@@ -39,7 +41,10 @@ impl Driver for ShmDriver {
             .expect("ov-shm: empty reg");
         let base = reg.address as usize;
         let size = reg.size.expect("ov-shm: #size-cells = 0, missing size") as usize;
-        assert!(base != 0, "ov-shm: zero base address");
+        // ②c：允许基址 0——K3 RP 侧 DT 故意用 RCPU 本地 SRAM 别名窗口
+        // （0x0..0x80000 镜像主域 0xC080_0000）访问共享窗，冷读 7× 快于
+        // 绕 M2F 桥的主域端口。probe 由 compatible 匹配驱动、节点 reg 显式
+        // 存在，0 不是「解析失败」信号（未 probe 由 base() 的哨兵断言兜底）。
         BASE.store(base, Ordering::Release);
         SIZE.store(size, Ordering::Release);
         log::info!("[ov-shm] probed: base={base:#x}, size={size:#x}");
@@ -47,9 +52,14 @@ impl Driver for ShmDriver {
 }
 
 /// 返回共享内存基址。probe 前调用为 panic。
+///
+/// 读取用 Relaxed：BASE 仅由本 hart 在 probe（boot DFS、开中断前）写入
+/// 一次后只读，同 hart 程序序已保证可见。热路径（process_elastic 每唤醒
+/// 周期、弹性自旋）必须避免 Acquire——K3 上原子读经 Atomics Wrapper
+/// 序列化 ~2.2µs/笔（2026-08-17 延迟归因实测）。
 pub fn base() -> usize {
-    let base = BASE.load(Ordering::Acquire);
-    assert!(base != 0, "ov-shm: shm driver not probed");
+    let base = BASE.load(Ordering::Relaxed);
+    assert!(base != usize::MAX, "ov-shm: shm driver not probed");
     base
 }
 

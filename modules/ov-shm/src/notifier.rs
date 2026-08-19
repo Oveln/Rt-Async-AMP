@@ -72,7 +72,11 @@ static MSIP_ADDR: AtomicUsize = AtomicUsize::new(0);
 
 impl PeerNotifier for ClintMsipNotifier {
     fn notify(&self) {
-        let addr = MSIP_ADDR.load(Ordering::Acquire);
+        // Relaxed 足够：MSIP_ADDR 由 probe（boot DFS、同 hart 串行）一次
+        // 写入后只读，同 hart 程序序保证可见——Acquire 读在此 SoC 上是
+        // ~2.1µs 的 fence 开销，notify 是每消息路径。下方的 Release
+        // fence 才是跨核发布点（数据→门铃保序），保留。
+        let addr = MSIP_ADDR.load(Ordering::Relaxed);
         assert!(addr != 0, "ov-shm: clint-msip notifier not probed");
         // 与旧 send_ipi_to_linux 一致：写 MSIP 前 Release fence，
         // 保证共享内存写入对对端可见。

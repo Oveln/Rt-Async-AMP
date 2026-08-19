@@ -30,10 +30,15 @@ pub struct RtAsyncBin {
     pub app_dir: &'static str,
     /// cargo `-p` 包名（如 "rt-async-app"、"rt-async-k3"）。
     pub package: &'static str,
-    /// 目标 triple（均为 "riscv64imac-unknown-none-elf"）。
+    /// 目标 triple（QEMU bins："riscv64imac-unknown-none-elf"；K3 bins：
+    /// 标记 K3_CS_TARGET → 仓库内 atomic-cas:false 自定义 target JSON）。
     pub target: &'static str,
     /// 产物类型。
     pub artifact: Artifact,
+    /// 附加 cargo features（如 K3 固件的 `probe`——测量探针服务默认关闭，
+    /// 板上产物经 xtask 恒带上；`bench` 门控 rtbench 这类纯测量 bin）。
+    /// 见 apps/rt-async-k3/Cargo.toml 注释。
+    pub features: &'static [&'static str],
 }
 
 /// 所有 rt-async bin 的统一注册表（QEMU + K3）。
@@ -48,6 +53,7 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         package: "rt-async-app",
         target: "riscv64imac-unknown-none-elf",
         artifact: Artifact::Bin,
+        features: &[],
     },
     RtAsyncBin {
         name: "console",
@@ -58,6 +64,7 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         package: "rt-async-app",
         target: "riscv64imac-unknown-none-elf",
         artifact: Artifact::Bin,
+        features: &[],
     },
     RtAsyncBin {
         name: "console_interrupt",
@@ -68,6 +75,7 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         package: "rt-async-app",
         target: "riscv64imac-unknown-none-elf",
         artifact: Artifact::Bin,
+        features: &[],
     },
     RtAsyncBin {
         name: "sched_demo",
@@ -76,8 +84,9 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         out: "rt-async-k3-sched-demo.elf",
         app_dir: "apps/rt-async-k3",
         package: "rt-async-k3",
-        target: "riscv64imac-unknown-none-elf",
+        target: K3_CS_TARGET,
         artifact: Artifact::Elf,
+        features: &["probe"],
     },
     RtAsyncBin {
         name: "ipc_demo",
@@ -86,8 +95,9 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         out: "rt-async-k3-ipc-demo.elf",
         app_dir: "apps/rt-async-k3",
         package: "rt-async-k3",
-        target: "riscv64imac-unknown-none-elf",
+        target: K3_CS_TARGET,
         artifact: Artifact::Elf,
+        features: &["probe"],
     },
     RtAsyncBin {
         name: "shm_ping",
@@ -96,10 +106,30 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         out: "rt-async-k3-shm-ping.elf",
         app_dir: "apps/rt-async-k3",
         package: "rt-async-k3",
-        target: "riscv64imac-unknown-none-elf",
+        target: K3_CS_TARGET,
         artifact: Artifact::Elf,
+        features: &["probe"],
+    },
+    RtAsyncBin {
+        name: "rtbench",
+        target_name: "k3-rtbench",
+        platform: "k3",
+        out: "rt-async-k3-rtbench.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: K3_CS_TARGET,
+        artifact: Artifact::Elf,
+        features: &["bench"],
     },
 ];
+
+/// K3 专属 target 标记（RtAsyncBin.target 用）：解析为仓库内
+/// targets/riscv64imac-k3-none-elf.json（atomic-cas:false——core 原生
+/// RMW 被 cfg 掉，本地原子经 portable-atomic critical-section 后端 =
+/// mstatus MIE 屏蔽 ~90ns/笔，替代 X100 Atomics Wrapper 序列化的原生
+/// AMO ~2.2µs/笔）。自定义 target 无预编译 core，构建需 -Zbuild-std=core。
+const K3_CS_TARGET: &str = "k3-cs-atomics";
+const K3_CS_TARGET_JSON: &str = "targets/riscv64imac-k3-none-elf.json";
 
 /// 按 xtask build target 名查找（带平台前缀，如 "qemu-demo"）。
 pub fn find_by_target(target_name: &str) -> Option<&'static RtAsyncBin> {
@@ -114,27 +144,61 @@ pub fn find_by_name(name: &str) -> Option<&'static RtAsyncBin> {
 /// 构建一个 rt-async bin：cargo build 后按 artifact 类型产出。
 /// 产物落 `build/<env_name>/`（单 bin 构建传平台默认环境名）。
 pub fn build_rt_async(root: &Path, bin: &RtAsyncBin, env_name: &str) {
-    util::run(
-        &root.join(bin.app_dir),
-        "cargo",
-        &[
-            "build",
+    // target 解析：标准 triple 直用；K3 标记解析为仓库内自定义 target JSON
+    // （绝对路径传给 cargo，产物目录取 JSON 文件名 stem）。
+    let (target_arg, target_dir, build_std): (String, String, bool) = if bin.target == K3_CS_TARGET
+    {
+        let json = root.join(K3_CS_TARGET_JSON);
+        assert!(
+            json.exists(),
+            "missing {K3_CS_TARGET_JSON}（K3 单核原子后端 target spec）"
+        );
+        (
+            json.to_string_lossy().into_owned(),
+            Path::new(K3_CS_TARGET_JSON)
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            true,
+        )
+    } else {
+        (bin.target.to_string(), bin.target.to_string(), false)
+    };
+
+    // 固定参数 + 条目声明的附加 features（非空时拼 --features）。
+    let mut args: Vec<String> = vec!["build".to_string()];
+    if build_std {
+        // 自定义 JSON target：新版 nightly 要求显式放行 + 无预编译 core。
+        args.push("-Zjson-target-spec".into());
+        args.push("-Zbuild-std=core".into());
+    }
+    args.extend(
+        [
             "--target",
-            bin.target,
+            &target_arg,
             "--release",
             "-p",
             bin.package,
             "--bin",
             bin.name,
-        ],
+        ]
+        .iter()
+        .map(|s| s.to_string()),
     );
+    let features = bin.features.join(",");
+    if !bin.features.is_empty() {
+        args.push("--features".into());
+        args.push(features);
+    }
+    util::run(&root.join(bin.app_dir), "cargo", &args);
 
     let build_dir = root.join("build").join(env_name);
     fs::create_dir_all(&build_dir).unwrap();
 
     let elf = root
         .join("target")
-        .join(bin.target)
+        .join(&target_dir)
         .join("release")
         .join(bin.name);
     let out = build_dir.join(bin.out);
@@ -338,28 +402,45 @@ pub fn pack_itb(root: &Path, profile: &EnvProfile) {
 }
 
 pub fn user_test(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/user-test-ipc", "user-test-ipc");
+    build_user_app(root, "user-apps/user-test-ipc", "user-test-ipc", &[]);
 }
 
 pub fn user_test_mbox(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/user-test-mbox", "user-test-mbox");
+    build_user_app(root, "user-apps/user-test-mbox", "user-test-mbox", &[]);
 }
 
 pub fn user_test_rpc(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/user-test-rpc", "user-test-rpc");
+    build_user_app(root, "user-apps/user-test-rpc", "user-test-rpc", &[]);
 }
 
 pub fn user_test_sched(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/user-test-sched", "user-test-sched");
+    build_user_app(root, "user-apps/user-test-sched", "user-test-sched", &[]);
 }
 
-fn build_user_app(root: &Path, app_dir: &str, bin_name: &str) {
+pub fn user_test_bench(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/user-test-bench", "user-test-bench", &[]);
+}
+
+/// user-cbo 变体：U 态 Zicbom 按行缓存维护（仅 K3——需内核 senvcfg 放行，
+/// 见 user-test-bench Cargo.toml feature 注释）。产物名带 -cbo 后缀，
+/// 与默认变体共存于 build/，同板 A/B 对照。
+pub fn user_test_bench_cbo(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/user-test-bench", "user-test-bench-cbo", &["user-cbo"]);
+}
+
+fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {
     let target = "riscv64gc-unknown-linux-musl";
-    util::run(
-        &root.join(app_dir),
-        "cargo",
-        &["build", "--target", target, "--release"],
-    );
+    let mut args: Vec<String> = ["build", "--target", target, "--release"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    if !features.is_empty() {
+        // workspace 内单包构建，feature 直接传给该包
+        args.push("--features".into());
+        args.push(features.join(","));
+    }
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    util::run(&root.join(app_dir), "cargo", &arg_refs);
     // user-apps 与环境无关（qemu rootfs 注入 / k3 串口传输共用），落 build/ 顶层。
     let build_dir = root.join("build");
     fs::create_dir_all(&build_dir).unwrap();
@@ -367,10 +448,10 @@ fn build_user_app(root: &Path, app_dir: &str, bin_name: &str) {
         .join("target")
         .join(target)
         .join("release")
-        .join(bin_name);
-    let dst = build_dir.join(bin_name);
+        .join(artifact_name.trim_end_matches("-cbo"));
+    let dst = build_dir.join(artifact_name);
     fs::copy(&src, &dst).unwrap();
-    eprintln!("{bin_name} → {}", dst.display());
+    eprintln!("{artifact_name} → {}", dst.display());
 }
 
 pub fn qemu(root: &Path, _cfg: &Config) {

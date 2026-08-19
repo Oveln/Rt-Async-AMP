@@ -23,7 +23,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 │   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，产物 → build/k3-com260/*.elf）
 │   └── rt-async-app/          ←   QEMU virt 固件
 ├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
-│   ├── user-test-{ipc,mbox,rpc,sched}/   ←   AMP 测试程序
+│   ├── user-test-{ipc,mbox,rpc,sched,bench}/ ←  AMP 测试程序（bench=路径分离延迟基准）
 │   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
@@ -66,9 +66,19 @@ xtask 职责到产物为止。
 ### 直接 cargo（需手动指定 target）
 
 ```bash
-cargo build --release -p rt-async-k3 --target riscv64imac-unknown-none-elf
 cargo build --release -p rt-async-app --target riscv64imac-unknown-none-elf
+# K3 走 xtask；直接 cargo 需仓库根目录 + 两个 nightly 标志（自定义
+# target 无预编译 core，见 targets/riscv64imac-k3-none-elf.json）：
+cargo build --release -p rt-async-k3 --target targets/riscv64imac-k3-none-elf.json \
+  -Zjson-target-spec -Zbuild-std=core
 ```
+
+> **K3 专属 target（atomic-cas:false）**：core 原生 RMW 在该 target 上被
+> cfg 掉，本地原子经 portable-atomic critical-section 回退（mstatus MIE
+> 屏蔽 ~90ns/笔 vs X100 原生 AMO 经 Atomics Wrapper 序列化 ~2.2µs/笔）。
+> app feature `cs-atomics` 恒开并透传 executor/platform；共享窗跨核原子
+> 在 vendor 版 ov-channels 上走 core load/store（带原生 fence，语义不
+> 变）。QEMU 不启用，portable-atomic 别名 core 原生，行为零变化。
 
 > **子模块构建陷阱**：主仓和子仓 `rt-async` 各有一份 `.cargo/config.toml`，两者
 > `runner` 字段类型不同（string vs array）。**从主仓根目录构建时 cargo 只读主仓
@@ -155,8 +165,8 @@ dtc -I dtb -O dts /tmp/k3.dtb | grep "pinctrl-single,pins"   # 反编译核对�
 | PLIC | `0xe0000000` | 自定义布局，stride hart<<27 |
 | R_UART0 | `0xc0881000` | PXA 派生，IRQ 17 |
 | pinctrl | `0xd401e000` | pinmux 寄存器，每 pin 4 字节 |
-| ri2c0/1/2 | `0xc0886000/6100/6200` | K3 I2C 控制器（14 寄存器） |
-| CCU 时钟域 | `0xc088_003c` | RCPU_SYSCTRL：ruart_14 上游 DDN gate（bit31）|
+| ri2c0/1/2 | `0xc0886000/6100/6200` | K3 I2C 控制器（14 寄存器）。注：手册仅记 2 路 RI2C + R_PWR_I2C，"第三路"说法源自 BSP 代码 |
+| CCU 时钟域 | `0xc088_003c` | RCPU_SYSCTRL：ruart_14 上游 DDN gate（bit31）。注：手册无记载，源自 BSP 代码/实测 |
 | | `0xc088_1f00` | RCPU_UARTCTRL：UART0~5 末端 CLK_RST（gate/mux/div/reset）|
 | | `0xc088_6f00` | RCPU_I2CCTRL：I2C0~2 末端 CLK_RST |
 | | `0xc088_5f00` | RCPU_SPICTRL：SSP0~1 末端 CLK_RST |
@@ -292,7 +302,9 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 
 1. 在 `apps/<app>/src/bin/` 加 bin 文件，`Cargo.toml` 加 `[[bin]]`。
 2. `xtask/src/build.rs` 的 `RTASYNC_BINS` 注册表加一项（`name` / `target_name` /
-   `platform` / `out` / `app_dir` / `package` / `target` / `artifact`）。
+   `platform` / `out` / `app_dir` / `package` / `target` / `artifact` / `features`——
+   纯测量 bin（如 rtbench）用 feature `required-features` 门控 + 注册表带
+   `bench`；测量探针服务则走 app 的 `probe` feature）。
 3. `cargo xtask build <target_name>` 验证。
 
 ### 刷写 K3 真板

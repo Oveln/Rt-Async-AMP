@@ -1,8 +1,83 @@
 //! RPC 服务端
 
+use core::sync::atomic::Ordering;
+
 use ov_channels::{ChannelId, Message, SharedMemory};
 
 use crate::{MethodId, strip_flags, is_one_way, wants_notify};
+
+/// 响应发送失败计数（响应通道 try_send 失败——ring 满时响应被静默丢弃）。
+///
+/// 插桩用：K3 延迟/压力测试经 intercom 的 STATS 方法读取，检测"响应丢失"
+/// （客户端视角即 seq 缺口）。无锁原子计数，中断/任务上下文均可递增。
+/// portable-atomic：K3 专属 target（atomic-cas:false）下 core RMW 被
+/// cfg 掉，经 CS 回退；标准 target 上别名 core 原生，行为不变。
+pub static RESP_SEND_FAILS: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
+
+// ── 延迟插桩（feature "stamps"）─────────────────────────────────────────
+//
+// 把 `process_channel` 内部分解为四段（dispatch 分解戳，dseen/svc 残余
+// 归因用，2026-08-17 延迟战役）：入口 / try_recv 完成 / handler 完成 /
+// 响应写入完成。时钟由 app 注入（ov-rpc 平台无关，不直接依赖任何定时器；
+// K3 app 装配 clint mtime，见 intercom::init/wait_ready 的 set_clock）。
+// 每戳 = fn 指针 Relaxed 载入（纯 ld）+ mtime MMIO 读 + Relaxed store，
+// 实测 <0.5µs/条；feature 关闭时零开销。
+
+/// 延迟插桩：dispatch 分解戳与 app 时钟钩子（feature `stamps`）。
+#[cfg(feature = "stamps")]
+pub mod stamp {
+    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// app 注入的时钟（返回任意单调 tick；0 = 未装配，now() 返回 0）。
+    static CLOCK: AtomicUsize = AtomicUsize::new(0);
+
+    /// 戳存储：[ch_enter, recv_done, handle_done, resp_done]。
+    static T: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+    /// 装配时钟（app init 期调用一次；单核串行，Relaxed 足够）。
+    pub fn set_clock(f: fn() -> u64) {
+        CLOCK.store(f as usize, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn mark(i: usize) {
+        let p = CLOCK.load(Ordering::Relaxed);
+        if p == 0 {
+            return;
+        }
+        // SAFETY: p 来自 set_clock 存入的合法 fn 指针。
+        let f: fn() -> u64 = unsafe { core::mem::transmute(p) };
+        T[i].store(f(), Ordering::Relaxed);
+    }
+
+    /// 读第 i 戳（STATS 转发用）。
+    pub fn get(i: usize) -> u64 {
+        if i < 4 {
+            T[i].load(Ordering::Relaxed)
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(feature = "stamps")]
+use stamp::mark;
+
+#[cfg(not(feature = "stamps"))]
+#[inline]
+fn mark(_i: usize) {}
+
+/// 戳索引（STATS 语义对齐用，双端镜像义务见 intercom::stat_idx）。
+pub mod stamp_idx {
+    /// process_channel 入口。
+    pub const CH_ENTER: usize = 0;
+    /// try_recv 完成（消息已取出）。
+    pub const RECV_DONE: usize = 1;
+    /// handler 完成（响应已构造）。
+    pub const HANDLE_DONE: usize = 2;
+    /// 响应写入完成。
+    pub const RESP_DONE: usize = 3;
+}
 
 /// 通道布局约定。
 pub mod channel {
@@ -96,6 +171,7 @@ impl RpcServer {
     }
 
     fn process_channel<H: RpcHandler>(&self, ch: ChannelId) -> ProcessResult {
+        mark(stamp_idx::CH_ENTER);
         let shm = self.shm();
         let Ok(rx) = shm.receiver(ch) else {
             return ProcessResult::NoMessage;
@@ -104,6 +180,7 @@ impl RpcServer {
         let Some(msg) = rx.try_recv() else {
             return ProcessResult::NoMessage;
         };
+        mark(stamp_idx::RECV_DONE);
 
         let Some(raw_method) = msg.method_id() else {
             return ProcessResult::NotRpc(msg);
@@ -114,7 +191,10 @@ impl RpcServer {
         let method = strip_flags(raw_method);
 
         let resp = match H::handle(method, msg) {
-            Ok(Some(resp)) => resp,
+            Ok(Some(resp)) => {
+                mark(stamp_idx::HANDLE_DONE);
+                resp
+            }
             Ok(None) => {
                 // One-way handlers return Ok(None) by design.
                 // If this was a one-way call, report it as handled.
@@ -132,6 +212,7 @@ impl RpcServer {
                     // Send an error response so the client doesn't hang forever.
                     if let Ok(tx) = shm.sender(self.resp_ch) {
                         if tx.try_send(&Message::notification(0)).is_err() {
+                            RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
                             #[cfg(feature = "logging")]
                             log::warn!("[RpcServer] failed to send error response for method {}", method);
                         }
@@ -144,9 +225,11 @@ impl RpcServer {
         if !one_way {
             if let Ok(tx) = shm.sender(self.resp_ch) {
                 if tx.try_send(&resp).is_err() {
+                    RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
                     #[cfg(feature = "logging")]
                     log::warn!("[RpcServer] failed to send response for method {}", method);
                 }
+                mark(stamp_idx::RESP_DONE);
             } else {
                 #[cfg(feature = "logging")]
                 log::warn!("[RpcServer] failed to acquire response channel for method {}", method);
