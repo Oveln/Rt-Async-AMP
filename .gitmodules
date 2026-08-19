@@ -10,3 +10,11 @@
 	# upstream=Dirinkbottle(只 fetch)。url 必须指向 gitlink commit 所在仓库，
 	# 即 Oveln fork（dev-k3com260kit 基线 + 本项目 cherry-pick 后的 commit 只在此）。
 	branch = feat/rt-async-amp
+[submodule "ov-channels"]
+	path = modules/ov-channels
+	url = git@github.com:Oveln/ov-channels.git
+	# 上游即本人仓库（无 fork 关系），集成分支 main（v0.2.0 已发布）。
+	# 开发分支 feat/rt-async-amp 基于 main，承载窗口原子 core 化补丁与
+	# 后续 K3 跨核 SPSC 优化；主仓经根 Cargo.toml [patch.crates-io] 以
+	# path 引用（子仓路径同时是 patch 源与 workspace member）。
+	branch = feat/rt-async-amp

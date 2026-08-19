@@ -17,6 +17,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── modules/                   ← 板级 crate（依赖 rt-async 的 platform 契约层）
 │   ├── chip-k3-rt24/          ←   K3 RT24 rcpu1 板级驱动（pinctrl/uart/clint/plic/...）
 │   ├── chip-qemu-virt-rt/     ←   QEMU virt 仿真板级驱动
+│   ├── ov-channels/           ←   跨核共享内存通道库（子仓，经 [patch.crates-io] 引用）
 │   ├── ov-shm/                ←   跨核共享内存抽象（DT probe 认领共享窗）
 │   └── ov-rpc/                ←   跨核 RPC
 ├── apps/
@@ -37,6 +38,9 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 
 - **子模块 `rt-async`**：内核 + 平台抽象，独立 workspace，集成分支 `main`。
 - **子模块 `tgoskits`**：通用内核，自带 `AGENTS.md`，本仓一般不直接改。
+- **子模块 `ov-channels`**（modules/ 内）：跨核通道库，上游即本人仓，
+  集成分支 `main`；开发分支 `feat/rt-async-amp` 承载窗口原子 core 化补丁
+  与 K3 优化，主仓以 `[patch.crates-io]` path 引用该路径。
 - **主仓**：板级驱动 + AMP 集成 + 设备树 + 构建工具链，集成分支 `master`。
 
 ---
@@ -77,7 +81,7 @@ cargo build --release -p rt-async-k3 --target targets/riscv64imac-k3-none-elf.js
 > cfg 掉，本地原子经 portable-atomic critical-section 回退（mstatus MIE
 > 屏蔽 ~90ns/笔 vs X100 原生 AMO 经 Atomics Wrapper 序列化 ~2.2µs/笔）。
 > app feature `cs-atomics` 恒开并透传 executor/platform；共享窗跨核原子
-> 在 vendor 版 ov-channels 上走 core load/store（带原生 fence，语义不
+> 在子仓 `ov-channels` feat/rt-async-amp 分支上走 core load/store（带原生 fence，语义不
 > 变）。QEMU 不启用，portable-atomic 别名 core 原生，行为零变化。
 
 > **子模块构建陷阱**：主仓和子仓 `rt-async` 各有一份 `.cargo/config.toml`，两者
