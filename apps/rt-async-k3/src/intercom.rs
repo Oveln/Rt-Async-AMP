@@ -789,7 +789,25 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                     return (ticks_to_ns(dt), 1);
                 }
                 if chip_k3_rt24::clint_k3::TIMER.now() > deadline {
-                    return (0, 0);
+                    // 超时快照（D=100µs got=0 两轮确定性复现，2026-08-21）：
+                    // RP 视角 read/write 索引 + 队首槽 kind 首字节。r==w ⇒ AP
+                    // 发布未落地或回卷到相等（cache.rs 登记的同行回卷竞态
+                    // 变可达？）；ck 打包 (w<<32|r) 供 bench 交叉。
+                    // SAFETY: 共享窗已初始化（本 op 前序已 probe 认领），
+                    // 仅取 ch0 基址做偏移计算，不解引用。
+                    let base = unsafe {
+                        shm3.channel_unchecked(ChannelId::new(0)) as *const ov_channels::Channel
+                            as usize
+                    };
+                    // SAFETY: 纯 volatile 读共享窗（read@+0x100/write@+0x108，
+                    // 槽区 @+0x200 起，均在本通道 0x8200 内）。
+                    let r = unsafe { ((base + 0x100) as *const u64).read_volatile() };
+                    let w = unsafe { ((base + 0x108) as *const u64).read_volatile() };
+                    let kind = unsafe {
+                        ((base + 0x200 + ((r as usize) % 128) * 256) as *const u8).read_volatile()
+                    };
+                    log::info!("[mb] fresh timeout: r={r} w={w} slot[kind]={kind}");
+                    return (0, (w << 32) | r);
                 }
             }
         }

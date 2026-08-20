@@ -185,6 +185,9 @@ impl RpcServer {
         let Ok(rx) = shm.receiver(ch) else {
             return ProcessResult::NoMessage;
         };
+        // stamps 构建走下方手写展开，rx 仅保留给非 stamps 路径使用
+        #[cfg(feature = "stamps")]
+        let _ = &rx;
 
         // stamps 构建：手写展开 Channel::try_recv（语义与 ov-channels
         // channel.rs/ring.rs 逐笔对齐），在双索引 Acquire 后插 IDX_DONE

@@ -1636,6 +1636,9 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
         let shm = b.rt.shm();
         let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
         let dummy = Message::notification(0xF00D);
+        // D=100µs got=0 两轮确定性复现：AP 视角索引快照（③ 发布前后）与
+        // RP 超时快照交叉，定位发布链（同行 flush 回卷 vs 未落地 vs 其他）
+        let (mut r2, mut w2, mut r3, mut w3) = (0usize, 0usize, 0usize, 0usize);
         for d_ns in [0u64, 30_000, 100_000, 300_000, 1_000_000, 3_000_000, 10_000_000, 50_000_000] {
             let rid = mono_ns();
             // ① fire 请求（发布 + 门铃一发拉 RP 进 handler）
@@ -1652,9 +1655,11 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                 std::hint::spin_loop();
             }
             // ③ dummy（不门铃——RP 在 op 内自旋收取）
-            let slot2 = cache::ring_indices(ch0).1;
+            (r2, w2) = cache::ring_indices(ch0);
+            let slot2 = w2;
             shm.sender(CH0).unwrap().try_send(&dummy).expect("dummy send");
             cache::publish_send(ch0, slot2);
+            (r3, w3) = cache::ring_indices(ch0);
             // ④ 等响应（超时兜底由 op 的 arg=200ms 承担；此处 2s 硬超时）
             let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
             let rx1 = shm.receiver(CH1).unwrap();
@@ -1682,12 +1687,21 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                 cache::publish_recv(ch1);
             }
             match got_ns {
-                Some((ns, got)) => println!(
+                Some((ns, got)) if ns > 0 => println!(
                     "  D={:>8.1}µs → RP 单笔 try_recv {:>7.1} µs（got={got}）",
                     d_ns as f64 / 1e3,
                     ns as f64 / 1e3
                 ),
-                None => println!("  D={:>8.1}µs → 超时", d_ns as f64 / 1e3),
+                // ns==0 ⇔ 固件超时：got 字段是 RP 视角快照 (w<<32|r)
+                Some((_, packed)) => {
+                    let r = packed & 0xffff_ffff;
+                    let w = packed >> 32;
+                    println!(
+                        "  D={:>8.1}µs → 超时：RP 视角 r={r}/w={w}；AP ③发布前 r={r2}/w={w2} 后 r={r3}/w={w3}（RP console log 另有队首槽 kind）—— RP r==w 且 AP w 已推进 ⇒ 发布未落地或同行 flush 回卷到相等",
+                        d_ns as f64 / 1e3
+                    );
+                }
+                None => println!("  D={:>8.1}µs → 超时（2s 硬超时，响应未达）", d_ns as f64 / 1e3),
             }
         }
     }
