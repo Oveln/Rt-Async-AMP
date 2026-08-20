@@ -25,7 +25,7 @@
 | # | 发现 | 实测 | 影响 |
 |---|------|------|------|
 | 1 | **fence 恒定 2.2µs/条**（`ld+fence r,rw` 即 Acquire 读） | 四种口径全 2198-2222ns | 每条消息热路径 ~14 条 fence ≈ 31µs；这是**内存序的物理税**，只能靠减少笔数 |
-| 2 | **mtime 计时器冷读 24µs/笔**（间隔 >15µs 后跨时钟域同步器重锁） | 热循环 106ns → 间隔 20µs 后 24.5µs（231 倍）；mcycle CSR 更慢（~3ms） | 每条消息的计时/统计链吃掉 24-48µs（生产构建）或 40-70µs（测量构建）——**既是真执行税，也污染了所有分段测量** |
+| 2 | **mtime 计时器冷读 24µs/笔**（间隔 >15µs 后跨时钟域同步器重锁） | 热循环 106ns → 间隔 20µs 后 24.5µs（231 倍）；mcycle CSR 冷读更慢（~2.9ms；热读仅 17ns、按核频 245.84MHz 计数） | 每条消息的计时/统计链吃掉 24-48µs（生产构建）或 40-70µs（测量构建）——**既是真执行税，也污染了所有分段测量** |
 | 3 | **W2 双向轮询实测 −11µs**（AP 响应方向改用户态自旋，免 syscall/内核唤醒） | rtt 189→178，零固件改动 | 路线图里最便宜的一步，已经预演成功 |
 
 一句话：**慢的不是协议，不是数据搬运，是"付序的钱（fence）"和"付时间的钱（计时器）"**。
@@ -103,8 +103,9 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | 操作 | 单价 | 说明 |
 |------|------|------|
 | mtime MMIO 读（热循环） | 106ns | 背靠背流水价 |
-| **mtime MMIO 读（间隔 >15µs）** | **~24.5µs** | 跨时钟域同步器重锁，231 倍；now_gapped 实测每轮 69µs=3 笔 |
-| mcycle CSR 读（间隔态） | **~3ms** | CSR 域同病且更重（cycle_gapped 每轮 wall 6.18ms）；mcycle 实际 24MHz 计数（与 mtime 疑同源），热读/频率待 cycle_hot/cycle_cal 定案 |
+| **mtime MMIO 读（间隔 >15µs）** | **~24.5µs** | 跨时钟域同步器重锁，231 倍；now_gapped 实测每轮 69µs = 20µs 忙等 + 2 笔冷读 |
+| mcycle CSR 读（热） | **17ns** | 4 cycle/笔（cycle_hot 4158c/千笔），CSR 本地读无 MMIO |
+| mcycle CSR 读（间隔 ~400µs） | **~2.9ms** | 冷读税比 mtime 重 118 倍；但计数为**核频 245.84MHz**（cycle_cal 联标 1,229,222c/5ms，非 mtime 同源）——"仅冷读慢"型：stamp 链段间保温可用（保温笔仅 17ns），生产每消息级间隔计时冷读不可用 |
 
 **推论**：每条消息的计时/统计链（step 计时、SVC 统计、弹性窗计时、测量构建的 stamp 链）里有若干笔"间隔上百 ms 的冷读"——**每笔真等 24µs**。测量构建（probe 开）每消息 6-8 笔（40-70µs 税）；**生产构建（probe 关）只剩 step/SVC 计时 2-4 笔（24-48µs 税）**。
 
@@ -183,6 +184,8 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 
 **计时源替换候选**（2026-08-21，探针 429885c 待板上数据）：mtime 冷读 24.5µs/笔、mcycle 更慢（间隔 ~ms 级，疑与 mtime 同源 24MHz）之后的第三方案——AP 域 soc-timer `0xd4016000` 块的**空闲 counter1**。依据链：K3 DS §2.9.3（9× 32 位 TCCRn 向上计数器）→ tgoskits AP dts（该块 AP 仅用 counter0 做广播 @1MHz，counter1/2 空闲且块时钟常开）→ 上游 timer-k1x.c 驱动（MMP 血统布局，CR(n)=+0x90+(n<<2) 即 TCCRn）。RP 零门控共享，仅置 CER bit1（回读校验收敛与 AP 的跨核 RMW 竞态）。判据：`tmr_gapped − now_gapped` 每轮差 **Δ≈0 ⇒ 免跨域税**，换源承接 step/SVC/stamp 全部计时（1µs 分辨率，32 位 @1MHz 回卷 71.6min）；Δ≈24.5µs ⇒ 与 mtime 同病，计时瘦身改走采样制。另探 d4014000 独立块（K3 AP dts 无节点，侦查 op 排表尾防挂死）。
 
+**mcycle 三面定案**（2026-08-21 板上）：热读 **17ns**/笔（4 cycle，CSR 本地）、频率 **245.84MHz = 核频**（≈491.52/2，与总线探测 SEL=0 吻合；此前"与 mtime 同源 24MHz"证伪）、间隔读 **~2.9ms**/笔（比 mtime 重 118 倍）——**"仅冷读慢"型**：测量 stamp 链可迁 mcycle + 段间保温（保温笔 17ns 可忽略，段间隔 >15µs 处补一笔空读）；**生产每消息级间隔计时不可用冷读**，仍赖 soc-timer counter1（待测）或采样制。
+
 ---
 
 ## 7. 测量方法与可信度
@@ -191,7 +194,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 - **mb 场景**：MEMBENCH RPC 35 个微基准 op，热循环 + 间隔变体 + 真实通道自往返。
 - **litmus L1/L2/L3**：免 fence 顺序性的正反对照实验，全绿。
 - **已知测量坑**（本文已修正/标注）：mtime 戳税污染分段、T_SCHED 连续流不刷新（D2 下 dpre/dseen 失效）、fresh_scan 列错位、判读 g() 索引差一。
-- **未修已知问题**：AP 侧退出段错误（0xffffff00 前缀 EXECUTE，信号相关时刻）；SIGALRM 打不断内核 AWAIT；mcycle 热读/频率待定案（探针已备）。
+- **未修已知问题**：AP 侧退出段错误（0xffffff00 前缀 EXECUTE，信号相关时刻）；SIGALRM 打不断内核 AWAIT；mcycle 已定案（热 17ns/核频 245.84MHz/冷 ~2.9ms）。
 
 ## 8. 数据溯源
 
@@ -203,6 +206,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | 单价表 | mb（08-20/21 两轮复现） | 全部 ±1% 复现 |
 | H8 衰减 | mb fresh_scan（修列错位后） | 23.0→11.6µs |
 | mtime 定案 | mb now_gapped | 每轮 69µs = 20µs 忙等 + 2×24.5µs 冷读 |
+| mcycle 三面定案 | mb cycle_hot/cycle_cal/cycle_gapped（08-21） | 热 4158c/千笔=17ns；245.84MHz（核频）；间隔读 ~2.9ms/笔（每轮 wall 6.18ms − 忙等 393µs = 2 笔） |
 | W2 预演 | BENCH_SPIN_AWAIT=1 dd | rtt p50 178.1（σ4.1） |
 
 ## 附录 A：战役意外修出的三个潜伏 bug
