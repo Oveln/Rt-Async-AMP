@@ -122,6 +122,7 @@ mod mb_op {
     pub const FRESH_WAIT_RECV: u32 = 29;
     pub const DISPATCH_N: u32 = 30;
     pub const NOW_GAPPED: u32 = 31;
+    pub const CYCLE_GAPPED: u32 = 32;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1722,6 +1723,7 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::SELF_PEEK, "self_peek        真实ch0 peek×N(无Release)", 0, blk_n),
         (mb_op::DISPATCH_N, "dispatch_n       op内完整dispatch(PING)", 0, blk_n),
         (mb_op::NOW_GAPPED, "now_gapped       间隔20µs的mtime读", 0, 64),
+        (mb_op::CYCLE_GAPPED, "cycle_gapped     间隔~20µs的rdcycle读", 0, 64),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
@@ -1854,6 +1856,15 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         let per_read = (ng.saturating_sub(20_000)) / 2;
         println!(
             "  dispatch_n {dn} ns/次 vs drest 34.0µs —— op 内 ≪ drest ⇒ 纯上下文税（mark 链/代码位置）；≈ drest ⇒ dispatch 本体慢\n  now_gapped 每轮 {ng} ns（含 20µs 忙等 + 2 笔 mtime 读）⇒ 间隔读 ≈ {per_read} ns/笔 vs RD_MTIME 热循环 106ns",
+        );
+    }
+    if let (Some(cg), Some(ng)) = (g(32), g(31)) {
+        // cg = 每轮 cycle 差（12k 圈忙等 + 2 笔 CSR 读）；CPU 频率档未定
+        //（SEL=0 mux 491.52/614.4），给两档换算区间。
+        let lo = cg as f64 / 614.4; // 假设 614MHz
+        let hi = cg as f64 / 491.52; // 假设 491MHz
+        println!(
+            "  cycle_gapped 每轮 {cg} cycle（≈{lo:.1}-{hi:.1} µs 视频率档）vs mtime 间隔读 {ng} ns/轮 —— rdcycle ≈ 忙等时长 ⇒ CSR 读无跨域税，stamp 时钟源可迁"
         );
     }
     // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性

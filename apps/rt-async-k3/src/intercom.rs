@@ -432,6 +432,12 @@ pub mod membench_op {
     /// 106ns 是背靠背热循环价；真实路径的 stamp mark 每条消息 4-6 次、
     /// 间隔 µs~百 ms——若冷读 µs 级，mark 链即是隐藏税）
     pub const NOW_GAPPED: u32 = 31;
+    /// rdcycle CSR 间隔读对照（NOW_GAPPED 的 CPU 本地版）：t0/t1 用
+    /// `csrr cycle`，忙等固定圈数（~20µs @614MHz 假设）。返回每轮 cycle
+    /// 差（ck=圈数）。NOW_GAPPED 实测间隔 mtime 读 ~24µs/笔（跨域同步器
+    /// 重锁，2026-08-21 定案 dslot/drest 超额真凶）——若 rdcycle 无此税，
+    /// stamp 时钟源迁 rdcycle 可每消息省 ~40-60µs 且消除测量假象
+    pub const CYCLE_GAPPED: u32 = 32;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -794,6 +800,27 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             let span = chip_k3_rt24::clint_k3::TIMER.now() - t_all;
             let _ = span;
             return (ticks_to_ns(total), ticks_to_ns(gap));
+        }
+        M::CYCLE_GAPPED => {
+            // rdcycle 间隔读（对照 NOW_GAPPED 的 ~24µs/笔）：忙等固定圈数
+            // 12000（~20µs @614MHz / ~24µs @491MHz——频率档未定，判读给区间）。
+            #[inline]
+            fn rdcycle() -> u64 {
+                let c: u64;
+                // SAFETY: 纯 CSR 读（cycle 计数器），无副作用。
+                unsafe { core::arch::asm!("csrr {}, cycle", out(reg) c, options(nostack)) };
+                c
+            }
+            let mut total = 0u64;
+            for _ in 0..n(200) {
+                let t0 = rdcycle();
+                for _ in 0..12_000 {
+                    core::hint::spin_loop();
+                }
+                let t1 = rdcycle();
+                total = total.wrapping_add(t1.wrapping_sub(t0));
+            }
+            return (total, 12_000u64);
         }
         _ => return (0, 0),
     }
