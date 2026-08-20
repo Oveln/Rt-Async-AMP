@@ -437,7 +437,19 @@ pub mod membench_op {
     /// 差（ck=圈数）。NOW_GAPPED 实测间隔 mtime 读 ~24µs/笔（跨域同步器
     /// 重锁，2026-08-21 定案 dslot/drest 超额真凶）——若 rdcycle 无此税，
     /// stamp 时钟源迁 rdcycle 可每消息省 ~40-60µs 且消除测量假象
+    /// mcycle CSR 间隔读对照（NOW_GAPPED 的 CPU 本地版）：t0/t1 用
+    /// mcycle，忙等固定圈数 12000。返回每轮 cycle 差（ck=圈数）。
+    /// NOW_GAPPED 实测间隔 mtime 读 ~24µs/笔（跨域同步器重锁，
+    /// 2026-08-21 定案 dslot/drest 超额真凶）——mcycle 是否同税由本组探针
+    /// （GAPPED/HOT/CAL）三面定案，决定 stamp 时钟源迁移方案
     pub const CYCLE_GAPPED: u32 = 32;
+    /// mcycle 热连读 ×1000 单价（返回首尾差 cycle 数，ck=1000）。
+    /// 判别"仅冷读慢"vs"读本身慢"
+    pub const CYCLE_HOT: u32 = 33;
+    /// mcycle↔mtime 频率联标：~5ms 忙等（mtime 判据），返回 (cycle 差,
+    /// mtime 差 ticks)。板上 cycle_gapped 每轮 wall ≈6.18ms 且反推 mcycle
+    /// 恰 24MHz——联标判 mcycle 是否真核频计数还是与 mtime 同源
+    pub const CYCLE_CAL: u32 = 34;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -802,33 +814,63 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             return (ticks_to_ns(total), ticks_to_ns(gap));
         }
         M::CYCLE_GAPPED => {
-            // rdcycle 间隔读（对照 NOW_GAPPED 的 ~24µs/笔）：忙等固定圈数
-            // 12000（~20µs @614MHz / ~24µs @491MHz——频率档未定，判读给区间）。
-            #[inline]
-            fn rdcycle() -> u64 {
-                let c: u64;
-                // SAFETY: 纯 CSR 读（mcycle 计数器），无副作用。用 mcycle
-                // (0xB00) 而非 cycle (0xC00)：本核 M 态未实现用户别名
-                // （csrr cycle 触发 Illegal Instruction 打挂固件，板上
-                // 实锤 2026-08-21）；mcycle 经 rtbench 时钟标定实证可用。
-                unsafe { core::arch::asm!("csrr {}, mcycle", out(reg) c, options(nostack)) };
-                c
-            }
+            // mcycle 间隔读（对照 NOW_GAPPED 的 ~24µs/笔）：忙等固定圈数
+            // 12000。板上实测每轮 wall ≈6.18ms（≫忙等预期）且反推 mcycle
+            // 恰以 24MHz 计数——mcycle 冷读亦巨慢或与 mtime 同源，热单价
+            // 与真实频率由 CYCLE_HOT/CYCLE_CAL 联标定案。
             let mut total = 0u64;
             for _ in 0..n(200) {
-                let t0 = rdcycle();
+                let t0 = read_mcycle();
                 for _ in 0..12_000 {
                     core::hint::spin_loop();
                 }
-                let t1 = rdcycle();
+                let t1 = read_mcycle();
                 total = total.wrapping_add(t1.wrapping_sub(t0));
             }
             return (total, 12_000u64);
+        }
+        M::CYCLE_HOT => {
+            // mcycle 热连读 ×1000：判别"仅冷读慢" vs "读本身慢"
+            let mut sink = 0u64;
+            let c0 = read_mcycle();
+            for _ in 0..1000 {
+                sink = sink.wrapping_add(read_mcycle());
+            }
+            let c1 = read_mcycle();
+            let _ = sink;
+            return (c1.wrapping_sub(c0), 1000u64);
+        }
+        M::CYCLE_CAL => {
+            // mcycle↔mtime 频率联标（~5ms 忙等，mtime 判据）：返回
+            // (cycle 差, mtime 差 ticks)。判 mcycle 是核频计数还是与
+            // mtime 同源 24MHz。
+            use platform::Timer as _;
+            let m0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let c0 = read_mcycle();
+            let target = m0 + 120_000; // 5ms @ 24MHz
+            while chip_k3_rt24::clint_k3::TIMER.now() < target {
+                core::hint::spin_loop();
+            }
+            let c1 = read_mcycle();
+            let m1 = chip_k3_rt24::clint_k3::TIMER.now();
+            return (c1.wrapping_sub(c0), m1.wrapping_sub(m0));
         }
         _ => return (0, 0),
     }
     let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
     (ns, ck)
+}
+
+/// 读 mcycle CSR（0xB00）。用 mcycle 而非 cycle（0xC00）：本核 M 态未实现
+/// 用户别名（csrr cycle 触发 Illegal Instruction 打挂固件，板上实锤
+/// 2026-08-21）；mcycle 经 rtbench 时钟标定实证可用。
+#[cfg(feature = "probe")]
+#[inline]
+fn read_mcycle() -> u64 {
+    let c: u64;
+    // SAFETY: 纯 CSR 读（mcycle 计数器），无副作用。
+    unsafe { core::arch::asm!("csrr {}, mcycle", out(reg) c, options(nostack)) };
+    c
 }
 
 /// 当前发现路径标签（D1..D4）。仅 IPC 任务写，handler 读。

@@ -123,6 +123,8 @@ mod mb_op {
     pub const DISPATCH_N: u32 = 30;
     pub const NOW_GAPPED: u32 = 31;
     pub const CYCLE_GAPPED: u32 = 32;
+    pub const CYCLE_HOT: u32 = 33;
+    pub const CYCLE_CAL: u32 = 34;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1723,7 +1725,9 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::SELF_PEEK, "self_peek        真实ch0 peek×N(无Release)", 0, blk_n),
         (mb_op::DISPATCH_N, "dispatch_n       op内完整dispatch(PING)", 0, blk_n),
         (mb_op::NOW_GAPPED, "now_gapped       间隔20µs的mtime读", 0, 64),
-        (mb_op::CYCLE_GAPPED, "cycle_gapped     间隔~20µs的rdcycle读", 0, 64),
+        (mb_op::CYCLE_GAPPED, "cycle_gapped     间隔~20µs的mcycle读", 0, 64),
+        (mb_op::CYCLE_HOT, "cycle_hot        mcycle热读×1000", 0, 1),
+        (mb_op::CYCLE_CAL, "cycle_cal        5ms联标mcycle频率", 0, 1),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
@@ -1852,20 +1856,26 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     }
     // L0 终拆后续（2026-08-21 板上细拆：didx 7.8/dslot 37.2/dmth 1.1/drest 34.0
     // ——索引读完美对账，缺口= 槽读+Release 与 dispatch/postcard 各 ~34µs）。
-    if let (Some(dn), Some(ng)) = (g(30), g(31)) {
+    if let (Some(dn), Some(ng)) = (g(29), g(30)) {
         let per_read = (ng.saturating_sub(20_000)) / 2;
         println!(
             "  dispatch_n {dn} ns/次 vs drest 34.0µs —— op 内 ≪ drest ⇒ 纯上下文税（mark 链/代码位置）；≈ drest ⇒ dispatch 本体慢\n  now_gapped 每轮 {ng} ns（含 20µs 忙等 + 2 笔 mtime 读）⇒ 间隔读 ≈ {per_read} ns/笔 vs RD_MTIME 热循环 106ns",
         );
     }
-    if let (Some(cg), Some(ng)) = (g(32), g(31)) {
-        // cg = 每轮 cycle 差（12k 圈忙等 + 2 笔 CSR 读）；核频以 rtbench
-        // 时钟标定实测 245.76MHz（=491.52/2）为主，SEL 档不确定性附注。
-        let est = cg as f64 / 245.76;
-        let lo = cg as f64 / 614.4;
-        let hi = cg as f64 / 122.88;
+    if let Some(cg) = g(31) {
+        // 板上实测每轮 wall ≈6.18ms（≫12k 圈忙等预期）且 total 反推 mcycle
+        // 恰以 24MHz 计数——mcycle 间隔读同样有跨域税，热单价/频率由
+        // cycle_cal 联标定案。
+        let _ = cg;
         println!(
-            "  cycle_gapped 每轮 {cg} cycle（@245.76MHz ≈ {est:.1} µs；极限档 {lo:.1}-{hi:.1}）vs mtime 间隔读 {ng} ns/轮 —— ≈20µs ⇒ CSR 读无跨域税，stamp 时钟源可迁 mcycle"
+            "  cycle_gapped 每轮 wall ≈6.18ms（≫忙等预期）⇒ mcycle 间隔读同样有跨域税（热读价与频率见 cycle_cal）"
+        );
+    }
+    if let (Some(hot), Some(span)) = (g(32), g(33)) {
+        let mhz = span as f64 / 5_000.0; // ck = 5ms 联标 cycle 差
+        let hot_ns = hot as f64 / 1000.0 / mhz * 1000.0;
+        println!(
+            "  cycle_cal：热读 {hot} cycle/千笔（≈{hot_ns:.0} ns/笔 @ {mhz:.2}MHz）；mcycle 频率 = {mhz:.2} MHz —— 热读快且频率≈核频 ⇒ 仅冷读慢（stamp 链可短间隔热身救）；热读慢或=24MHz ⇒ mcycle 与 mtime 同源同税，计时源需第三方案"
         );
     }
     // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性
