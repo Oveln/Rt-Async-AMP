@@ -84,7 +84,7 @@ const M_LITMUS: u64 = 6;
 /// PING 响应：(val, tag, t_isr, t_drain, t_sched, t_seen, t_ch_enter, t_recv_done)
 /// —— 后两项是 ov-rpc dispatch 分解戳（feature "stamps"）：process_channel
 /// 入口 / try_recv 完成，dseen 的三段分解（弹性前缀/取包/分发反序列化）。
-type PingResp = (u64, u8, u64, u64, u64, u64, u64, u64);
+type PingResp = (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64);
 
 /// MEMBENCH 操作码（镜像 intercom::membench_op，双端对齐义务）。
 #[allow(dead_code)]
@@ -1931,7 +1931,16 @@ struct DdRow {
     dpre_ns: u64,
     drx_ns: u64,
     dserde_ns: u64,
+    /// L0 段内细分（2026-08-20）：didx = ch_enter→idx_done（magic+双索引
+    /// Acquire）、dslot = idx_done→recv_done（槽读+Release）、dmth =
+    /// recv_done→serde_done（method_id/flags）、drest = serde_done→seen
+    /// （dispatch 宏+postcard+进 handler）。固件旧 ABI 时 idx_done==0。
+    didx_ns: u64,
+    dslot_ns: u64,
+    dmth_ns: u64,
+    drest_ns: u64,
     ch_enter: u64,
+    idx_done: u64,
     svc_ns: u64,
     /// t_isr(mtime ns) − kpre(内核 ns)：门铃去程 X + 未知钟差常数 ΔE。
     /// **可为负**（mtime 自上电计、内核时钟自内核启动计，epoch 不同），
@@ -2000,10 +2009,16 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
         let ddrain = t2ns(r.3.saturating_sub(r.2), freq);
         let ddisp = t2ns(r.4.saturating_sub(r.3), freq);
         let dseen = t2ns(r.5.saturating_sub(r.4), freq);
-        // dispatch 分解（stamps：r.6=t_ch_enter、r.7=t_recv_done）
+        // dispatch 分解（stamps：r.6=t_ch_enter、r.7=t_recv_done、
+        // r.8=t_idx_done、r.9=t_serde_done——L0 细分：drx 拆索引/槽两段、
+        // dserde 拆字段读/dispatch 两段）
         let dpre = t2ns(r.6.saturating_sub(r.4), freq);
         let drx = t2ns(r.7.saturating_sub(r.6), freq);
         let dserde = t2ns(r.5.saturating_sub(r.7), freq);
+        let didx = t2ns(r.8.saturating_sub(r.6), freq);
+        let dslot = t2ns(r.7.saturating_sub(r.8), freq);
+        let dmth = t2ns(r.9.saturating_sub(r.7), freq);
+        let drest = t2ns(r.5.saturating_sub(r.9), freq);
         let t_isr_ns = t2ns(r.2, freq);
         let t_seen_ns = t2ns(r.5, freq);
         // 带符号跨钟差：X+ΔE 可负（epoch 不同），saturating 会破坏 S 恒等式。
@@ -2025,7 +2040,12 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             dpre_ns: dpre,
             drx_ns: drx,
             dserde_ns: dserde,
+            didx_ns: didx,
+            dslot_ns: dslot,
+            dmth_ns: dmth,
+            drest_ns: drest,
             ch_enter: r.6,
+            idx_done: r.8,
             svc_ns,
             x_plus_o,
             s_val,
@@ -2033,7 +2053,7 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             closure: rtt as i64 - sum,
         });
         println!(
-            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>9.1} svc={:>6.1} drx={:>6.1} dserde={:>6.1} X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
+            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>9.1} svc={:>6.1} drx={:>6.1}(idx={:>5.1} slot={:>5.1}) dserde={:>6.1}(mth={:>5.1} rst={:>5.1}) X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
             r.1,
             out.sent_ipi as u8,
             rtt as f64 / 1e3,
@@ -2043,7 +2063,11 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             dseen as f64 / 1e3,
             svc_ns as f64 / 1e3,
             drx as f64 / 1e3,
+            didx as f64 / 1e3,
+            dslot as f64 / 1e3,
             dserde as f64 / 1e3,
+            dmth as f64 / 1e3,
+            drest as f64 / 1e3,
             x_plus_o as f64 / 1e3,
             s_val as f64 / 1e3,
             ap_ret as f64 / 1e3,
@@ -2089,6 +2113,13 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             show("dserde（dispatch 反序列化→handler）", &calc(&col(&|x| x.dserde_ns)));
         } else {
             println!("  （固件无 stamps 探针，drx/dserde 细分段跳过——xtask 构建的 K3 产物 probe 恒开）");
+        }
+        // L0 段内细分（2026-08-20 新 ABI）：drx 拆 idx/slot，dserde 拆 mth/rest
+        if bucket.iter().any(|x| x.idx_done != 0) {
+            show("didx（CH_ENTER→IDX_DONE：magic+双索引 Acquire）", &calc(&col(&|x| x.didx_ns)));
+            show("dslot（IDX_DONE→RECV_DONE：槽读+Release）", &calc(&col(&|x| x.dslot_ns)));
+            show("dmth（RECV_DONE→SERDE_DONE：method_id/flags）", &calc(&col(&|x| x.dmth_ns)));
+            show("drest（SERDE_DONE→handler：dispatch 宏+postcard）", &calc(&col(&|x| x.drest_ns)));
         }
         if tag == TAG_D1 {
             show("t_drain−t_isr（ISR 内 MMIO 舞步）", &calc(&col(&|x| x.ddrain_ns)));

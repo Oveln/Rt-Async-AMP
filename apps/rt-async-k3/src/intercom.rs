@@ -58,7 +58,7 @@ define_service! {
         ECHO:  0 => call echo(val: u32) -> u32;
         ADD:   1 => call add(a: i32, b: i32) -> i32;
         DELAY: 2 => send delay(us: u32);
-        PING:  3 => call ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64);
+        PING:  3 => call ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64);
         STATS: 4 => call stat(idx: u32) -> u64;
         #[cfg(feature = "probe")]
         MEMBENCH: 5 => call membench(op: u32, arg: u32) -> (u64, u64);
@@ -100,7 +100,7 @@ impl RtAsyncRpc {
     ///
     /// 多消息在途时（批处理）t_isr/t_drain 会被后续中断覆盖，仅单请求
     /// 在途的测量场景保证精确。
-    fn ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64) {
+    fn ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64) {
         // ①′：clint 直连（同 Slot 内同一 TIMER 实例，纯省 3µs 查找开销）。
         use platform::Timer as _;
         let t_seen = chip_k3_rt24::clint_k3::TIMER.now();
@@ -113,6 +113,8 @@ impl RtAsyncRpc {
             t_seen,
             stamp0(ov_rpc::stamp_idx::CH_ENTER),
             stamp0(ov_rpc::stamp_idx::RECV_DONE),
+            stamp0(ov_rpc::stamp_idx::IDX_DONE),
+            stamp0(ov_rpc::stamp_idx::SERDE_DONE),
         )
     }
     /// 按索引查询插桩计数器（索引表见 [`stat_idx`]）。

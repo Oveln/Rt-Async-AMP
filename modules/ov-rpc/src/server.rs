@@ -31,8 +31,9 @@ pub mod stamp {
     /// app 注入的时钟（返回任意单调 tick；0 = 未装配，now() 返回 0）。
     static CLOCK: AtomicUsize = AtomicUsize::new(0);
 
-    /// 戳存储：[ch_enter, recv_done, handle_done, resp_done]。
-    static T: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    /// 戳存储：[ch_enter, recv_done, handle_done, resp_done,
+    /// idx_done, serde_done]（后两槽为 L0 归因细分戳，2026-08-20）。
+    static T: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
 
     /// 装配时钟（app init 期调用一次；单核串行，Relaxed 足够）。
     pub fn set_clock(f: fn() -> u64) {
@@ -52,7 +53,7 @@ pub mod stamp {
 
     /// 读第 i 戳（STATS 转发用）。
     pub fn get(i: usize) -> u64 {
-        if i < 4 {
+        if i < 6 {
             T[i].load(Ordering::Relaxed)
         } else {
             0
@@ -77,6 +78,14 @@ pub mod stamp_idx {
     pub const HANDLE_DONE: usize = 2;
     /// 响应写入完成。
     pub const RESP_DONE: usize = 3;
+    /// try_recv 双索引 Acquire 完成（L0 细分：magic+read+write 三笔之后、
+    /// 槽读之前）。drx 拆为 [CH_ENTER→IDX_DONE]（索引 Acquire）与
+    /// [IDX_DONE→RECV_DONE]（槽读+Release）。
+    pub const IDX_DONE: usize = 4;
+    /// method_id/flags 剥离完成（L0 细分：dserde 拆为 [RECV_DONE→
+    /// SERDE_DONE]（字段读）与 [SERDE_DONE→t_seen]（dispatch 宏+postcard
+    /// 反序列化+进 handler））。
+    pub const SERDE_DONE: usize = 5;
 }
 
 /// 通道布局约定。
@@ -177,7 +186,46 @@ impl RpcServer {
             return ProcessResult::NoMessage;
         };
 
-        let Some(msg) = rx.try_recv() else {
+        // stamps 构建：手写展开 Channel::try_recv（语义与 ov-channels
+        // channel.rs/ring.rs 逐笔对齐），在双索引 Acquire 后插 IDX_DONE
+        // 细分戳——L0 归因（2026-08-20）：drx 43.6µs 中 fence 理论仅
+        // ~10µs，段内拆分定位其余归属。偏移与 ov-rpc cache.rs 编译期
+        // 断言同源：magic@0 / read@0x100 / write@0x108 / slots@0x110。
+        #[cfg(feature = "stamps")]
+        let msg = {
+            use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+            // SAFETY: ch 句柄来自 shm.receiver 的同一 channel_unchecked；
+            // 各偏移落在 Channel 布局内（cache.rs 断言对账），原子重解释
+            // 只读 magic/索引、Release 推进 read——与 ring.try_recv 同序。
+            unsafe {
+                let base = shm.channel_unchecked(ch) as *const ov_channels::Channel as usize;
+                let magic = &*(base as *const AtomicU16);
+                if magic.load(Ordering::Acquire) != ov_channels::MAGIC {
+                    None
+                } else {
+                    let rb = (base + 0x100) as *const AtomicUsize;
+                    let read = (*rb).load(Ordering::Acquire);
+                    let _write = (*rb.add(1)).load(Ordering::Acquire);
+                    mark(stamp_idx::IDX_DONE);
+                    if read == _write {
+                        None
+                    } else {
+                        let slot = (base + 0x110
+                            + read * core::mem::size_of::<ov_channels::Message>())
+                            as *const ov_channels::Message;
+                        let m = slot.read_volatile();
+                        (*rb).store(
+                            (read + 1) % ov_channels::CHANNEL_CAPACITY,
+                            Ordering::Release,
+                        );
+                        Some(m)
+                    }
+                }
+            }
+        };
+        #[cfg(not(feature = "stamps"))]
+        let msg = rx.try_recv();
+        let Some(msg) = msg else {
             return ProcessResult::NoMessage;
         };
         mark(stamp_idx::RECV_DONE);
@@ -185,6 +233,7 @@ impl RpcServer {
         let Some(raw_method) = msg.method_id() else {
             return ProcessResult::NotRpc(msg);
         };
+        mark(stamp_idx::SERDE_DONE);
 
         let one_way = is_one_way(raw_method);
         let notify = wants_notify(raw_method);
