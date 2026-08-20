@@ -413,6 +413,12 @@ pub mod membench_op {
     /// Release/无索引推进）→ try_recv 清 1 条。与 SELF_ROUND 对照分离
     /// read Release 与索引推进的成本
     pub const SELF_PEEK: u32 = 28;
+    /// H8 新鲜写衰减：自旋 try_recv 直到收到一条（arg=超时 ms，0→200），
+    /// 返回**成功那一笔**的计时。bench 编排（fresh_scan）：fire 本 op →
+    /// 延迟 D → 写 dummy notification（不门铃）。成功笔即"读 AP 于 ~D
+    /// 前写入的消息"的单笔价格；D→∞ 应回落 recv_seq 价（~11.7µs），短 D
+    /// 若 ≈ drx（43.6µs）⇒ H8：读 AP 新鲜写的行有确定性税（posted 写落地）
+    pub const FRESH_WAIT_RECV: u32 = 29;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -714,6 +720,28 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                     }
                 }
                 let _ = rx.try_recv();
+            }
+        }
+        M::FRESH_WAIT_RECV => {
+            // H8 衰减扫描的 RP 半边：每笔 try_recv 单独计时，只报成功笔。
+            // 空转笔对 magic/索引行的反复 Acquire 与生产 D2 自旋同构（行
+            // 状态"本核刚读过"）；槽行只在成功笔首次读——新鲜度保留。
+            use platform::Timer as _;
+            let shm3 = unsafe { SharedMemory::<3>::at(SHM_BASE.load(Ordering::Acquire)) };
+            let rx = shm3.receiver(ChannelId::new(0)).expect("ch0 receiver");
+            let freq = chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
+            let deadline = chip_k3_rt24::clint_k3::TIMER.now()
+                + if arg == 0 { 200 } else { arg.min(1000) as u64 } * freq / 1000;
+            loop {
+                let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+                let got = rx.try_recv().is_some();
+                let dt = chip_k3_rt24::clint_k3::TIMER.now() - t0;
+                if got {
+                    return (ticks_to_ns(dt), 1);
+                }
+                if chip_k3_rt24::clint_k3::TIMER.now() > deadline {
+                    return (0, 0);
+                }
             }
         }
         _ => return (0, 0),

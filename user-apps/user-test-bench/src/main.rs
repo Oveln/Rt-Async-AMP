@@ -119,6 +119,7 @@ mod mb_op {
     pub const NOTIFY_N: u32 = 26;
     pub const SELF_ROUND: u32 = 27;
     pub const SELF_PEEK: u32 = 28;
+    pub const FRESH_WAIT_RECV: u32 = 29;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1585,6 +1586,75 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
 ///   下一步加段内细分探针。
 /// 历史锚点（2026-08-17）：旧"256B 取读 ~105µs"假设已被 RD_BLK256_SHM
 /// 证伪（②c 别名窗后 ~0.4µs）；邮箱寄存器价 = 驱动 Acquire 而非 MMIO。
+    /// H8 新鲜写衰减扫描（user-cbo 构建）：两段式控制"AP 写入"与"RP 读取"
+    /// 的间隔 D——① fire MEMBENCH(FRESH_WAIT_RECV)（RP 进入自旋收取）→
+    /// ② 自旋延迟 D → ③ 写 dummy notification（不门铃，RP 在 op 内收取）
+    /// → ④ 等 FRESH 响应。响应的 ns = RP 成功笔（读 AP 于 ~D 前写入的
+    /// 消息）的单笔 try_recv 价格。
+    ///
+    /// 判据：短 D 显著高于 recv_seq（11.7µs）且随 D 衰减 ⇒ H8 实锤——
+    /// 读"AP 新鲜写（posted 写未落地）"的行有确定性税，即 drx 43.6 与
+    /// dserde 34.4 中 32µs 级差额的物理来源（dserde 同理：读 AP 刚写的
+    /// 请求槽做反序列化）；D→∞ 回落探针价。
+    #[cfg(feature = "user-cbo")]
+    fn fresh_scan(b: &mut Bench) {
+        use ov_rpc::cache;
+        println!("\n[mb] H8 新鲜写衰减扫描（D = dummy 写入到 RP 收取的间隔）");
+        let shm = b.rt.shm();
+        let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
+        let dummy = Message::notification(0xF00D);
+        for d_ns in [0u64, 30_000, 100_000, 300_000, 1_000_000, 3_000_000, 10_000_000, 50_000_000] {
+            let rid = mono_ns();
+            // ① fire 请求（发布 + 门铃一发拉 RP 进 handler）
+            let req = Message::request(rid, M_MEMBENCH | ov_rpc::NOTIFY_FLAG, &(29u32, 200u32))
+                .expect("FRESH req serialize");
+            cache::refresh_before_send(ch0);
+            let slot = cache::ring_indices(ch0).1;
+            shm.sender(CH0).unwrap().try_send(&req).expect("FRESH req send");
+            cache::publish_send(ch0, slot);
+            b.rt.notify().expect("notify");
+            // ② 精确延迟（自旋，AP 无他事）
+            let dl = mono_ns() + d_ns;
+            while mono_ns() < dl {
+                std::hint::spin_loop();
+            }
+            // ③ dummy（不门铃——RP 在 op 内自旋收取）
+            let slot2 = cache::ring_indices(ch0).1;
+            shm.sender(CH0).unwrap().try_send(&dummy).expect("dummy send");
+            cache::publish_send(ch0, slot2);
+            // ④ 等响应（超时兜底由 op 的 arg=200ms 承担；此处 2s 硬超时）
+            let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
+            let rx1 = shm.receiver(CH1).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut got_ns: Option<(u64, u64)> = None;
+            while got_ns.is_none() {
+                if std::time::Instant::now() > deadline {
+                    eprintln!("! FRESH 响应超时（D={d_ns}）");
+                    break;
+                }
+                let _ = b.rt.await_ipi();
+                let (r, w) = cache::refresh_before_recv(ch1);
+                for k in 0..(w.wrapping_sub(r) % ov_channels::CHANNEL_CAPACITY) {
+                    cache::refresh_slot(ch1, (r + k) % ov_channels::CHANNEL_CAPACITY);
+                }
+                while let Some(m) = rx1.try_recv() {
+                    if m.request_id() == Some(rid) {
+                        got_ns = Some(m.as_response().expect("FRESH resp shape"));
+                    }
+                }
+                cache::publish_recv(ch1);
+            }
+            match got_ns {
+                Some((ns, got)) => println!(
+                    "  D={:>8.1}µs → RP 单笔 try_recv {:>7.1} µs（got={got}）",
+                    d_ns as f64 / 1e3,
+                    ns as f64 / 1e3
+                ),
+                None => println!("  D={:>8.1}µs → 超时", d_ns as f64 / 1e3),
+            }
+        }
+    }
+
 fn run_mb(b: &mut Bench, line_n: u32) {
     let blk_n = (line_n / 10).max(20);
     let stride = |s: u64| (MB_SCRATCH_LEN / s) as u32; // 读次数
@@ -1747,6 +1817,11 @@ fn run_mb(b: &mut Bench, line_n: u32) {
             "  真实通道 vs scratch：self_round {sr} / self_peek {sp} ns vs recv_seq {rs} + send_seq {ss} —— self_round ≈ 两者之和 ⇒ 真实通道无溢价（85µs 无主另寻）；≫ 之和 ⇒ H5：真实通道上下文隐藏税"
         );
     }
+    // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性
+    // 差额（探针全快、真实路径全慢、预热不降）的最后候选——读"AP 刚写
+    // （posted 未落地）"的行。
+    #[cfg(feature = "user-cbo")]
+    fresh_scan(b);
 
     // 寄存器探测（手册 06/17 章来源；顺序：安全在前，未知窗口在后）。
     println!("\n[mb] 寄存器探测（各 1000 次读：末值 + 单价）");
