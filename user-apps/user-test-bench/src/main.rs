@@ -728,6 +728,14 @@ impl Bench {
                     kirq,
                 });
             }
+            // spin_await 模式：无数据 = 正常轮询节拍（RP 尚未写完响应），
+            // 静默重试——不走 AWAIT 语义的空唤醒取证（其 notify_full 整窗
+            // flush ioctl 会污染 H9 对照条件，且取证 try_recv 会把消息
+            // 消费在 found 流程之外造成本轮永久丢失——warmup 首轮实锤）。
+            #[cfg(feature = "user-cbo")]
+            if self.spin_await {
+                continue;
+            }
             eprintln!(
                 "! rd#{} await 返回但 ch1 无本 rid 消息（空唤醒 #{}）",
                 self.rounds_sent,
