@@ -1854,7 +1854,7 @@ struct DdRow {
 ///   handler 出口→RP 门铃写 + 回程门铃，全部真值）；
 /// - ap_ret = R − s_val，其中 R = (t1−t_send_end)−(t_seen−t_isr)；
 /// - 闭合：rtt ≈ send + ddrain + ddisp + dseen + s_val + ap_ret。
-fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
+fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, warm_gap: u64) {
     warmup_paced(b, warmup);
 
     let cal = b.snapshot().unwrap_or_else(die);
@@ -1868,7 +1868,7 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
     };
     let interval = interval_cfg.unwrap_or((w_ns * 2).max(2_000_000_000));
     println!(
-        "[dd] n={n} interval={}ns W={:.1}ms freq={freq}（kpre/kirq 探针已开：每轮 +2 ioctl，不计 sysc）",
+        "[dd] n={n} interval={}ns W={:.1}ms freq={freq} warm_gap={warm_gap}ns（kpre/kirq 探针已开：每轮 +2 ioctl，不计 sysc）",
         interval_cfg.map(|v| format!("{v} (指定)")).unwrap_or_else(|| format!("{interval} (默认 2W)")),
         w_ns as f64 / 1e6,
     );
@@ -1876,8 +1876,18 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
 
     let mut rows: Vec<DdRow> = Vec::with_capacity(n);
     for seq in 0..n as u64 {
-        // 先睡再发：保证 RP 处于睡眠态（D1 路径）。
-        sleep_until(mono_ns() + interval);
+        // 先睡再发：保证 RP 处于目标路径状态（大间隔 = D1 睡眠；小间隔 =
+        // D2 弹性窗内）。warm_gap 模式把睡眠切为 interval−gap + gap 两段，
+        // 每轮总长不变。
+        sleep_until(mono_ns() + interval - warm_gap.min(interval));
+        if warm_gap > 0 {
+            // 预热对照（冷执行税判别实验，2026-08-20）：测量消息前 warm_gap
+            // 发一条丢弃的 warm PING，让 RP 刚走完一遍同代码路径（取指/
+            // 前端缓冲/行状态热）。若 drx 从 ~43.6µs 跌到探针价（~12µs）
+            // ⇒ 32µs 差额为冷执行税（非 fence 单价——H1 已证伪）。
+            let _ = b.ping_round(u64::MAX - seq);
+            sleep_until(mono_ns() + warm_gap);
+        }
         let (r, out) = b.ping_round(seq).unwrap_or_else(die);
         // SVC 探针：此时读到的 SVC_LAST 即本轮 PING 的服务时长（STATS
         // 自己的 svc 在其 handler 返回后才落账，不覆盖本次读数）。
@@ -2019,7 +2029,8 @@ fn usage() -> ! {
          \x20 s6  边界流（间隔 W，D1/D2 混合）\n\
          \x20 raw 自由间隔（interval_ns 必填）\n\
          \x20 mb  RP 内存/MMIO 微基准（iterations = 行级次数，默认 2000）\n\
-         \x20 dd  D1 分解交叉测量（轮数默认 30，间隔默认 2W）\n\
+         \x20 dd  D1/D2 分解交叉测量（轮数默认 30，间隔默认 2W；第 5 参数\n\
+         \x20     warm_gap_ns：测量前发一条丢弃的 warm PING——预热对照实验）\n\
          \x20 lit 跨核免 fence 顺序性实验（LITMUS，L1/L2/L3 含对照组）"
     );
     std::process::exit(1);
@@ -2049,6 +2060,8 @@ fn main() {
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(default_n);
     let interval_cfg: Option<u64> = args.get(3).and_then(|s| s.parse().ok());
     let warmup: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(50);
+    // dd 专用：测量消息前 warm_gap 发一条丢弃的 warm PING（冷执行税对照）
+    let warm_gap: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
     if scen == "raw" && interval_cfg.is_none() {
         eprintln!("raw 场景必须指定 interval_ns");
         usage();
@@ -2127,7 +2140,7 @@ fn main() {
     match scen.as_str() {
         "s0" => run_s0(&mut b, warmup),
         "mb" => run_mb(&mut b, n as u32),
-        "dd" => run_dd(&mut b, n, interval_cfg, warmup),
+        "dd" => run_dd(&mut b, n, interval_cfg, warmup, warm_gap),
         "lit" => run_lit(&mut b),
         _ => run_measured(&mut b, &scen, n, interval_cfg, warmup),
     }
