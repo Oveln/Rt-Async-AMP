@@ -498,6 +498,11 @@ struct Bench {
     /// dd 场景开关：round_msg 在发送后/响应后各取一次内核双戳。
     /// 非 dd 场景保持 false（零额外 syscall）。
     probe_kts: bool,
+    /// H9 对照模式（env BENCH_SPIN_AWAIT=1，仅 user-cbo 构建）：响应等待
+    /// 跳过 AWAIT syscall，纯用户态轮询（零 syscall/零内核原子/零调度）。
+    /// drx/dserde 应声下跌 ⇒ AP 内核路径（syscall 原子 + AWAIT 整窗 cbo
+    /// 写流）与 RP 的 fence 在全局 Atomics Wrapper/互连上排队竞争。
+    spin_await: bool,
 }
 
 /// 前 N 轮逐相位打印（诊断挂点）。只读字段访问，避开与 tx/rx 的借用冲突。
@@ -632,7 +637,17 @@ impl Bench {
 
         loop {
             vlog!(self, "await entering...");
-            match self.rt.await_ipi() {
+            // H9 对照（spin_await）：跳过 AWAIT syscall，纯用户态轮询响应。
+            // 超时兜底也改本地判定（无 EINTR 可借）。
+            #[cfg(feature = "user-cbo")]
+            let awoke = if self.spin_await { Ok(()) } else { self.rt.await_ipi() };
+            #[cfg(not(feature = "user-cbo"))]
+            let awoke = self.rt.await_ipi();
+            #[cfg(feature = "user-cbo")]
+            if self.spin_await && mono_ns().saturating_sub(t0) > 5_000_000_000 {
+                return Err(BenchErr::Timeout { seq: self.last_seq });
+            }
+            match awoke {
                 Ok(()) => {
                     vlog!(self, "await returned");
                 }
@@ -1639,7 +1654,11 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                 }
                 while let Some(m) = rx1.try_recv() {
                     if m.request_id() == Some(rid) {
-                        got_ns = Some(m.as_response().expect("FRESH resp shape"));
+                        // as_response = (rid, (ns, got))——上一版把 rid 当
+                        // ns 打印（输出 133 秒级假值 + 真值错位到 got 列）
+                        let (_r, v): (u64, (u64, u64)) =
+                            m.as_response().expect("FRESH resp shape");
+                        got_ns = Some(v);
                     }
                 }
                 cache::publish_recv(ch1);
@@ -1947,7 +1966,9 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
         interval_cfg.map(|v| format!("{v} (指定)")).unwrap_or_else(|| format!("{interval} (默认 2W)")),
         w_ns as f64 / 1e6,
     );
-    b.probe_kts = true;
+    // kpre/kirq 双戳探针；spin_await（H9 对照）下它是额外内核活动，会
+    // 污染对照条件——自动关闭（kpre/kirq 记 0，X+o/S/APret 恒等式仍自洽）。
+    b.probe_kts = !b.spin_await;
 
     let mut rows: Vec<DdRow> = Vec::with_capacity(n);
     for seq in 0..n as u64 {
@@ -2210,7 +2231,11 @@ fn main() {
         freq_hz: 0,
         verbose_left: 3,
         probe_kts: false,
+        spin_await: std::env::var("BENCH_SPIN_AWAIT").is_ok(),
     };
+    if b.spin_await {
+        println!("[cfg] spin-await 模式：AWAIT syscall → 纯用户态轮询（H9 对照）");
+    }
 
     match scen.as_str() {
         "s0" => run_s0(&mut b, warmup),
