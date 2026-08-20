@@ -374,6 +374,36 @@ pub mod membench_op {
     /// RD_MTIME（裸 clint MMIO 107ns）分离 slot/原子开销——dseen/ddisp 里
     /// 每次 timer() 调用的真实成本
     pub const TIMER_NOW: u32 = 19;
+    // ── L0 归因闭合组（2026-08-20）：dseen 107.8µs 中 fence 理论只解释
+    // ~31µs（手数代码 ~14 笔 × 热循环 2.2µs），~75µs 无主。三假设：
+    // H1 单笔"冷"fence 贵于热循环（吞吐≠延迟）；H2 postcard/Message 构解
+    // 本身贵；H3 其他调用链成本。以下探针逐一钉死。──
+    /// 跨行 16 址（stride 64B）轮转 Acquire 读（arg=次数，0→2000）。
+    /// 对照 AQ_LOAD_SHM 同址热循环：区分"同址合并效应"与真实跨址单价
+    pub const AQ_DISTINCT_SHM: u32 = 20;
+    /// 跨行 Acquire 读 + 每笔间隔一次 mtime 读（完成点，强制前笔落地）。
+    /// 单笔"冷"真实单价（每样本含 1 笔 mtime 读 ~0.1-0.3µs，判读扣除）。
+    /// H1 判定：cold ≫ hot(2198ns) ⇒ 真实路径 14 笔 × cold 才是 dseen 构成
+    pub const COLD_AQ_SHM: u32 = 21;
+    /// scratch 复刻 try_recv 全序列 ×N（arg=次数，0→200）：magic Acquire +
+    /// read Acquire + write Acquire + 256B read_volatile + read Release。
+    /// drx 段（45.6µs）窗口成本的隔离对账
+    pub const RECV_SEQ: u32 = 22;
+    /// scratch 复刻 try_send 全序列 ×N（arg=次数，0→200）：magic Acquire +
+    /// write Acquire + read Acquire + 256B write_volatile + write Release。
+    /// 响应发送路径的窗口成本（dserde/ddisp 段成分）
+    pub const SEND_SEQ: u32 = 23;
+    /// 本地 postcard 双向构解 ×N（arg=次数，0→200）：Message::request 构造
+    /// + method_id + as_request 反序列化 + Message::response 构造 +
+    /// as_response 反序列化（PING 真实形状）。H2 判定：dispatch 段本地成本
+    pub const POSTCARD_RT: u32 = 24;
+    /// 真实通道空 try_recv ×200（arg=通道号 0/1/2）。对照 RECV_EMPTY（固定
+    /// ch0）补测 ch2——drain_all 每消息批前后各查一次 ch2（3 笔 Acquire）
+    pub const RECV_EMPTY_CH: u32 = 25;
+    /// 门铃全成本 ×N（arg=次数，0→100）：notifier().notify() = fence +
+    /// mailbox MMIO 写。注意：N 次假唤醒 AP 侧 AWAIT（bench 循环耐受，
+    /// 本轮 console 会多 N 条空唤醒痕迹，不影响协议）
+    pub const NOTIFY_N: u32 = 26;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -556,6 +586,95 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             for _ in 0..n(1000) {
                 ck = ck.wrapping_add(platform::timer().now());
             }
+        }
+        // ── L0 归因闭合组。scratch 布局（区内偏移，litmus 只用 +0x00..0x40
+        // 与 +0x7f8，且与本组顺序执行不并发）：AQ 对象阵 16×64B @+0x40..0x440；
+        // 协议复刻 magic u16 @+0x480（独行）、read/write @+0x4C0/+0x4C8
+        // （同行，对齐真实 RingBuffer +0x100/+0x108）、槽 256B @+0x500。──
+        M::AQ_DISTINCT_SHM | M::COLD_AQ_SHM => {
+            let base_arr = shm_line as usize + 0x40;
+            let iters = n(if op == M::AQ_DISTINCT_SHM { 2000 } else { 64 });
+            let cold = op == M::COLD_AQ_SHM;
+            for i in 0..iters {
+                // SAFETY: base_arr + (i%16)*64 ∈ scratch [+0x40,+0x440)，
+                // 仅本函数访问；对象按 AtomicU64 重解释，仅本核读。
+                let a = unsafe { &*((base_arr + (i % 16) * 64) as *const AtomicU64) };
+                ck = ck.wrapping_add(a.load(Ordering::Acquire));
+                if cold {
+                    // clint 直连：每笔间隔的完成点（判读扣除 ~0.1-0.3µs/样本）
+                    use platform::Timer as _;
+                    ck = ck.wrapping_add(chip_k3_rt24::clint_k3::TIMER.now());
+                }
+            }
+        }
+        M::RECV_SEQ | M::SEND_SEQ => {
+            use core::sync::atomic::AtomicU16;
+            let cap = ov_channels::CHANNEL_CAPACITY;
+            // SAFETY: 各偏移落 scratch [+0x480,+0x600)，仅本函数访问；索引
+            // 初写归零防垃圾值（此后每轮 store 自维持）。
+            unsafe {
+                let magic = &*((shm_line as usize + 0x480) as *const AtomicU16);
+                let ridx = &*((shm_line as usize + 0x4C0) as *const AtomicUsize);
+                let widx = &*((shm_line as usize + 0x4C8) as *const AtomicUsize);
+                let slot = (shm_line as usize + 0x500) as *mut Blk256;
+                ridx.store(0, Ordering::Relaxed);
+                widx.store(1, Ordering::Relaxed); // write−read=1：恒"有消息"
+                for _ in 0..n(200) {
+                    ck = ck.wrapping_add(magic.load(Ordering::Acquire) as u64);
+                    if op == M::RECV_SEQ {
+                        // Channel::try_recv 全序列（不判空：测稳态有消息路径；
+                        // 槽用固定址——单请求在途时真实路径也近乎同槽）
+                        let read = ridx.load(Ordering::Acquire);
+                        let _write = widx.load(Ordering::Acquire);
+                        let b = slot.read_volatile();
+                        ck = ck.wrapping_add(b.0[0] as u64);
+                        ridx.store((read + 1) % cap, Ordering::Release);
+                    } else {
+                        // Channel::try_send 全序列（不判满）
+                        let write = widx.load(Ordering::Acquire);
+                        let _read = ridx.load(Ordering::Acquire);
+                        slot.write_volatile(Blk256([ck as u8; 256]));
+                        widx.store((write + 1) % cap, Ordering::Release);
+                    }
+                }
+            }
+        }
+        M::POSTCARD_RT => {
+            // PING 真实形状的本地构解双向（无窗口访问）——dserde 本地成本。
+            let req_args = (0xA5A5_u64,);
+            for k in 0..n(200) {
+                let msg = Message::request(k as u64, 3, &req_args).expect("req serialize");
+                let m = msg.method_id().unwrap_or(0);
+                let (rid, _mid, a): (u64, u64, (u64,)) =
+                    msg.as_request().expect("req deserialize");
+                let resp = Message::response(rid, &(a.0, 1_u8, 0, 0, 0, 0, 0, 0))
+                    .expect("resp serialize");
+                let (_r2, _tuple): (u64, (u64, u8, u64, u64, u64, u64, u64, u64)) =
+                    resp.as_response().expect("resp deserialize");
+                ck = ck.wrapping_add(m.wrapping_add(rid));
+            }
+        }
+        M::RECV_EMPTY_CH => {
+            // arg=通道号（0/1/2），固定 200 轮——补测 drain 的 ch2 前后检查。
+            let ch = (arg % 3) as u8;
+            let shm = unsafe { SharedMemory::<3>::at(SHM_BASE.load(Ordering::Acquire)) };
+            let rx = shm.receiver(ChannelId::new(ch)).expect("receiver");
+            let mut got = 0u64;
+            for _ in 0..200 {
+                if rx.try_recv().is_some() {
+                    got += 1;
+                }
+            }
+            ck = ck.wrapping_add(got);
+        }
+        M::NOTIFY_N => {
+            // 门铃全成本（fence + mailbox MMIO 写）。副作用：N 次假唤醒 AP
+            // 侧 AWAIT——bench 循环耐受，仅本轮 console 多空唤醒痕迹。
+            let iters = n(100);
+            for _ in 0..iters {
+                ov_shm::notifier::notifier().notify();
+            }
+            ck = iters as u64;
         }
         _ => return (0, 0),
     }

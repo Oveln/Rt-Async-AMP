@@ -109,6 +109,14 @@ mod mb_op {
     pub const AQ_LOAD_LOCAL: u32 = 17;
     pub const RECV_EMPTY: u32 = 18;
     pub const TIMER_NOW: u32 = 19;
+    // L0 归因闭合组（dseen 75µs 无主部分的三假设探针）
+    pub const AQ_DISTINCT_SHM: u32 = 20;
+    pub const COLD_AQ_SHM: u32 = 21;
+    pub const RECV_SEQ: u32 = 22;
+    pub const SEND_SEQ: u32 = 23;
+    pub const POSTCARD_RT: u32 = 24;
+    pub const RECV_EMPTY_CH: u32 = 25;
+    pub const NOTIFY_N: u32 = 26;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1565,14 +1573,16 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
 
 /// 场景 mb：RP 侧内存/MMIO 访问微基准（MEMBENCH RPC）。
 ///
-/// 检验延迟归因假设（2026-08-17 板上锚点）：dsched 69.8µs / dseen
-/// 110.5µs / 弹性自旋迭代 ~20µs 的候选解释是共享窗 SRAM 无缓存访问
-/// （~3.3µs/笔、256B 消息取读 = 32 笔 ≈ 105µs）。判定规则：
-/// - SHM 与 LOCAL 同价 ⇒ 固件数据同在一块无缓存 SRAM（物理下限确认，
-///   优化方向 = 别名映射/减少读放大）；
-/// - 同行读 ≈ 跨行 stride 读 ⇒ 无任何缓存/合并路径；同行远快 ⇒ 有线索；
-/// - mailbox MMIO 单价 × ISR 舞步笔数（约 6-8 笔）≈ ddrain ⇒ ISR 舞步
-///   解释成立（对照 dd 场景实测 ddrain）。
+/// 2026-08-20 起目标 = **L0 归因闭合**：P1 后 dseen 107.8µs（dpre 24.3 +
+/// drx 45.6 + dserde 38.0）中 fence 理论只解释 ~31µs（手数代码 ~14 笔 ×
+/// 热循环 2.2µs），~75µs 无主。判读规则（探针组见 ops 表 L0 段）：
+/// - cold_aq ≫ aq_load(2198ns) ⇒ H1：单笔冷 fence 贵于热循环，真实笔数
+///   × cold 单价重新对账 dseen；
+/// - postcard_rt 达 µs×10 级 ⇒ H2：构解本身是大头（优化打 postcard/形状）；
+/// - 两者都小 ⇒ H3：无主部分在调用链（stamps/timer/dispatch 机械），
+///   下一步加段内细分探针。
+/// 历史锚点（2026-08-17）：旧"256B 取读 ~105µs"假设已被 RD_BLK256_SHM
+/// 证伪（②c 别名窗后 ~0.4µs）；邮箱寄存器价 = 驱动 Acquire 而非 MMIO。
 fn run_mb(b: &mut Bench, line_n: u32) {
     let blk_n = (line_n / 10).max(20);
     let stride = |s: u64| (MB_SCRATCH_LEN / s) as u32; // 读次数
@@ -1599,6 +1609,14 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::AQ_LOAD_LOCAL, "aq_load_local    本地 Acquire 原子读", line_n, line_n),
         (mb_op::RECV_EMPTY, "recv_empty       try_recv 空 ch0 一轮", 0, spin_n),
         (mb_op::TIMER_NOW, "timer_now        platform timer 全路径", 1000, 1000),
+        // L0 归因闭合组（arg：RECV_EMPTY_CH=通道号 2，NOTIFY_N=0→默认 100）
+        (mb_op::AQ_DISTINCT_SHM, "aq_distinct_shm  跨行16址轮转Acquire", line_n, line_n),
+        (mb_op::COLD_AQ_SHM, "cold_aq_shm      跨行Acquire+mtime间隔", 0, 64),
+        (mb_op::RECV_SEQ, "recv_seq         复刻try_recv全序列", 0, blk_n),
+        (mb_op::SEND_SEQ, "send_seq         复刻try_send全序列", 0, blk_n),
+        (mb_op::POSTCARD_RT, "postcard_rt      Message构解双向(PING形状)", 0, blk_n),
+        (mb_op::RECV_EMPTY_CH, "recv_empty_ch2   try_recv 空 ch2 一轮", 2, spin_n),
+        (mb_op::NOTIFY_N, "notify_n         门铃全成本(fence+MMIO)", 0, 100),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
@@ -1687,6 +1705,32 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         println!(
             "  timer() 全路径 {} ns/次 vs 裸 clint {} ns —— 差额 = platform Slot 查找路径的原子开销（dseen/ddisp 各含 1-3 次 timer()）",
             tn, mt
+        );
+    }
+    // L0 归因闭合（索引 20-26）：dseen 107.8µs（dpre 24.3 + drx 45.6 +
+    // dserde 38.0）中 fence 理论只解释 ~31µs（~14 笔 × 热循环 2.2µs），
+    // ~75µs 无主。三假设：H1 冷 fence 单价贵于热循环 / H2 postcard 构解贵 /
+    // H3 其他调用链。以下探针逐一钉死，结论决定 P3（fence 去冗余）与
+    // W2（双向轮询）的排序。
+    if let (Some(hot), Some(dist), Some(cold), Some(mt)) = (g(13), g(20), g(21), g(12)) {
+        println!(
+            "  fence 单价三口径：同址热 {hot} / 跨址 {dist} / 跨址+间隔 {cold} ns（扣 mtime ≈ {} ns）—— cold≫hot ⇒ H1 成立：dseen 真构成 = 14 笔 × cold 而非 41 笔 × hot",
+            cold.saturating_sub(mt)
+        );
+    }
+    if let (Some(rs), Some(ss), Some(pc)) = (g(22), g(23), g(24)) {
+        println!(
+            "  协议复刻：recv_seq {rs} / send_seq {ss} ns/次 + postcard 双向 {pc} ns/次 —— 对账 drx 45.6µs（≈recv_seq+stamps）、dserde 38.0µs（≈postcard）；recv_seq ≈ 5×fence 单价可交叉验证"
+        );
+    }
+    if let (Some(e0), Some(e2)) = (g(18), g(25)) {
+        println!(
+            "  空轮询：ch0 {e0} / ch2 {e2} ns（≈3×Acquire；drain 每消息批前后各一次 ch2 检查，入 dpre 段）"
+        );
+    }
+    if let Some(nn) = g(26) {
+        println!(
+            "  门铃 notify {nn} ns/次（fence+MMIO 写，ddisp 的 RP 侧成分；本轮 console 的空唤醒痕迹即本探针副作用，非异常）"
         );
     }
 
