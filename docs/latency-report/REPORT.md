@@ -209,8 +209,9 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | mcycle 三面定案 | mb cycle_hot/cycle_cal/cycle_gapped（08-21） | 热 4158c/千笔=17ns；245.84MHz（核频）；间隔读 ~2.9ms/笔（每轮 wall 6.18ms − 忙等 393µs = 2 笔） |
 | W2 预演 | BENCH_SPIN_AWAIT=1 dd | rtt p50 178.1（σ4.1） |
 
-## 附录 A：战役意外修出的三个潜伏 bug
+## 附录 A：战役意外修出的三个潜伏 bug（+1 在查）
 
 1. **槽区布局偏移错 0xF0**：`Message` 是 `align(256)`，`RingBuffer.buffer` 垫到 +0x100 而非朴素假设的 +0x10；sizeof 断言对两种布局同取整（0x8100）无法区分。修复：`ov_channels::RB_SLOTS_OFF` 作为布局唯一真相源 + host 回归单测。
 2. **AP 按行缓存刷新错位**（user-cbo `refresh_slot` 用了错的 SLOTS_OFF）：错位 0xF0 期间全靠内核 AWAIT 的 invalidate 兜底——"按行精确刷新"的优化贡献此前虚标。随 1 一并修复。
 3. **`csrr cycle` 在 M 态未实现**：用户态别名 CSR 触发 Illegal Instruction 打挂固件；改用 `mcycle`（0xB00）。
+4. **在查：fresh_scan D=100µs dummy 不可见**（08-21，两轮确定性复现 `got=0`、邻居 D=0/30/300+ 全成功）：RP 在 op 内 Acquire 轮询 200ms 未见 write 索引推进。主嫌疑 = cache.rs 登记的"read/write 同一行、flush 写回陈旧 read 回卷 RP 消费进度"竞态在"请求在途 + 追加 dummy"准流水线场景变可达（原判定仅并发流水线可达）。侦查探针已上（92cad47）：超时路径回传 RP 视角 (r,w) + 队首槽首字节（RP console log），bench 侧交叉 AP 发布前后索引——若坐实则是 user-cbo 发布链的正确性缺口，需修 publish 顺序（先槽后索引）。
