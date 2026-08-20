@@ -807,8 +807,11 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             #[inline]
             fn rdcycle() -> u64 {
                 let c: u64;
-                // SAFETY: 纯 CSR 读（cycle 计数器），无副作用。
-                unsafe { core::arch::asm!("csrr {}, cycle", out(reg) c, options(nostack)) };
+                // SAFETY: 纯 CSR 读（mcycle 计数器），无副作用。用 mcycle
+                // (0xB00) 而非 cycle (0xC00)：本核 M 态未实现用户别名
+                // （csrr cycle 触发 Illegal Instruction 打挂固件，板上
+                // 实锤 2026-08-21）；mcycle 经 rtbench 时钟标定实证可用。
+                unsafe { core::arch::asm!("csrr {}, mcycle", out(reg) c, options(nostack)) };
                 c
             }
             let mut total = 0u64;

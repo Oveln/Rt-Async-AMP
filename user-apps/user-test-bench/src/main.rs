@@ -1859,12 +1859,13 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         );
     }
     if let (Some(cg), Some(ng)) = (g(32), g(31)) {
-        // cg = 每轮 cycle 差（12k 圈忙等 + 2 笔 CSR 读）；CPU 频率档未定
-        //（SEL=0 mux 491.52/614.4），给两档换算区间。
-        let lo = cg as f64 / 614.4; // 假设 614MHz
-        let hi = cg as f64 / 491.52; // 假设 491MHz
+        // cg = 每轮 cycle 差（12k 圈忙等 + 2 笔 CSR 读）；核频以 rtbench
+        // 时钟标定实测 245.76MHz（=491.52/2）为主，SEL 档不确定性附注。
+        let est = cg as f64 / 245.76;
+        let lo = cg as f64 / 614.4;
+        let hi = cg as f64 / 122.88;
         println!(
-            "  cycle_gapped 每轮 {cg} cycle（≈{lo:.1}-{hi:.1} µs 视频率档）vs mtime 间隔读 {ng} ns/轮 —— rdcycle ≈ 忙等时长 ⇒ CSR 读无跨域税，stamp 时钟源可迁"
+            "  cycle_gapped 每轮 {cg} cycle（@245.76MHz ≈ {est:.1} µs；极限档 {lo:.1}-{hi:.1}）vs mtime 间隔读 {ng} ns/轮 —— ≈20µs ⇒ CSR 读无跨域税，stamp 时钟源可迁 mcycle"
         );
     }
     // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性
