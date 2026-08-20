@@ -117,6 +117,8 @@ mod mb_op {
     pub const POSTCARD_RT: u32 = 24;
     pub const RECV_EMPTY_CH: u32 = 25;
     pub const NOTIFY_N: u32 = 26;
+    pub const SELF_ROUND: u32 = 27;
+    pub const SELF_PEEK: u32 = 28;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1617,6 +1619,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::POSTCARD_RT, "postcard_rt      Message构解双向(PING形状)", 0, blk_n),
         (mb_op::RECV_EMPTY_CH, "recv_empty_ch2   try_recv 空 ch2 一轮", 2, spin_n),
         (mb_op::NOTIFY_N, "notify_n         门铃全成本(fence+MMIO)", 0, 100),
+        (mb_op::SELF_ROUND, "self_round       真实ch0 send+recv往返", 0, blk_n),
+        (mb_op::SELF_PEEK, "self_peek        真实ch0 peek×N(无Release)", 0, blk_n),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
@@ -1736,6 +1740,11 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     if let Some(nn) = g(26) {
         println!(
             "  门铃 notify {nn} ns/次（fence+MMIO 写，ddisp 的 RP 侧成分；本轮 console 的空唤醒痕迹即本探针副作用，非异常）"
+        );
+    }
+    if let (Some(sr), Some(sp), Some(rs), Some(ss)) = (g(27), g(28), g(22), g(23)) {
+        println!(
+            "  真实通道 vs scratch：self_round {sr} / self_peek {sp} ns vs recv_seq {rs} + send_seq {ss} —— self_round ≈ 两者之和 ⇒ 真实通道无溢价（85µs 无主另寻）；≫ 之和 ⇒ H5：真实通道上下文隐藏税"
         );
     }
 
@@ -1910,7 +1919,7 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
             closure: rtt as i64 - sum,
         });
         println!(
-            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>6.1} svc={:>6.1} X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
+            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>9.1} svc={:>6.1} drx={:>6.1} dserde={:>6.1} X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
             r.1,
             out.sent_ipi as u8,
             rtt as f64 / 1e3,
@@ -1919,6 +1928,8 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
             ddisp as f64 / 1e3,
             dseen as f64 / 1e3,
             svc_ns as f64 / 1e3,
+            drx as f64 / 1e3,
+            dserde as f64 / 1e3,
             x_plus_o as f64 / 1e3,
             s_val as f64 / 1e3,
             ap_ret as f64 / 1e3,
@@ -1929,43 +1940,68 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
     // svc 尾段分解已移除：三次 stat_round 锁存混线（板上实锤 234µs 假值，
     // 见 run_measured 同款注释）——待内核侧派生计数器随 ②a-v2 一并上。
 
+    // 按 tag 分桶输出。戳有效性（板上实证 2026-08-20）：
+    // - drx/dserde/svc/rtt/send 用本条消息自己的戳，任何发现路径下有效；
+    // - dpre/dseen 依赖 T_SCHED（唤醒入口戳，连续流下 process_elastic 不
+    //   重入故不刷新——D2/D3 样本线性膨胀至数百 ms）；ddrain/ddisp/X+o/S
+    //   依赖唤醒链戳（t_isr/t_drain），非 D1 下是上一周期残值。后五者仅
+    //   D1 桶输出。
     let d1: Vec<&DdRow> = rows.iter().filter(|x| x.tag == TAG_D1 && x.sent_ipi).collect();
     let bad = rows.len() - d1.len();
     if bad > 0 {
-        println!("[dd] ⚠ {bad}/{} 轮非 D1 或未发门铃（间隔不足？），下列统计仅 D1 样本", rows.len());
+        println!("[dd] ⚠ {bad}/{} 轮非 D1 或未发门铃——按 tag 分桶统计（间隔 <W 时 D2 样本同样有分析价值）", rows.len());
+    }
+    for (tag, name) in [(TAG_D1, "D1"), (2u8, "D2"), (3, "D3"), (4, "D4")] {
+        let bucket: Vec<&DdRow> = if tag == TAG_D1 {
+            d1.iter().copied().collect()
+        } else {
+            rows.iter().filter(|x| x.tag == tag).collect()
+        };
+        if bucket.is_empty() {
+            continue;
+        }
+        let col = |f: &dyn Fn(&&DdRow) -> u64| -> Vec<u64> { bucket.iter().map(f).collect() };
+        if tag != TAG_D1 {
+            println!("\n[dd 分布（{name} 样本，n={}）——dpre/dseen/ddrain/ddisp/X+o/S 依赖唤醒链戳，非 D1 下语义失效，不输出]", bucket.len());
+        } else {
+            println!("\n[dd 分布（D1 样本，n={}）]", bucket.len());
+        }
+        show("RTT", &calc(&col(&|x| x.rtt_ns)));
+        show("send（AP 用户态发送段）", &calc(&col(&|x| x.send_ns)));
+        show("svc（STATS 探针）", &calc(&col(&|x| x.svc_ns)));
+        // dseen 细分（stamps：本条消息自己的戳，全 tag 有效）
+        if bucket.iter().any(|x| x.ch_enter != 0) {
+            show("drx（try_recv：CH_ENTER→RECV_DONE）", &calc(&col(&|x| x.drx_ns)));
+            show("dserde（dispatch 反序列化→handler）", &calc(&col(&|x| x.dserde_ns)));
+        } else {
+            println!("  （固件无 stamps 探针，drx/dserde 细分段跳过——xtask 构建的 K3 产物 probe 恒开）");
+        }
+        if tag == TAG_D1 {
+            show("t_drain−t_isr（ISR 内 MMIO 舞步）", &calc(&col(&|x| x.ddrain_ns)));
+            show("t_sched−t_drain（trap+派发+恢复）", &calc(&col(&|x| x.ddisp_ns)));
+            show("t_seen−t_sched（取读+handler）", &calc(&col(&|x| x.dseen_ns)));
+            if d1.iter().any(|x| x.ch_enter != 0) {
+                show("dpre（sched→handler 进入）", &calc(&col(&|x| x.dpre_ns)));
+            }
+        }
+        // X+o 含未知钟差常数：去 min 归零后看抖动（负值合法，见 DdRow 文档）。
+        if tag == TAG_D1 {
+            let xs: Vec<i64> = bucket.iter().map(|x| x.x_plus_o).collect();
+            let x_min = *xs.iter().min().unwrap_or(&0);
+            let xs_rel: Vec<u64> = xs.iter().map(|&v| (v - x_min).max(0) as u64).collect();
+            show("X+o−min（去程门铃抖动，常数已归零）", &calc(&xs_rel));
+            if bucket.iter().any(|x| x.s_val < 0 || x.ap_ret < 0) {
+                println!("  ⚠ 出现负 S/AP 回程样本（戳未配对？内核未含 RD_KTS？），下列统计取 max(0,·)");
+            }
+            show("S = X+RP尾+Y（钟差无关）", &calc(&col(&|x| x.s_val.max(0) as u64)));
+            show("AP 回程 = IRQ→用户态（钟差无关）", &calc(&col(&|x| x.ap_ret.max(0) as u64)));
+            let closure: Vec<u64> = bucket.iter().map(|x| x.closure.unsigned_abs()).collect();
+            show("闭环残差 |rtt−Σ|（应 ≈0）", &calc(&closure));
+        }
     }
     if d1.is_empty() {
-        println!("[dd] 无 D1 样本——检查间隔（应 ≥2W）");
-        return;
+        println!("[dd] 无 D1 样本（间隔 <2W 时正常——看上方 D2/D3 桶）");
     }
-    let col = |f: &dyn Fn(&&DdRow) -> u64| -> Vec<u64> { d1.iter().map(f).collect() };
-    println!("\n[dd 分布（D1 样本，n={}）]", d1.len());
-    show("RTT", &calc(&col(&|x| x.rtt_ns)));
-    show("send（AP 用户态发送段）", &calc(&col(&|x| x.send_ns)));
-    show("t_drain−t_isr（ISR 内 MMIO 舞步）", &calc(&col(&|x| x.ddrain_ns)));
-    show("t_sched−t_drain（trap+派发+恢复）", &calc(&col(&|x| x.ddisp_ns)));
-    show("t_seen−t_sched（取读+handler）", &calc(&col(&|x| x.dseen_ns)));
-    // dseen 细分三段（dseen 85µs 残余的定位面）：固件须带 probe（stamps）。
-    if d1.iter().any(|x| x.ch_enter != 0) {
-        show("dpre（sched→handler 进入）", &calc(&col(&|x| x.dpre_ns)));
-        show("drx（handler 取读消息槽）", &calc(&col(&|x| x.drx_ns)));
-        show("dserde（反序列化→seen）", &calc(&col(&|x| x.dserde_ns)));
-    } else {
-        println!("  （固件无 stamps 探针，dpre/drx/dserde 细分段跳过——xtask 构建的 K3 产物 probe 恒开）");
-    }
-    show("svc（STATS 探针）", &calc(&col(&|x| x.svc_ns)));
-    // X+o 含未知钟差常数：去 min 归零后看抖动（负值合法，见 DdRow 文档）。
-    let xs: Vec<i64> = d1.iter().map(|x| x.x_plus_o).collect();
-    let x_min = *xs.iter().min().unwrap_or(&0);
-    let xs_rel: Vec<u64> = xs.iter().map(|&v| (v - x_min).max(0) as u64).collect();
-    show("X+o−min（去程门铃抖动，常数已归零）", &calc(&xs_rel));
-    if d1.iter().any(|x| x.s_val < 0 || x.ap_ret < 0) {
-        println!("  ⚠ 出现负 S/AP 回程样本（戳未配对？内核未含 RD_KTS？），下列统计取 max(0,·)");
-    }
-    show("S = X+RP尾+Y（钟差无关）", &calc(&col(&|x| x.s_val.max(0) as u64)));
-    show("AP 回程 = IRQ→用户态（钟差无关）", &calc(&col(&|x| x.ap_ret.max(0) as u64)));
-    let closure: Vec<u64> = d1.iter().map(|x| x.closure.unsigned_abs()).collect();
-    show("闭环残差 |rtt−Σ|（应 ≈0）", &calc(&closure));
     println!(
         "\n[dd] 预算恒等式：rtt = send + ddrain + ddisp + dseen + (X+RP尾+Y) + AP回程\n\
          \x20    （X 单独值受钟差常数污染：两钟 epoch 不同且跨轮有 ppm 级漂移，\n\

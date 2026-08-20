@@ -404,6 +404,15 @@ pub mod membench_op {
     /// mailbox MMIO 写。注意：N 次假唤醒 AP 侧 AWAIT（bench 循环耐受，
     /// 本轮 console 会多 N 条空唤醒痕迹，不影响协议）
     pub const NOTIFY_N: u32 = 26;
+    /// 真实 ch0 一来一回 ×N（arg=次数，0→200）：try_send 小消息 + try_recv
+    /// 收回（净零）。探针期间 AP 阻塞在 MEMBENCH 响应等待（单请求在途），
+    /// ch0 无并发生产者。H5：真实通道上下文 vs scratch 复刻（recv_seq +
+    /// send_seq）的溢价——D2 热态 svc 实测比探针合计仍高 ~85µs 的定位面
+    pub const SELF_ROUND: u32 = 27;
+    /// 真实 ch0：try_send 1 条 → peek ×N（magic+双索引 Acquire + 槽读，无
+    /// Release/无索引推进）→ try_recv 清 1 条。与 SELF_ROUND 对照分离
+    /// read Release 与索引推进的成本
+    pub const SELF_PEEK: u32 = 28;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -675,6 +684,37 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 ov_shm::notifier::notifier().notify();
             }
             ck = iters as u64;
+        }
+        M::SELF_ROUND | M::SELF_PEEK => {
+            // 真实 ch0 自往返：AP 此刻阻塞在 MEMBENCH 响应等待（同步 RPC），
+            // ch0 无并发生产者；成对 send/recv 每轮净零，不污染协议。
+            let shm3 = unsafe { SharedMemory::<3>::at(SHM_BASE.load(Ordering::Acquire)) };
+            let tx = shm3.sender(ChannelId::new(0)).expect("ch0 sender");
+            let rx = shm3.receiver(ChannelId::new(0)).expect("ch0 receiver");
+            if op == M::SELF_ROUND {
+                let msg = Message::notification(0x50);
+                let mut fails = 0u64;
+                for _ in 0..n(200) {
+                    if tx.try_send(&msg).is_err() {
+                        fails += 1;
+                    }
+                    if rx.try_recv().is_none() {
+                        fails += 1;
+                    }
+                }
+                ck = ck.wrapping_add(fails);
+            } else {
+                // peek 循环：槽读与 Acquire 单价分离 Release/推进
+                if tx.try_send(&Message::notification(0x51)).is_err() {
+                    ck = ck.wrapping_add(1);
+                }
+                for _ in 0..n(200) {
+                    if rx.peek().is_some() {
+                        ck = ck.wrapping_add(1);
+                    }
+                }
+                let _ = rx.try_recv();
+            }
         }
         _ => return (0, 0),
     }
