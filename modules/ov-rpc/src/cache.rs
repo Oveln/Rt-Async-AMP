@@ -34,17 +34,27 @@ pub const CACHE_LINE: usize = 64;
 /// cache line**，publish/refresh 一并覆盖。
 pub const RB_OFF: usize = 0x100;
 
-/// 消息槽在 `Channel` 内的起始偏移（RingBuffer 头 0x10 之后）。
-pub const SLOTS_OFF: usize = RB_OFF + 0x10;
+/// 消息槽在 `Channel` 内的起始偏移 = RingBuffer(0x100) + RingBuffer 内
+/// buffer 字段偏移。
+///
+/// **2026-08-20 布局 bug 修正**：`Message` 为 `align(256)`，RingBuffer 的
+/// buffer 字段对齐垫到 +0x100（真相源 `ov_channels::RB_SLOTS_OFF`）——
+/// 本常量此前按 buffer@+0x10 误算为 0x110，导致 [`refresh_slot`] 刷新
+/// 区错位 0xF0（槽区前 240B 未刷、多刷下一槽首行）。期间 AP 侧能正常
+/// 读到响应，是因为内核 AWAIT 就绪检查前的 invalidate（含 ch1 全槽行）
+/// 一直在兜底——"按行精确刷新"的优化贡献实际虚标。
+pub const SLOTS_OFF: usize = RB_OFF + ov_channels::RB_SLOTS_OFF;
 
 // ov-channels 0.2.0 布局编译期对账：Message=256B；RingBuffer =
-// {read,write} 0x10 + 128×256，repr(align(256)) 尺寸取整到 0x8100；
-// Channel = 4B 头 + 0x100 偏移的 RingBuffer = 0x8200。crate 升级若改变
-// 布局，这里立即编译失败，逼着重新核对本模块的偏移常量。
+// {read,write} 头 + buffer（对齐 256，偏移 RB_SLOTS_OFF）+ 128×256，
+// repr(align(256)) 尺寸取整到 0x8100；Channel = 4B 头 + 0x100 偏移的
+// RingBuffer = 0x8200。crate 升级若改变布局，这里立即编译失败，逼着
+// 重新核对本模块的偏移常量。
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<ov_channels::Message>() == 256);
-    const RB_SIZE: usize = (0x10 + ov_channels::CHANNEL_CAPACITY * 256 + 0xFF) & !0xFF;
+    const RB_SIZE: usize =
+        (ov_channels::RB_SLOTS_OFF + ov_channels::CHANNEL_CAPACITY * 256 + 0xFF) & !0xFF;
     assert!(size_of::<ov_channels::Channel>() == RB_OFF + RB_SIZE);
 };
 

@@ -210,7 +210,10 @@ impl RpcServer {
                     if read == _write {
                         None
                     } else {
-                        let slot = (base + 0x110
+                        // 槽区偏移 = Channel 内 RB(0x100) + RingBuffer 内
+                        // buffer 对齐偏移（ov_channels::RB_SLOTS_OFF=0x100，
+                        // Message align(256)——布局真相源见该常量注释）。
+                        let slot = (base + 0x100 + ov_channels::RB_SLOTS_OFF
                             + read * core::mem::size_of::<ov_channels::Message>())
                             as *const ov_channels::Message;
                         let m = slot.read_volatile();
