@@ -125,6 +125,11 @@ mod mb_op {
     pub const CYCLE_GAPPED: u32 = 32;
     pub const CYCLE_HOT: u32 = 33;
     pub const CYCLE_CAL: u32 = 34;
+    pub const TMR_SETUP: u32 = 35;
+    pub const TMR_HOT: u32 = 36;
+    pub const TMR_GAPPED: u32 = 37;
+    pub const TMR_CAL: u32 = 38;
+    pub const TMR_B_SCAN: u32 = 39;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1728,14 +1733,46 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::CYCLE_GAPPED, "cycle_gapped     间隔~20µs的mcycle读", 0, 64),
         (mb_op::CYCLE_HOT, "cycle_hot        mcycle热读×1000", 0, 1),
         (mb_op::CYCLE_CAL, "cycle_cal        5ms联标mcycle频率", 0, 1),
+        // 计时源替换候选：AP 域 soc-timer 0xd4016000 空闲 counter1（mtime
+        // 冷读税 24.5µs/笔 的根治候选，布局=上游 timer-k1x.c）
+        (mb_op::TMR_SETUP, "tmr_setup        soc-timer c1 自由运行化", 0, 1),
+        (mb_op::TMR_HOT, "tmr_hot          counter1 热读×4000", 0, 4000),
+        (mb_op::TMR_GAPPED, "tmr_gapped       间隔20µs读counter1", 0, 64),
+        (mb_op::TMR_CAL, "tmr_cal          5ms联标counter1频率", 0, 1),
+        // 排表尾：K3 若无 d4014000 块，本 op 读可能总线错误挂死固件
+        (mb_op::TMR_B_SCAN, "tmr_b_scan       d4014000侦查(可能挂死)", 0, 1),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
+    // soc-timer 探针的原始 (ns, ck)——判读需要 ck 槽（打包寄存器快照）
+    let mut tmr_setup_seen = false;
+    let mut tmr_setup_ck: u64 = 0;
+    let mut tmr_cal_ck: u64 = 0;
+    let mut bscan_seen = false;
+    let mut bscan_raw: (u64, u64) = (0, 0);
     for (i, &(op, name, arg, count)) in ops.iter().enumerate() {
         let (ns, ck) = b.membench_round(op, arg).unwrap_or_else(die);
         if ns == 0 && ck == 0 {
+            if op == mb_op::TMR_B_SCAN {
+                // 全零回读本身是有效结论：块不存在/时钟未开（未挂死）
+                println!("  {name:<40} 全零回读（d4014000 无此块或时钟未开）");
+                bscan_seen = true;
+                continue;
+            }
             println!("  {name:<40} 未知 op（固件/工具版本不匹配？）");
             continue;
+        }
+        match op {
+            x if x == mb_op::TMR_SETUP => {
+                tmr_setup_seen = true;
+                tmr_setup_ck = ck;
+            }
+            x if x == mb_op::TMR_CAL => tmr_cal_ck = ck,
+            x if x == mb_op::TMR_B_SCAN => {
+                bscan_seen = true;
+                bscan_raw = (ns, ck);
+            }
+            _ => {}
         }
         let each = ns / count.max(1) as u64;
         per.push((i, each));
@@ -1876,6 +1913,45 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         let hot_ns = hot as f64 / 1000.0 / mhz * 1000.0;
         println!(
             "  cycle_cal：热读 {hot} cycle/千笔（≈{hot_ns:.0} ns/笔 @ {mhz:.2}MHz）；mcycle 频率 = {mhz:.2} MHz —— 热读快且频率≈核频 ⇒ 仅冷读慢（stamp 链可短间隔热身救）；热读慢或=24MHz ⇒ mcycle 与 mtime 同源同税，计时源需第三方案"
+        );
+    }
+    // 计时源替换候选三面判读：AP 域 soc-timer 0xd4016000 空闲 counter1
+    // （AP 仅用 counter0 做广播、块时钟常开；布局=上游 timer-k1x.c）。
+    // 免冷读税即可承接 step/SVC/stamp 计时（mtime 24.5µs/笔 的根治）。
+    if let (Some(ng), Some(tg)) = (g(30), g(36)) {
+        let delta = tg as i64 - ng as i64;
+        println!(
+            "  tmr_gapped 每轮 {tg} vs now_gapped {ng}（结构仅差 1 笔候选读）⇒ 候选冷读 Δ={delta} ns —— |Δ|<1µs ⇒ 免跨域税、计时源可迁；Δ≈24500 ⇒ 与 mtime 同病，弃"
+        );
+    }
+    if let Some(th) = g(35) {
+        println!(
+            "  tmr_hot {th} ns/笔（mtime 括号冷读税已摊薄 ~12ns；对照 rd_mtime 热 106ns / mailbox 寄存器 148ns）"
+        );
+    }
+    if let Some(tc) = g(37) {
+        let hz = tc as f64 * 24_000_000.0 / tmr_cal_ck.max(1) as f64;
+        println!(
+            "  tmr_cal：counter1 5ms 走 {tc} ticks（mtime 窗口 {tmr_cal_ck} ticks）⇒ ≈{hz:.0} Hz（预期 1MHz = AP dts timer-frequency）；值≈5000 且单调 ⇒ 自由运行、未被 AP 重编程打断"
+        );
+    }
+    if tmr_setup_seen {
+        let retries = tmr_setup_ck & 0xffff_ffff;
+        let cer = tmr_setup_ck >> 32;
+        println!(
+            "  tmr_setup：CER={cer:#x}（bit1={}，retries={retries}；cer/cmr/ccr/cr0/cr1 快照见 RP console log）",
+            cer & 2 != 0
+        );
+    }
+    if bscan_seen {
+        let (ns, ck) = bscan_raw;
+        let a = ns & 0xffff_ffff;
+        let b = ns >> 32;
+        let cer = ck >> 32;
+        let cr1 = ck & 0xffff_ffff;
+        println!(
+            "  tmr_b_scan：d4014000 CR0 {a:#x}→{b:#x}（Δ={}）/CER={cer:#x}/CR1={cr1:#x} —— Δ>0 且≈1000（1ms@1MHz）⇒ 独立块活着（无共享候选）；全 0 或不变 ⇒ 无块/时钟未开",
+            b.wrapping_sub(a)
         );
     }
     // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性

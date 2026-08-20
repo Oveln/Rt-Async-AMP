@@ -450,6 +450,24 @@ pub mod membench_op {
     /// mtime 差 ticks)。板上 cycle_gapped 每轮 wall ≈6.18ms 且反推 mcycle
     /// 恰 24MHz——联标判 mcycle 是否真核频计数还是与 mtime 同源
     pub const CYCLE_CAL: u32 = 34;
+    /// soc-timer counter1 自由运行化（一次性）：AP 域 0xd4016000 块（AP dts
+    /// timer-id 0，counter0=AP 广播用；counter1/2 空闲且块时钟常开）。
+    /// 置 CMR bit1 + PLCR1=0 + CER bit1（回读校验重试，CER 与 AP 共享）。
+    /// 寄存器布局镜像上游 timer-k1x.c（MMP 血统）：CR(n)=+0x90+(n<<2) 即
+    /// DS 所称 TCCRn。mtime 冷读税（24.5µs/笔）的替换候选
+    pub const TMR_SETUP: u32 = 35;
+    /// counter1（TMR_CR1=0xd4016094）热连读 ×N（默认 4000，mtime 括号计时）
+    pub const TMR_HOT: u32 = 36;
+    /// NOW_GAPPED 同构 + t1 前插入 1 笔 counter1 读：每轮与 NOW_GAPPED 的
+    /// 差 = 候选"间隔 ~20µs 冷读"边际成本 Δ。Δ≈0 ⇒ 免跨域税可换源
+    pub const TMR_GAPPED: u32 = 37;
+    /// counter1↔mtime 5ms 频率联标 + 单调性哨兵（c1 递增且未被 AP 重编程
+    /// 打断——AP 广播只动 counter0）。返回 (counter ticks, mtime ticks)
+    pub const TMR_CAL: u32 = 38;
+    /// 候选 B 侦查：d4014000 块（K1 dts timer0；K3 AP dts 无节点——若存在
+    /// 即无共享独立块）。若 K3 无此块/时钟未开，读可能总线错误挂死固件：
+    /// 排表尾，挂死不影响已打印结果
+    pub const TMR_B_SCAN: u32 = 39;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -855,6 +873,108 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             let m1 = chip_k3_rt24::clint_k3::TIMER.now();
             return (c1.wrapping_sub(c0), m1.wrapping_sub(m0));
         }
+        M::TMR_SETUP => {
+            // soc-timer counter1 自由运行化。CER 与 AP 共享（其对 bit0 做
+            // 读改写）：写后回读校验 + 重试，跨核 RMW 竞态一次性收敛；
+            // CMR/PLCR(1) AP 初始化后不再触碰，直接写安全。
+            use platform::Timer as _;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let ccr = tmr1_rd(TMR_CCR);
+            let cmr = tmr1_rd(TMR_CMR);
+            tmr1_wr(TMR_CMR, cmr | (1 << 1));
+            tmr1_wr(TMR_PLCR1, 0);
+            let mut retries = 0u64;
+            for _ in 0..8 {
+                let cer = tmr1_rd(TMR_CER);
+                tmr1_wr(TMR_CER, cer | (1 << 1));
+                if tmr1_rd(TMR_CER) & (1 << 1) != 0 {
+                    break;
+                }
+                retries += 1;
+            }
+            let cer = tmr1_rd(TMR_CER);
+            log::info!(
+                "[mb] tmr_setup: cer={:#x} cmr={:#x} ccr={:#x} cr0={:#x} cr1={:#x} retries={retries}",
+                cer,
+                tmr1_rd(TMR_CMR),
+                ccr,
+                tmr1_rd(TMR_CR0),
+                tmr1_rd(TMR_CR1)
+            );
+            let ns = ticks_to_ns(chip_k3_rt24::clint_k3::TIMER.now() - t0);
+            // ck 打包 (cer<<32 | retries)；ns 含本 op 首笔 mtime 冷读税，
+            // 仅作参考（寄存器快照在 RP console log）
+            return (ns, ((cer as u64) << 32) | retries);
+        }
+        M::TMR_HOT => {
+            // counter1 热连读 ×n（默认 4000）。mtime 括号首尾 2 笔为冷读
+            // （~24.5µs/笔），4000 次摊薄后 ~12ns/笔，判读时扣除
+            use platform::Timer as _;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let mut sink = 0u64;
+            for _ in 0..n(4000) {
+                sink = sink.wrapping_add(tmr1_rd(TMR_CR1) as u64);
+            }
+            let t1 = chip_k3_rt24::clint_k3::TIMER.now();
+            let _ = sink;
+            return (ticks_to_ns(t1.wrapping_sub(t0)), 4000);
+        }
+        M::TMR_GAPPED => {
+            // NOW_GAPPED 同构，仅在 t1 前插入 1 笔 counter1 读：每轮与
+            // NOW_GAPPED 的差 = 候选冷读边际成本 Δ（两 op 结构仅差此一笔）
+            use platform::Timer as _;
+            let freq = chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
+            let gap = freq / 50_000; // 20µs
+            let mut total = 0u64;
+            for _ in 0..n(64) {
+                let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+                let mut t = chip_k3_rt24::clint_k3::TIMER.now();
+                while t < t0 + gap {
+                    core::hint::spin_loop();
+                    t = chip_k3_rt24::clint_k3::TIMER.now();
+                }
+                // 待测：间隔 ~20µs 后的候选冷读
+                ck = ck.wrapping_add(tmr1_rd(TMR_CR1) as u64);
+                let t1 = chip_k3_rt24::clint_k3::TIMER.now();
+                total = total.wrapping_add(t1.wrapping_sub(t0));
+            }
+            return (ticks_to_ns(total), ticks_to_ns(gap));
+        }
+        M::TMR_CAL => {
+            // counter1↔mtime 5ms 联标：返回 (counter ticks, mtime ticks)。
+            // c1−c0 ≈ 5000（1MHz）且单调 ⇒ 自由运行、未被 AP 重编程打断
+            use platform::Timer as _;
+            let m0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let c0 = tmr1_rd(TMR_CR1) as u64;
+            let target = m0 + 120_000; // 5ms @ 24MHz
+            let mut m = chip_k3_rt24::clint_k3::TIMER.now();
+            while m < target {
+                core::hint::spin_loop();
+                m = chip_k3_rt24::clint_k3::TIMER.now();
+            }
+            let c1 = tmr1_rd(TMR_CR1) as u64;
+            let m1 = chip_k3_rt24::clint_k3::TIMER.now();
+            return (c1.wrapping_sub(c0), m1.wrapping_sub(m0));
+        }
+        M::TMR_B_SCAN => {
+            // d4014000 侦查（候选 B）：两次 CR0 读隔 1ms + CER/CR1 快照。
+            // K3 无此块/时钟未开时本读可能总线错误挂死——排表尾即为此
+            let a = tmr0_rd(TMR_CR0);
+            let cer = tmr0_rd(TMR_CER);
+            let cr1 = tmr0_rd(TMR_CR1);
+            use platform::Timer as _;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let target = t0 + 24_000; // 1ms @ 24MHz
+            while chip_k3_rt24::clint_k3::TIMER.now() < target {
+                core::hint::spin_loop();
+            }
+            let b = tmr0_rd(TMR_CR0);
+            // ns 打包 (第二次 CR0 << 32 | 第一次 CR0)，ck 打包 (CER<<32|CR1)
+            return (
+                ((b as u64) << 32) | (a as u64),
+                ((cer as u64) << 32) | (cr1 as u64),
+            );
+        }
         _ => return (0, 0),
     }
     let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
@@ -871,6 +991,61 @@ fn read_mcycle() -> u64 {
     // SAFETY: 纯 CSR 读（mcycle 计数器），无副作用。
     unsafe { core::arch::asm!("csrr {}, mcycle", out(reg) c, options(nostack)) };
     c
+}
+
+// ============================================================================
+// soc-timer（AP 域通用定时器，mtime 冷读税替换候选，2026-08-21）
+// ============================================================================
+//
+// 候选来源：docs-chip K3 DS §2.9.3（9× 32 位 TCCRn 向上计数器）+ tgoskits
+// AP dts `timer@d4016000`（spacemit,soc-timer，AP 用 counter0 做广播，计数
+// 1MHz）+ 上游 timer-k1x.c 驱动（MMP 血统寄存器布局）。AP 只动 counter0，
+// counter1/2 空闲且块时钟常开（AP 依赖它）——RP 零门控共享。
+//
+// 寄存器偏移（timer-k1x.c）：CER=+0x00（bit n=counter n 使能，AP 跨核 RMW
+// 仅动 bit0）/ CMR=+0x04（bit n=自由运行模式）/ CCR=+0x0c（块级时钟选择：
+// fastclk 或 32kHz，AP 已选 fastclk）/ PLCR(n)=+0x50+(n<<2)（0=自由运行）/
+// CR(n)=+0x90+(n<<2)（32 位计数器值，即 DS 的 TCCRn）。
+#[cfg(feature = "probe")]
+const TMR1_BASE: usize = 0xd401_6000;
+/// d4014000 块（K1 dts timer0；K3 存在性未知——TMR_B_SCAN 侦查）
+#[cfg(feature = "probe")]
+const TMR0_BASE: usize = 0xd401_4000;
+#[cfg(feature = "probe")]
+const TMR_CER: usize = 0x00;
+#[cfg(feature = "probe")]
+const TMR_CMR: usize = 0x04;
+#[cfg(feature = "probe")]
+const TMR_CCR: usize = 0x0c;
+#[cfg(feature = "probe")]
+const TMR_PLCR1: usize = 0x54;
+#[cfg(feature = "probe")]
+const TMR_CR0: usize = 0x90;
+#[cfg(feature = "probe")]
+const TMR_CR1: usize = 0x94;
+
+/// 读 d4016000（AP 共享块）寄存器。
+#[cfg(feature = "probe")]
+#[inline]
+fn tmr1_rd(off: usize) -> u32 {
+    // SAFETY: 纯 MMIO 读，无副作用。
+    unsafe { ((TMR1_BASE + off) as *const u32).read_volatile() }
+}
+
+/// 写 d4016000（AP 共享块）寄存器。仅 probe 探针上下文调用。
+#[cfg(feature = "probe")]
+#[inline]
+fn tmr1_wr(off: usize, v: u32) {
+    // SAFETY: 纯 MMIO 写（探针已论证的目标寄存器）。
+    unsafe { ((TMR1_BASE + off) as *mut u32).write_volatile(v) }
+}
+
+/// 读 d4014000（候选 B，存在性未知）寄存器。
+#[cfg(feature = "probe")]
+#[inline]
+fn tmr0_rd(off: usize) -> u32 {
+    // SAFETY: 纯 MMIO 读，无副作用。
+    unsafe { ((TMR0_BASE + off) as *const u32).read_volatile() }
 }
 
 /// 当前发现路径标签（D1..D4）。仅 IPC 任务写，handler 读。
