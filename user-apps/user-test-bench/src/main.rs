@@ -1713,9 +1713,14 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     // H3 其他调用链。以下探针逐一钉死，结论决定 P3（fence 去冗余）与
     // W2（双向轮询）的排序。
     if let (Some(hot), Some(dist), Some(cold), Some(mt)) = (g(13), g(20), g(21), g(12)) {
+        let net = cold.saturating_sub(mt);
+        let verdict = if net > hot * 3 / 2 {
+            "cold≫hot ⇒ H1 成立：dseen 真构成 = ~14 笔 × cold 而非 41 笔 × hot"
+        } else {
+            "cold≈hot ⇒ H1 证伪：fence 单价与冷热/地址无关，dseen 无主部分另寻他因（冷核执行？dd 冷/热对比）"
+        };
         println!(
-            "  fence 单价三口径：同址热 {hot} / 跨址 {dist} / 跨址+间隔 {cold} ns（扣 mtime ≈ {} ns）—— cold≫hot ⇒ H1 成立：dseen 真构成 = 14 笔 × cold 而非 41 笔 × hot",
-            cold.saturating_sub(mt)
+            "  fence 单价三口径：同址热 {hot} / 跨址 {dist} / 跨址+间隔 {cold}（扣 mtime ≈ {net}）ns —— {verdict}"
         );
     }
     if let (Some(rs), Some(ss), Some(pc)) = (g(22), g(23), g(24)) {
