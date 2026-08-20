@@ -120,6 +120,8 @@ mod mb_op {
     pub const SELF_ROUND: u32 = 27;
     pub const SELF_PEEK: u32 = 28;
     pub const FRESH_WAIT_RECV: u32 = 29;
+    pub const DISPATCH_N: u32 = 30;
+    pub const NOW_GAPPED: u32 = 31;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1718,6 +1720,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::NOTIFY_N, "notify_n         门铃全成本(fence+MMIO)", 0, 100),
         (mb_op::SELF_ROUND, "self_round       真实ch0 send+recv往返", 0, blk_n),
         (mb_op::SELF_PEEK, "self_peek        真实ch0 peek×N(无Release)", 0, blk_n),
+        (mb_op::DISPATCH_N, "dispatch_n       op内完整dispatch(PING)", 0, blk_n),
+        (mb_op::NOW_GAPPED, "now_gapped       间隔20µs的mtime读", 0, 64),
     ];
     println!("[mb] RP 内存/MMIO 微基准：行级 ×{line_n}，块级 ×{blk_n}（mtime 计时，含 ~ns 级循环开销）");
     let mut per: Vec<(usize, u64)> = Vec::new();
@@ -1842,6 +1846,14 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     if let (Some(sr), Some(sp), Some(rs), Some(ss)) = (g(27), g(28), g(22), g(23)) {
         println!(
             "  真实通道 vs scratch：self_round {sr} / self_peek {sp} ns vs recv_seq {rs} + send_seq {ss} —— self_round ≈ 两者之和 ⇒ 真实通道无溢价（85µs 无主另寻）；≫ 之和 ⇒ H5：真实通道上下文隐藏税"
+        );
+    }
+    // L0 终拆后续（2026-08-21 板上细拆：didx 7.8/dslot 37.2/dmth 1.1/drest 34.0
+    // ——索引读完美对账，缺口= 槽读+Release 与 dispatch/postcard 各 ~34µs）。
+    if let (Some(dn), Some(ng)) = (g(30), g(31)) {
+        let per_read = (ng.saturating_sub(20_000)) / 2;
+        println!(
+            "  dispatch_n {dn} ns/次 vs drest 34.0µs —— op 内 ≪ drest ⇒ 纯上下文税（mark 链/代码位置）；≈ drest ⇒ dispatch 本体慢\n  now_gapped 每轮 {ng} ns（含 20µs 忙等 + 2 笔 mtime 读）⇒ 间隔读 ≈ {per_read} ns/笔 vs RD_MTIME 热循环 106ns",
         );
     }
     // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性

@@ -421,6 +421,17 @@ pub mod membench_op {
     /// 前写入的消息"的单笔价格；D→∞ 应回落 recv_seq 价（~11.7µs），短 D
     /// 若 ≈ drx（43.6µs）⇒ H8：读 AP 新鲜写的行有确定性税（posted 写落地）
     pub const FRESH_WAIT_RECV: u32 = 29;
+    /// L0 终拆后续：op 上下文直接调 dispatch 完整路径（`RtAsyncRpc::handle`
+    /// = 宏 match + postcard args 反序列化 + handler + response 序列化）
+    /// ×N（arg=次数，0→200）。drest 34µs vs 本探针的差额 = "op 上下文 vs
+    /// process_channel 上下文"的纯上下文税；若本探针也 ~30µs ⇒ postcard/
+    /// 宏本身在真实形状下慢（此前 postcard_rt 双向 9.4µs 是热循环价）
+    pub const DISPATCH_N: u32 = 30;
+    /// 间隔版 mtime 读：N 轮 {t0=now(); 忙等 ~20µs; t1=now()}，返回 Σ 轮内
+    /// now() 计时。测"间隔 20µs 的单笔 mtime MMIO 读"单价（RD_MTIME 的
+    /// 106ns 是背靠背热循环价；真实路径的 stamp mark 每条消息 4-6 次、
+    /// 间隔 µs~百 ms——若冷读 µs 级，mark 链即是隐藏税）
+    pub const NOW_GAPPED: u32 = 31;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -745,6 +756,44 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                     return (0, 0);
                 }
             }
+        }
+        M::DISPATCH_N => {
+            // op 上下文完整 dispatch（PING 形状：args (u64,)，response 10 元）
+            let msg = Message::request(0x5A5A, 3, &(7u64,)).expect("req serialize");
+            for k in 0..n(200) {
+                match <RtAsyncRpc as ov_rpc::RpcHandler>::handle(3, msg) {
+                    Ok(Some(r)) => {
+                        let (_rid, _v): (u64, (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64)) =
+                            r.as_response().expect("resp shape");
+                    }
+                    _ => {
+                        ck = ck.wrapping_add(k as u64);
+                    }
+                }
+            }
+            ck = ck.wrapping_add(1);
+        }
+        M::NOW_GAPPED => {
+            // 单笔"间隔 mtime 读"单价：每轮 t0/now 间隔 ~20µs 忙等。
+            use platform::Timer as _;
+            let freq = chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
+            let gap = freq / 50_000; // 20µs
+            let mut total = 0u64;
+            let t_all = chip_k3_rt24::clint_k3::TIMER.now();
+            for _ in 0..n(200) {
+                let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+                let mut t = chip_k3_rt24::clint_k3::TIMER.now();
+                while t < t0 + gap {
+                    core::hint::spin_loop();
+                    t = chip_k3_rt24::clint_k3::TIMER.now();
+                }
+                // 忙等后首读 ≈ 冷读；计入总计时（扣 gap 由 bench 判读）
+                let t1 = chip_k3_rt24::clint_k3::TIMER.now();
+                total = total.wrapping_add(t1.wrapping_sub(t0));
+            }
+            let span = chip_k3_rt24::clint_k3::TIMER.now() - t_all;
+            let _ = span;
+            return (ticks_to_ns(total), ticks_to_ns(gap));
         }
         _ => return (0, 0),
     }
