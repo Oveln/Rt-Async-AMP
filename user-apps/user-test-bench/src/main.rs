@@ -129,6 +129,7 @@ mod mb_op {
     pub const TMR_GAPPED: u32 = 37;
     pub const TMR_CAL: u32 = 38;
     pub const TMR_B_SCAN: u32 = 39;
+    pub const TMR_CLKON: u32 = 40;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1686,7 +1687,10 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::CYCLE_HOT, "cycle_hot        mcycle热读×1000", 0, 1),
         (mb_op::CYCLE_CAL, "cycle_cal        5ms联标mcycle频率", 0, 1),
         // 计时源替换候选：AP 域 soc-timer 0xd4016000 空闲 counter1（mtime
-        // 冷读税 24.5µs/笔 的根治候选，布局=上游 timer-k1x.c）
+        // 冷读税 24.5µs/笔 的根治候选，布局=上游 timer-k1x.c）。
+        // clkon 先行：首轮实锤 StarryOS 不用该块、APBC 时钟常闭，须先开
+        // 门+去复位（位定义=主线 ccu-k3.c），后续三面才有意义
+        (mb_op::TMR_CLKON, "tmr_clkon        APBC开TIMERS1时钟+复位", 0, 1),
         (mb_op::TMR_SETUP, "tmr_setup        soc-timer c1 自由运行化", 0, 1),
         (mb_op::TMR_HOT, "tmr_hot          counter1 热读×4000", 0, 4000),
         (mb_op::TMR_GAPPED, "tmr_gapped       间隔20µs读counter1", 0, 64),
@@ -1699,6 +1703,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     // soc-timer 探针的原始 (ns, ck)——判读需要 ck 槽（打包寄存器快照）
     let mut tmr_setup_seen = false;
     let mut tmr_setup_ck: u64 = 0;
+    let mut tmr_clkon_seen = false;
+    let mut tmr_clkon_ck: u64 = 0;
     let mut tmr_cal_ck: u64 = 0;
     let mut bscan_seen = false;
     let mut bscan_raw: (u64, u64) = (0, 0);
@@ -1718,6 +1724,10 @@ fn run_mb(b: &mut Bench, line_n: u32) {
             x if x == mb_op::TMR_SETUP => {
                 tmr_setup_seen = true;
                 tmr_setup_ck = ck;
+            }
+            x if x == mb_op::TMR_CLKON => {
+                tmr_clkon_seen = true;
+                tmr_clkon_ck = ck;
             }
             x if x == mb_op::TMR_CAL => tmr_cal_ck = ck,
             x if x == mb_op::TMR_B_SCAN => {
@@ -1869,19 +1879,28 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     }
     // 计时源替换候选三面判读：AP 域 soc-timer 0xd4016000 空闲 counter1
     // （AP 仅用 counter0 做广播、块时钟常开；布局=上游 timer-k1x.c）。
-    // 免冷读税即可承接 step/SVC/stamp 计时（mtime 24.5µs/笔 的根治）。
-    if let (Some(ng), Some(tg)) = (g(30), g(36)) {
+    // 免冷读税即可承接 step/SVC/stamp 计时（mtime 冷读 24.5µs/笔 的根治）。
+    // 注意表序 clkon 在 setup 前（先开 APBC 门，首轮实锤块常闭）。
+    if tmr_clkon_seen {
+        let cer = tmr_clkon_ck >> 32;
+        let d = tmr_clkon_ck & 0xffff_ffff;
+        println!(
+            "  tmr_clkon：CER={cer:#x}（bit1={}）1ms 计数 Δ={d} —— Δ≈12800 ⇒ 12.8MHz 活（mux=0）；Δ≈其他 ⇒ 按 mux 换算；0 ⇒ 仍死（门/复位极性，见 RP console 的 variant）",
+            cer & 2 != 0
+        );
+    }
+    if let (Some(ng), Some(tg)) = (g(30), g(37)) {
         let delta = tg as i64 - ng as i64;
         println!(
             "  tmr_gapped 每轮 {tg} vs now_gapped {ng}（结构仅差 1 笔候选读）⇒ 候选冷读 Δ={delta} ns —— |Δ|<1µs ⇒ 免跨域税、计时源可迁；Δ≈24500 ⇒ 与 mtime 同病，弃"
         );
     }
-    if let Some(th) = g(35) {
+    if let Some(th) = g(36) {
         println!(
             "  tmr_hot {th} ns/笔（mtime 括号冷读税已摊薄 ~12ns；对照 rd_mtime 热 106ns / mailbox 寄存器 148ns）"
         );
     }
-    if let Some(tc) = g(37) {
+    if let Some(tc) = g(38) {
         let hz = tc as f64 * 24_000_000.0 / tmr_cal_ck.max(1) as f64;
         println!(
             "  tmr_cal：counter1 5ms 走 {tc} ticks（mtime 窗口 {tmr_cal_ck} ticks）⇒ ≈{hz:.0} Hz（预期 1MHz = AP dts timer-frequency）；值≈5000 且单调 ⇒ 自由运行、未被 AP 重编程打断"

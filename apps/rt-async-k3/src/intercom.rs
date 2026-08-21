@@ -468,6 +468,12 @@ pub mod membench_op {
     /// 即无共享独立块）。若 K3 无此块/时钟未开，读可能总线错误挂死固件：
     /// 排表尾，挂死不影响已打印结果
     pub const TMR_B_SCAN: u32 = 39;
+    /// 开 TIMERS1（0xd4016000）APBC 时钟门 + 去复位，再置 counter1 自由
+    /// 运行并 1ms 计数验证。寄存器/位 = 主线 ccu-k3.c + k3-syscon.h：
+    /// `APBC_TIMERS1_CLK_RST` @0xd4015044，bit0=bus gate / bit1=func gate /
+    /// bit2=reset（极性未定，两变体自动试）/ bit[6:4]=源 mux（0=12.8MHz）。
+    /// 首轮板上实锤：StarryOS 不用该块（CER=0 全零、写不进），时钟常闭
+    pub const TMR_CLKON: u32 = 40;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -993,6 +999,59 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 ((cer as u64) << 32) | (cr1 as u64),
             );
         }
+        M::TMR_CLKON => {
+            // 开 TIMERS1 时钟门 + 去复位（复位极性未定，bit2 两变体自动
+            // 试，以 CER 写入回读为判定），随后 counter1 自由运行化 +
+            // 1ms 计数验证（mux 保留读回值，默认 0 = 12.8MHz）。
+            use platform::Timer as _;
+            let apbc0 = apbc_rd(APBC_TIMERS1_CLK_RST);
+            let keep = apbc0 & !0x7; // 保留 mux 位 [6:4]
+            let enable_c1 = || -> (u32, u64) {
+                let cmr = tmr1_rd(TMR_CMR);
+                tmr1_wr(TMR_CMR, cmr | (1 << 1));
+                tmr1_wr(TMR_PLCR1, 0);
+                let mut retries = 0u64;
+                for _ in 0..8 {
+                    let cer = tmr1_rd(TMR_CER);
+                    tmr1_wr(TMR_CER, cer | (1 << 1));
+                    if tmr1_rd(TMR_CER) & (1 << 1) != 0 {
+                        break;
+                    }
+                    retries += 1;
+                }
+                (tmr1_rd(TMR_CER), retries)
+            };
+            // 变体 A：bit2=1 视为"释放复位"（MMP 惯例）
+            apbc_wr(APBC_TIMERS1_CLK_RST, keep);
+            apbc_wr(APBC_TIMERS1_CLK_RST, keep | 0x7);
+            let (mut cer, mut retries) = enable_c1();
+            let mut variant = 0u64;
+            if cer & (1 << 1) == 0 {
+                // 变体 B：bit2=0 视为"释放复位"（保持时钟门开）
+                variant = 1;
+                apbc_wr(APBC_TIMERS1_CLK_RST, keep | 0x3);
+                let (c2, r2) = enable_c1();
+                cer = c2;
+                retries += r2;
+            }
+            let apbc1 = apbc_rd(APBC_TIMERS1_CLK_RST);
+            // 1ms 计数验证（12.8MHz 预期 Δ≈12800）
+            let c0 = tmr1_rd(TMR_CR1) as u64;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let target = t0 + 24_000; // 1ms @ 24MHz
+            while chip_k3_rt24::clint_k3::TIMER.now() < target {
+                core::hint::spin_loop();
+            }
+            let c1 = tmr1_rd(TMR_CR1) as u64;
+            let d = c1.wrapping_sub(c0);
+            log::info!(
+                "[mb] tmr_clkon: apbc {:#x}->{:#x} (variant={variant}) cer={:#x} cr1 Δ={d} retries={retries}",
+                apbc0,
+                apbc1,
+                cer,
+            );
+            return (apbc1 as u64, ((cer as u64) << 32) | (d & 0xffff_ffff));
+        }
         _ => return (0, 0),
     }
     let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
@@ -1064,6 +1123,30 @@ fn tmr1_wr(off: usize, v: u32) {
 fn tmr0_rd(off: usize) -> u32 {
     // SAFETY: 纯 MMIO 读，无副作用。
     unsafe { ((TMR0_BASE + off) as *const u32).read_volatile() }
+}
+
+// APBC（AP 域外设时钟控制器，主线 k3.dtsi syscon_apbc@0xd4015000）。
+// 位定义 = 主线 drivers/clk/spacemit/ccu-k3.c：*_CLK_RST 寄存器
+// bit0=bus gate / bit1=func gate / bit2=reset / bit[6:4]=源 mux。
+#[cfg(feature = "probe")]
+const APBC_BASE: usize = 0xd401_5000;
+/// TIMERS1（0xd4016000）时钟/复位寄存器偏移（k3-syscon.h）
+#[cfg(feature = "probe")]
+const APBC_TIMERS1_CLK_RST: usize = 0x44;
+
+#[cfg(feature = "probe")]
+#[inline]
+fn apbc_rd(off: usize) -> u32 {
+    // SAFETY: 纯 MMIO 读，无副作用。
+    unsafe { ((APBC_BASE + off) as *const u32).read_volatile() }
+}
+
+/// 写 APBC 寄存器。仅 probe 探针上下文（TMR_CLKON 开 TIMERS1 时钟）。
+#[cfg(feature = "probe")]
+#[inline]
+fn apbc_wr(off: usize, v: u32) {
+    // SAFETY: 纯 MMIO 写（探针已论证的目标寄存器）。
+    unsafe { ((APBC_BASE + off) as *mut u32).write_volatile(v) }
 }
 
 /// 当前发现路径标签（D1..D4）。仅 IPC 任务写，handler 读。
