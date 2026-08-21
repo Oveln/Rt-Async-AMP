@@ -78,6 +78,7 @@ def fig2_unit_price():
         ("mtime MMIO 读（热循环）",    0.106, C_TIMER),
         ("mtime MMIO 读（间隔>15µs）", 24.0, C_TIMER),
         ("mcycle CSR 读（间隔态）",    3000.0, C_TIMER),
+        ("soc-timer counter1 读",      0.277, "#8BC34A"),  # 新计时源：恒定、无冷读税
         ("mailbox 寄存器读",           0.18, C_BELL),
         ("门铃 notify（fence+MMIO）",  3.5,  C_BELL),
         ("postcard 构+解 双向",        9.4,  C_COMP),
@@ -93,7 +94,7 @@ def fig2_unit_price():
     ax.set_xscale("log")
     ax.set_xlabel("单价 (µs, 对数刻度)")
     ax.set_title("图2  每种操作的实测单价——跨度 5 个数量级\n"
-                 "同址读 22ns ↔ mcycle 冷读 3ms；核心税：fence 2.2µs、mtime 冷读 24µs", fontsize=11)
+                 "同址读 22ns ↔ mcycle 冷读 3ms；核心税：fence 2.2µs、mtime 冷读 24µs（已由 soc-timer counter1 277ns 恒定读根除）", fontsize=11)
     for yi, v in zip(y, vals):
         ax.text(v * 1.15, yi, f"{v:g}", va="center", fontsize=8.5)
     ax.set_xlim(0.015, 9000)
@@ -101,6 +102,7 @@ def fig2_unit_price():
     ax.legend(handles=[Patch(color=C_DATA, label="数据搬运（裸访存）"),
                        Patch(color=C_FENCE, label="内存序 fence"),
                        Patch(color=C_TIMER, label="计时器读"),
+                       Patch(color="#8BC34A", label="计时器读（新计时源 counter1）"),
                        Patch(color=C_BELL, label="门铃/寄存器"),
                        Patch(color=C_COMP, label="计算")],
               loc="lower right", fontsize=9)

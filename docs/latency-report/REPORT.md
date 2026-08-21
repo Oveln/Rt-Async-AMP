@@ -175,7 +175,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | 优先级 | 项 | 内容 | 预期收益 | 工作量/风险 |
 |-------|----|------|---------|------------|
 | ✅ 已完成 | P1 | 单核原子 CS 后端（atomic-cas:false target）+ timer 直连 + 本地别名窗 + mailbox 去 Acquire | 294→240（D1）/ 209→189（D2） | 已合入 |
-| **进行中** | **计时瘦身** | **换源可行已定案**：soc-timer counter1 @12.8MHz（无冷读税、277ns 读）——落地 = chip-k3-rt24 soc-timer 驱动（DTS+APBC 开门+自由运行），step/SVC/stamp 计时链迁移 | **−35µs（D1）/ −34µs（D2）** | 小 / 低 |
+| **进行中** | **计时瘦身** | **换源已实施（c84cc64，待板上验证）**：`chip-k3-rt24::timer_k3` 驱动（APBC 开门 + 复位脉冲 + counter1 自由运行 @12.8MHz），ISR 戳/T_SCHED/stamp 链/step SVC/弹性窗/membench 括号/delay 全迁同钟；mtimecmp 睡眠唤醒保留 SysTimer；QEMU 零变化。预期板上 dd/s1/s2 复测 | **−35µs（D1）/ −34µs（D2）** | 已合入 |
 | 第 2 刀 | **P3 fence 去冗余** | magic 缓存 + 自产索引 Relaxed + 自旋 6→2 笔（D2 发现粒度 ×3）+ ch2 查询瘦身 | −10µs/消息 + 自旋 18→6µs/轮 | 中 / 低——正确性论证已完成（SPSC 单写者 + RP 无缓存） |
 | 第 3 刀 | **W2 双向轮询** | AP 响应方向用户态自旋（已实测 −11µs）；绕过 MSIP 54µs 物理地板 | −11µs 起；延迟关键模式更多 | 小（bench 已预演）/ 烧 AP 核 |
 | ❌ 已否决 | ~~P2 ISR 直派~~ | ~~响应在 ISR 内写完~~ **否决（2026-08-21）**：不破坏 rt-async 的任务模型——实际处理必须留在 task 上下文（executor/waker 语义），ISR 只做唤醒/标记；ddisp 27.1µs 作为结构性成本保留 | —（预期 −22µs 放弃） | — |
