@@ -53,14 +53,13 @@
 //! dseen_ns,isr,drain,sched,seen）。
 //! 环境变量 `BENCH_CSV=/tmp/x.csv` 时另存纯 CSV 文件。
 //!
-//! ## 两个构建变体（同板 A/B 对照）
+//! ## 缓存维护形态（唯一 = user-cbo）
 //!
-//! * `user-test-bench`（默认，QEMU 兼容）：缓存同步点全走内核 ioctl 整窗
-//!   clean+invalidate（0x19000 = 1600 行/次）。
-//! * `user-test-bench-cbo`（`--features user-cbo`，仅 K3）：U 态 Zicbom 按行
-//!   维护（槽 4 行 + 索引 1 行），NOTIFY/AWAIT 带 ARG_USER_CBO 跳过内核
-//!   整窗同步点。前提：内核已置 senvcfg（somehal enable_user_cbo，随
-//!   zicbom feature 编译）。sysc 列与 RTT 分布直接对比两者收益。
+//! U 态 Zicbom 按行维护（槽 4 行 + 索引 1 行），NOTIFY/AWAIT 带
+//! ARG_USER_CBO 跳过内核整窗 clean+invalidate 同步点（0x19000=1600 行/次）。
+//! 前提：内核已置 senvcfg（somehal enable_user_cbo，随 zicbom feature 编译）。
+//! 2026-08-21 起为唯一形态（用户决策：普通整窗 ioctl 变体已删，A/B 对照
+//! 实验结束并胜出）。
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -241,14 +240,10 @@ impl RtShm {
         self.ptr as usize
     }
 
-    /// NOTIFY 门铃。user-cbo 构建带 ARG_USER_CBO（内核跳过门铃前整窗
-    /// flush——写已按行发布）；诊断/轮询等需要整窗刷新语义的调用方用
-    /// [`Self::notify_full`]。
+    /// NOTIFY 门铃。带 ARG_USER_CBO（内核跳过门铃前整窗 flush——写已按行
+    /// 发布）；诊断/轮询等需要整窗刷新语义的调用方用 [`Self::notify_full`]。
     fn notify(&self) -> io::Result<()> {
-        #[cfg(feature = "user-cbo")]
         let arg = rtshm_abi::ARG_USER_CBO as libc::c_ulong;
-        #[cfg(not(feature = "user-cbo"))]
-        let arg = 0;
         self.sysc.set(self.sysc.get() + 1);
         do_ioctl(self.fd, rtshm_abi::IOC_NOTIFY as libc::c_ulong, arg).map(|_| ())
     }
@@ -259,26 +254,12 @@ impl RtShm {
         do_ioctl(self.fd, rtshm_abi::IOC_NOTIFY as libc::c_ulong, 0).map(|_| ())
     }
 
-    /// 仅 flush 共享窗（clean+invalidate，无门铃）。BUSY=1 跳过门铃时的
-    /// 写发布点：用户态映射实际 cacheable，请求写入与已消费的 ch1 read
-    /// 索引都滞留在缓存，不 flush 则对 RP / 内核 has_pending 不可见
-    /// （幻影 pending 空唤醒循环，板上实锤）。user-cbo 构建按行 publish
-    /// 取代本路径，不编译。
-    #[cfg(not(feature = "user-cbo"))]
-    fn flush(&self) -> io::Result<()> {
-        self.sysc.set(self.sysc.get() + 1);
-        do_ioctl(self.fd, rtshm_abi::IOC_FLUSH as libc::c_ulong, 0).map(|_| ())
-    }
-
     fn clear_pending(&self) -> io::Result<()> {
         do_ioctl(self.fd, rtshm_abi::IOC_CLR_PENDING as libc::c_ulong, 0).map(|_| ())
     }
 
     fn await_ipi(&self) -> io::Result<()> {
-        #[cfg(feature = "user-cbo")]
         let arg = rtshm_abi::ARG_USER_CBO as libc::c_ulong;
-        #[cfg(not(feature = "user-cbo"))]
-        let arg = 0;
         self.sysc.set(self.sysc.get() + 1);
         do_ioctl(self.fd, rtshm_abi::IOC_AWAIT as libc::c_ulong, arg).map(|_| ())
     }
@@ -547,13 +528,10 @@ impl Bench {
     /// 阻塞等待并返回 rid 匹配的响应。手写协议路径（非 ov-rpc 客户端），
     /// 以捕获 sent_ipi 决策与各段耗时。
     ///
-    /// 缓存维护两条路线（同板 A/B 对照，CSV sysc 列直接对比 syscall 数）：
-    /// * 默认（ioctl）：写 → fence → 读 BUSY；BUSY=1 时补 IOC_FLUSH 发布
-    ///   （内核整窗 clean+invalidate），并复查 BUSY 补发门铃。
-    /// * `user-cbo`：ov_rpc::cache 按行维护——发送前刷新索引行（陈旧
-    ///   read 索引 → 假 Full）、发送后发布槽位+索引行、读 BUSY 前刷新
-    ///   头行（陈旧 BUSY=1 → 误跳门铃丢失唤醒）。BUSY 读的是 SRAM 真值，
-    ///   单一判定即可，D2 命中轮零 syscall。
+    /// 缓存维护（ov_rpc::cache 按行）：发送前刷新索引行（陈旧 read 索引
+    /// → 假 Full）、发送后发布槽位+索引行、读 BUSY 前刷新头行（陈旧
+    /// BUSY=1 → 误跳门铃丢失唤醒）。BUSY 读的是 SRAM 真值，单一判定
+    /// 即可，D2 命中轮零 syscall。
     fn round_msg(&mut self, msg: Message) -> Result<RoundOut, BenchErr> {
         HEARTBEAT.store(mono_ns(), Ordering::Relaxed);
         // 定速睡眠期间的 SIGALRM 已由 sleep_until 刷心跳杜绝，但残留的
@@ -569,9 +547,8 @@ impl Bench {
             self.verbose_left -= 1;
         }
 
-        // user-cbo：try_send 前刷新 ch0 索引行并记发送槽位（write 索引），
-        // 供发送后按行发布。重试循环中 Full 失败不推进 write，槽位不变。
-        #[cfg(feature = "user-cbo")]
+        // try_send 前刷新 ch0 索引行并记发送槽位（write 索引），供发送后
+        // 按行发布。重试循环中 Full 失败不推进 write，槽位不变。
         let slot_sent = {
             let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
             ov_rpc::cache::refresh_before_send(ch0);
@@ -600,33 +577,11 @@ impl Bench {
 
         // 发送决策 + 写发布（与 ov-rpc client::call_inner 同型的丢失唤醒
         // 防护，叠加 AP 用户态 cacheable 映射的写发布义务）。
+        // 写发布按行完成（槽 4 行 + 索引 1 行，含 fence），随后刷新
+        // BUSY 行再读——真值单判：读得 1 则 RP 确在弹性自旋且其重查
+        // 闭环必见已发布请求；读得 0 则门铃唤醒。
         let sent_ipi;
-        #[cfg(not(feature = "user-cbo"))]
         {
-            //   fence → 读 BUSY：
-            //   - BUSY=0（RP 睡眠）→ NOTIFY（自带 flush + 门铃）
-            //   - BUSY=1（RP 弹性自旋）→ 跳过门铃，但必须 FLUSH 把请求发布到
-            //     SRAM（否则 RP 轮询永远看不见）；flush 后复查 BUSY——若 RP
-            //     恰在窗口边缘退出（clear_busy 完成），补发门铃防请求搁浅
-            //     （此时请求已 SRAM 可见，RP 的 fence+重查闭环兜底 D4 路径）。
-            std::sync::atomic::fence(Ordering::SeqCst);
-            let mut s = !shm.is_busy();
-            if s {
-                self.rt.notify().map_err(BenchErr::Io)?;
-            } else {
-                self.rt.flush().map_err(BenchErr::Io)?;
-                if !shm.is_busy() {
-                    self.rt.notify().map_err(BenchErr::Io)?;
-                    s = true;
-                }
-            }
-            sent_ipi = s;
-        }
-        #[cfg(feature = "user-cbo")]
-        {
-            // 写发布按行完成（槽 4 行 + 索引 1 行，含 fence），随后刷新
-            // BUSY 行再读——真值单判：读得 1 则 RP 确在弹性自旋且其重查
-            // 闭环必见已发布请求；读得 0 则门铃唤醒。
             let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
             ov_rpc::cache::publish_send(ch0, slot_sent);
             ov_rpc::cache::refresh_busy(self.rt.shm_ptr());
@@ -649,11 +604,7 @@ impl Bench {
             vlog!(self, "await entering...");
             // H9 对照（spin_await）：跳过 AWAIT syscall，纯用户态轮询响应。
             // 超时兜底也改本地判定（无 EINTR 可借）。
-            #[cfg(feature = "user-cbo")]
             let awoke = if self.spin_await { Ok(()) } else { self.rt.await_ipi() };
-            #[cfg(not(feature = "user-cbo"))]
-            let awoke = self.rt.await_ipi();
-            #[cfg(feature = "user-cbo")]
             if self.spin_await && mono_ns().saturating_sub(t0) > 5_000_000_000 {
                 return Err(BenchErr::Timeout { seq: self.last_seq });
             }
@@ -675,9 +626,8 @@ impl Bench {
                 Err(e) => return Err(BenchErr::Io(e)),
             }
             // AWAIT 返回后的读新鲜度：ioctl 路径内核已整窗 invalidate，
-            // user-cbo 路径按行刷新（索引行 + 待读槽位——try_recv 的内部
+            // 这里按行刷新（索引行 + 待读槽位——try_recv 的内部
             // 读不自查新鲜度，陈旧槽位会解析出旧响应）。
-            #[cfg(feature = "user-cbo")]
             {
                 let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
                 let (r, w) = ov_rpc::cache::refresh_before_recv(ch1);
@@ -709,10 +659,8 @@ impl Bench {
                     None => break, // 空唤醒：回外层重等
                 }
             }
-            // 消费发布：read 索引推进须对 RP 可见（其回包满判定读它）。
-            // user-cbo 按行发布（1 行）；ioctl 路径由下一轮 AWAIT 返回前
-            // 的整窗 flush 携带。
-            #[cfg(feature = "user-cbo")]
+            // 消费发布：read 索引推进须对 RP 可见（其回包满判定读它），
+            // 按行发布（1 行）。
             {
                 let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
                 ov_rpc::cache::publish_recv(ch1);
@@ -742,7 +690,6 @@ impl Bench {
             // 静默重试——不走 AWAIT 语义的空唤醒取证（其 notify_full 整窗
             // flush ioctl 会污染 H9 对照条件，且取证 try_recv 会把消息
             // 消费在 found 流程之外造成本轮永久丢失——warmup 首轮实锤）。
-            #[cfg(feature = "user-cbo")]
             if self.spin_await {
                 continue;
             }
@@ -839,7 +786,6 @@ impl Bench {
             .expect("LITMUS request serialize failed");
         let shm = self.rt.shm();
         let tx = shm.sender(CH0).unwrap();
-        #[cfg(feature = "user-cbo")]
         let slot_sent = {
             let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
             ov_rpc::cache::refresh_before_send(ch0);
@@ -862,7 +808,6 @@ impl Bench {
                 }
             }
         }
-        #[cfg(feature = "user-cbo")]
         {
             let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
             ov_rpc::cache::publish_send(ch0, slot_sent);
@@ -1194,21 +1139,15 @@ fn run_measured(b: &mut Bench, scen: &str, n: usize, interval_cfg: Option<u64>, 
 /// AP 侧写 LITMUS scratch 并立即按行发布（顺序受控：先写者先落 SRAM）。
 fn lit_wr64(b: &mut Bench, scr: usize, off: usize, v: u64) {
     HEARTBEAT.store(mono_ns(), Ordering::Relaxed);
-    let _ = &*b; // user-cbo 构建下无需 flush（按行发布），保留参数形状一致
+    let _ = &*b; // 按行发布，无需整窗 flush；保留参数形状一致
     unsafe { ((scr + off) as *mut u64).write_volatile(v) };
-    #[cfg(feature = "user-cbo")]
     ov_rpc::cache::publish(scr + off, 8);
-    #[cfg(not(feature = "user-cbo"))]
-    b.rt.flush().expect("litmus flush");
 }
 
 /// AP 侧读 RP 写的 LITMUS scratch 字（先刷新行再读 SRAM 真值）。
 fn lit_rd64(b: &mut Bench, scr: usize, off: usize) -> u64 {
     let _ = &*b; // 同上
-    #[cfg(feature = "user-cbo")]
     ov_rpc::cache::refresh(scr + off, 8);
-    #[cfg(not(feature = "user-cbo"))]
-    b.rt.flush().expect("litmus flush");
     unsafe { ((scr + off) as *const u64).read_volatile() }
 }
 
@@ -1629,7 +1568,6 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
     /// 读"AP 新鲜写（posted 写未落地）"的行有确定性税，即 drx 43.6 与
     /// dserde 34.4 中 32µs 级差额的物理来源（dserde 同理：读 AP 刚写的
     /// 请求槽做反序列化）；D→∞ 回落探针价。
-    #[cfg(feature = "user-cbo")]
     fn fresh_scan(b: &mut Bench) {
         use ov_rpc::cache;
         println!("\n[mb] H8 新鲜写衰减扫描（D = dummy 写入到 RP 收取的间隔）");
@@ -1968,10 +1906,9 @@ fn run_mb(b: &mut Bench, line_n: u32) {
             b.wrapping_sub(a)
         );
     }
-    // H8 新鲜写衰减扫描（user-cbo 构建）：drx/dserde 的 32µs 级确定性
-    // 差额（探针全快、真实路径全慢、预热不降）的最后候选——读"AP 刚写
-    // （posted 未落地）"的行。
-    #[cfg(feature = "user-cbo")]
+    // H8 新鲜写衰减扫描：drx/dserde 的 32µs 级确定性差额（探针全快、
+    // 真实路径全慢、预热不降）的最后候选——读"AP 刚写（posted 未落地）"
+    // 的行。
     fresh_scan(b);
 
     // 寄存器探测（手册 06/17 章来源；顺序：安全在前，未知窗口在后）。
@@ -2368,7 +2305,6 @@ fn main() {
         }
         // 消费发布：read 索引推进对 RP 可见（其回包满判定读它）。
         // mmap 时内核已整窗作废，读取无需再刷新；只有写需要发布。
-        #[cfg(feature = "user-cbo")]
         {
             let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
             ov_rpc::cache::publish_recv(ch1);
