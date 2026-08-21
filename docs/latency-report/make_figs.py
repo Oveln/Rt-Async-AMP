@@ -79,7 +79,7 @@ def fig2_unit_price():
         ("mtime MMIO 读（间隔>15µs）", 24.0, C_TIMER),
         ("mcycle CSR 读（间隔态）",    3000.0, C_TIMER),
         ("counter1 读（间隔，已弃）", 13.0, "#AED581"),  # AP 域跨互连 ~13µs 重锁税，换源证伪
-        ("AON_TIMER1 读（间隔，本地域）", 1.9, "#8BC34A"),  # 换源达标并迁移（eb2da18）：热读 4ns
+        ("AON_TIMER1 读（纯本地间隔）", 1.9, "#8BC34A"),  # 探针价；生产路径间隔仍 ~10µs 级（二度证伪）
         ("mailbox 寄存器读",           0.18, C_BELL),
         ("门铃 notify（fence+MMIO）",  3.5,  C_BELL),
         ("postcard 构+解 双向",        9.4,  C_COMP),
