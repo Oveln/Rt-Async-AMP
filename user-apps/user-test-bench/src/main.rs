@@ -130,6 +130,7 @@ mod mb_op {
     pub const TMR_CAL: u32 = 38;
     pub const TMR_B_SCAN: u32 = 39;
     pub const TMR_CLKON: u32 = 40;
+    pub const TMR_RT_ON: u32 = 41;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1688,9 +1689,10 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         (mb_op::CYCLE_CAL, "cycle_cal        5ms联标mcycle频率", 0, 1),
         // 计时源替换候选：AP 域 soc-timer 0xd4016000 空闲 counter1（mtime
         // 冷读税 24.5µs/笔 的根治候选，布局=上游 timer-k1x.c）。
-        // clkon 先行：首轮实锤 StarryOS 不用该块、APBC 时钟常闭，须先开
-        // 门+去复位（位定义=主线 ccu-k3.c），后续三面才有意义
+        // clkon/rt_on 先行：首轮实锤 AP 域块时钟常闭，须先开门去复位；
+        // rt_on 为 RCPU 本地域候选（esOS rtimer0@c0889000，无人用）——主选
         (mb_op::TMR_CLKON, "tmr_clkon        APBC开TIMERS1时钟+复位", 0, 1),
+        (mb_op::TMR_RT_ON, "tmr_rt_on        RCPU开rtimer0+计数验证", 0, 1),
         (mb_op::TMR_SETUP, "tmr_setup        soc-timer c1 自由运行化", 0, 1),
         (mb_op::TMR_HOT, "tmr_hot          counter1 热读×4000", 0, 4000),
         (mb_op::TMR_GAPPED, "tmr_gapped       间隔20µs读counter1", 0, 64),
@@ -1705,6 +1707,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     let mut tmr_setup_ck: u64 = 0;
     let mut tmr_clkon_seen = false;
     let mut tmr_clkon_ck: u64 = 0;
+    let mut tmr_rt_on_seen = false;
+    let mut tmr_rt_on_ck: u64 = 0;
     let mut tmr_cal_ck: u64 = 0;
     let mut bscan_seen = false;
     let mut bscan_raw: (u64, u64) = (0, 0);
@@ -1729,6 +1733,10 @@ fn run_mb(b: &mut Bench, line_n: u32) {
                 tmr_clkon_seen = true;
                 tmr_clkon_ck = ck;
             }
+            x if x == mb_op::TMR_RT_ON => {
+                tmr_rt_on_seen = true;
+                tmr_rt_on_ck = ck;
+            }
             x if x == mb_op::TMR_CAL => tmr_cal_ck = ck,
             x if x == mb_op::TMR_B_SCAN => {
                 bscan_seen = true;
@@ -1741,6 +1749,12 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         println!("  {name:<40} {:>9.1} µs 总 / {:>8.2} ns/次  ck={ck:#x}", ns as f64 / 1e3, each as f64);
     }
     let g = |want: usize| per.iter().find(|(j, _)| *j == want).map(|(_, v)| *v);
+    // 按 op 查找（tmr 组表序随探针增删调整，positional 索引易漂移）
+    let gop = |want: u32| {
+        ops.iter()
+            .position(|&(o, _, _, _)| o == want)
+            .and_then(|i| per.iter().find(|(j, _)| *j == i).map(|(_, v)| *v))
+    };
     println!("\n[mb] 判读");
     match (g(0), g(4)) {
         (Some(shm), Some(loc)) => {
@@ -1880,27 +1894,35 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     // 计时源替换候选三面判读：AP 域 soc-timer 0xd4016000 空闲 counter1
     // （AP 仅用 counter0 做广播、块时钟常开；布局=上游 timer-k1x.c）。
     // 免冷读税即可承接 step/SVC/stamp 计时（mtime 冷读 24.5µs/笔 的根治）。
-    // 注意表序 clkon 在 setup 前（先开 APBC 门，首轮实锤块常闭）。
+    // 注意表序 clkon/rt_on 在三面前（先开门，首轮实锤两块时钟均常闭）。
     if tmr_clkon_seen {
         let cer = tmr_clkon_ck >> 32;
         let d = tmr_clkon_ck & 0xffff_ffff;
         println!(
-            "  tmr_clkon：CER={cer:#x}（bit1={}）1ms 计数 Δ={d} —— Δ≈12800 ⇒ 12.8MHz 活（mux=0）；Δ≈其他 ⇒ 按 mux 换算；0 ⇒ 仍死（门/复位极性，见 RP console 的 variant）",
+            "  tmr_clkon：CER={cer:#x}（bit1={}）1ms 计数 Δ={d} —— Δ≈12800 ⇒ 12.8MHz 活（mux=0）；Δ≈其他 ⇒ 按 mux 换算；0 ⇒ 仍死（APBC 写也丢=跨域过滤坐实，见 RP console variant）",
             cer & 2 != 0
         );
     }
-    if let (Some(ng), Some(tg)) = (g(30), g(37)) {
+    if tmr_rt_on_seen {
+        let cer = tmr_rt_on_ck >> 32;
+        let d = tmr_rt_on_ck & 0xffff_ffff;
+        println!(
+            "  tmr_rt_on：CER={cer:#x}（bit0={}）1ms 计数 Δ={d} —— Δ≈3250 ⇒ 3.25MHz（esOS 标称 fastclk）；≈1000 ⇒ 1MHz；0 ⇒ RCPU 域门也没开（查 rccu 回读，RP console）",
+            cer & 1 != 0
+        );
+    }
+    if let (Some(ng), Some(tg)) = (g(30), gop(mb_op::TMR_GAPPED)) {
         let delta = tg as i64 - ng as i64;
         println!(
             "  tmr_gapped 每轮 {tg} vs now_gapped {ng}（结构仅差 1 笔候选读）⇒ 候选冷读 Δ={delta} ns —— |Δ|<1µs ⇒ 免跨域税、计时源可迁；Δ≈24500 ⇒ 与 mtime 同病，弃"
         );
     }
-    if let Some(th) = g(36) {
+    if let Some(th) = gop(mb_op::TMR_HOT) {
         println!(
             "  tmr_hot {th} ns/笔（mtime 括号冷读税已摊薄 ~12ns；对照 rd_mtime 热 106ns / mailbox 寄存器 148ns）"
         );
     }
-    if let Some(tc) = g(38) {
+    if let Some(tc) = gop(mb_op::TMR_CAL) {
         let hz = tc as f64 * 24_000_000.0 / tmr_cal_ck.max(1) as f64;
         println!(
             "  tmr_cal：counter1 5ms 走 {tc} ticks（mtime 窗口 {tmr_cal_ck} ticks）⇒ ≈{hz:.0} Hz（预期 1MHz = AP dts timer-frequency）；值≈5000 且单调 ⇒ 自由运行、未被 AP 重编程打断"

@@ -471,9 +471,16 @@ pub mod membench_op {
     /// 开 TIMERS1（0xd4016000）APBC 时钟门 + 去复位，再置 counter1 自由
     /// 运行并 1ms 计数验证。寄存器/位 = 主线 ccu-k3.c + k3-syscon.h：
     /// `APBC_TIMERS1_CLK_RST` @0xd4015044，bit0=bus gate / bit1=func gate /
-    /// bit2=reset（极性未定，两变体自动试）/ bit[6:4]=源 mux（0=12.8MHz）。
-    /// 首轮板上实锤：StarryOS 不用该块（CER=0 全零、写不进），时钟常闭
+    /// bit2=reset（高有效：assert=1/deassert=0，riscv-yocto reset-spacemit.c
+    /// 定案）/ bit[6:4]=源 mux（0=12.8MHz）。首轮板上实锤：StarryOS 不用
+    /// 该块（CER=0 全零、写不进），时钟常闭
     pub const TMR_CLKON: u32 = 40;
+    /// RCPU 域候选：rtimer0 @0xc0889000（esOS dts 全 disabled 无人用，
+    /// fastclk 3.25MHz/apb 52MHz）开门 + counter0 自由运行化 + 1ms 计数
+    /// 验证。门 = `RCPU5_TIMER1_CLK_RST` @0xc088c04c（esOS
+    /// ccu-spacemit-k3.h；RCPU5 基址 0xc088c000 与本仓寄存器探测一致），
+    /// 位语义同 APBC、复位高有效。RCPU 本地域 ⇒ 无跨域问题，主候选
+    pub const TMR_RT_ON: u32 = 41;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -1052,6 +1059,45 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             );
             return (apbc1 as u64, ((cer as u64) << 32) | (d & 0xffff_ffff));
         }
+        M::TMR_RT_ON => {
+            // RCPU 域 rtimer0（0xc0889000，esOS 无人用）开门 + counter0
+            // 自由运行化 + 1ms 计数验证。复位高有效（assert=bit2=1）。
+            use platform::Timer as _;
+            let g0 = rccu_rd(RCPU5_TIMER1_CLK_RST);
+            let keep = g0 & !0x7;
+            rccu_wr(RCPU5_TIMER1_CLK_RST, keep | 0x7); // 双门开 + 复位 assert
+            rccu_wr(RCPU5_TIMER1_CLK_RST, keep | 0x3); // 复位 deassert
+            let g1 = rccu_rd(RCPU5_TIMER1_CLK_RST);
+            let cmr = rt_rd(TMR_CMR);
+            rt_wr(TMR_CMR, cmr | 1); // counter0 自由运行
+            rt_wr(0x50, 0); // PLCR(0)=0：自由运行（不重载）
+            let mut retries = 0u64;
+            for _ in 0..8 {
+                let cer = rt_rd(TMR_CER);
+                rt_wr(TMR_CER, cer | 1);
+                if rt_rd(TMR_CER) & 1 != 0 {
+                    break;
+                }
+                retries += 1;
+            }
+            let cer = rt_rd(TMR_CER);
+            // 1ms 计数验证（esOS dts 标称 fastclk 3.25MHz——Δ 换算见判读）
+            let c0 = rt_rd(TMR_CR0) as u64;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let target = t0 + 24_000; // 1ms @ 24MHz
+            while chip_k3_rt24::clint_k3::TIMER.now() < target {
+                core::hint::spin_loop();
+            }
+            let c1 = rt_rd(TMR_CR0) as u64;
+            let d = c1.wrapping_sub(c0);
+            log::info!(
+                "[mb] tmr_rt_on: rccu {:#x}->{:#x} cer={:#x} cr0 Δ={d} retries={retries}",
+                g0,
+                g1,
+                cer
+            );
+            return (g1 as u64, ((cer as u64) << 32) | (d & 0xffff_ffff));
+        }
         _ => return (0, 0),
     }
     let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
@@ -1147,6 +1193,49 @@ fn apbc_rd(off: usize) -> u32 {
 fn apbc_wr(off: usize, v: u32) {
     // SAFETY: 纯 MMIO 写（探针已论证的目标寄存器）。
     unsafe { ((APBC_BASE + off) as *mut u32).write_volatile(v) }
+}
+
+// RCPU5（RCPU 域时钟控制子域，基址 0xc088c000——本仓寄存器探测的
+// RCPU_BUS_CLK_CTRL 0xc088c0c0 / COREx_CLK_CTRL 即在此域）。偏移定义 =
+// esOS ccu-spacemit-k3.h（~/riscv-yocto esos-k3 源）。
+#[cfg(feature = "probe")]
+const RCPU5_BASE: usize = 0xc088_c000;
+/// rtimer0（0xc0889000）时钟/复位寄存器偏移
+#[cfg(feature = "probe")]
+const RCPU5_TIMER1_CLK_RST: usize = 0x4c;
+/// rtimer0 基址（RCPU 域，esOS dts status=disabled 无人使用）
+#[cfg(feature = "probe")]
+const RTIMER0_BASE: usize = 0xc088_9000;
+
+#[cfg(feature = "probe")]
+#[inline]
+fn rccu_rd(off: usize) -> u32 {
+    // SAFETY: 纯 MMIO 读，无副作用。
+    unsafe { ((RCPU5_BASE + off) as *const u32).read_volatile() }
+}
+
+/// 写 RCPU5 寄存器。仅 probe 探针上下文（TMR_RT_ON 开 rtimer0 时钟）。
+#[cfg(feature = "probe")]
+#[inline]
+fn rccu_wr(off: usize, v: u32) {
+    // SAFETY: 纯 MMIO 写（探针已论证的目标寄存器）。
+    unsafe { ((RCPU5_BASE + off) as *mut u32).write_volatile(v) }
+}
+
+/// 读 rtimer0 寄存器（布局与 soc-timer 同源：MMP 血统 timer-k1x.c）。
+#[cfg(feature = "probe")]
+#[inline]
+fn rt_rd(off: usize) -> u32 {
+    // SAFETY: 纯 MMIO 读，无副作用。
+    unsafe { ((RTIMER0_BASE + off) as *const u32).read_volatile() }
+}
+
+/// 写 rtimer0 寄存器。仅 probe 探针上下文。
+#[cfg(feature = "probe")]
+#[inline]
+fn rt_wr(off: usize, v: u32) {
+    // SAFETY: 纯 MMIO 写（探针已论证的目标寄存器）。
+    unsafe { ((RTIMER0_BASE + off) as *mut u32).write_volatile(v) }
 }
 
 /// 当前发现路径标签（D1..D4）。仅 IPC 任务写，handler 读。
