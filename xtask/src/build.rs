@@ -417,15 +417,10 @@ pub fn user_test_sched(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-sched", "user-test-sched", &[]);
 }
 
+/// IPC 延迟基准（唯一形态 = user-cbo 默认开，见 user-test-bench Cargo.toml
+/// default；2026-08-21 起普通整窗 ioctl 变体已删）。
 pub fn user_test_bench(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-bench", "user-test-bench", &[]);
-}
-
-/// user-cbo 变体：U 态 Zicbom 按行缓存维护（仅 K3——需内核 senvcfg 放行，
-/// 见 user-test-bench Cargo.toml feature 注释）。产物名带 -cbo 后缀，
-/// 与默认变体共存于 build/，同板 A/B 对照。
-pub fn user_test_bench_cbo(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/user-test-bench", "user-test-bench-cbo", &["user-cbo"]);
 }
 
 fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {

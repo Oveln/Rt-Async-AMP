@@ -266,10 +266,11 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
   （或换硬件 spinlock）。
 
-**user-cbo 变体（A/B 对照）**：`cargo xtask build user-test-bench-cbo` 产出
-`build/user-test-bench-cbo`——U 态 Zicbom 按行缓存维护（ov-rpc `user-cbo`
-feature：发送发布槽+索引 5 行、接收刷新索引+待读槽，NOTIFY/AWAIT 带
-`ARG_USER_CBO` 跳过内核整窗 0x19000 同步点）。前提：
+**缓存维护形态（user-cbo，唯一）**：`cargo xtask build user-test-bench` 产出
+`build/user-test-bench`——U 态 Zicbom 按行缓存维护（ov-rpc `user-cbo`
+feature 默认启用：发送发布槽+索引 5 行、接收刷新索引+待读槽，NOTIFY/AWAIT 带
+`ARG_USER_CBO` 跳过内核整窗 0x19000 同步点）。2026-08-21 起普通（整窗 ioctl）
+变体删除——A/B 对照实验结束并胜出（下方实测表）。前提：
 本 README 上方 starryos.uimg（内核 somehal 已置 senvcfg，随 zicbom 编译）。
 
 **RT24 微架构基准（rtbench，2026-08-17 新增）**：RP 本地自跑、不依赖 AP，
@@ -299,7 +300,7 @@ ELF_SRC=build/k3-com260/rt-async-k3-rtbench.elf bash scripts/flash/k3-pack-itb.s
 7. 取指与 I$ 存在性——热调用 vs 16 函数散布冷调用，pass1 vs pass2
    （dseen/svc 残余 ~85µs 的冷取指假设判别）；
 8. trap 与 WFI——MSIP 自环（entry/resume 分解）与 mtimecmp 唤醒误差。
-两个变体均需 K3 真板（QEMU 固件无插桩服务）；cbo 变体额外依赖 U 态
+mb 与 rtbench 均需 K3 真板（QEMU 固件无插桩服务）；bench 另依赖 U 态
 Zicbom（senvcfg 已置）。
 
 K3 真板实测（2026-08-17，CPU2 pin，s1=4s 间隔 / s2=200µs 间隔，σ 均 <2µs）：
