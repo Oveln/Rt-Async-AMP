@@ -78,8 +78,10 @@ impl Board for K3Rt24 {
         handshake::spl_handshake();
 
         // 1.5 soc-timer counter1 计时源开门（AP 域 APBC，直连装配——
-        //     见 timer_k3 模块头注释）。stamp/SVC/ISR 时间戳链的时钟，
-        //     替代 mtime 冷读（24.5µs/笔跨域税）。
+        //     见 timer_k3 模块头注释）。⚠ 生产计时链未迁移（2026-08-22
+        //     板上证伪：counter1 间隔读有 ~13µs 重锁税，仅比 mtime 的
+        //     24.5µs 轻，换源得不偿失）——此处开门仅供探针（tmr_* 组）
+        //     与未来用途，生产时间戳仍走 clint mtime（同钟不变量）。
         timer_k3::init();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
