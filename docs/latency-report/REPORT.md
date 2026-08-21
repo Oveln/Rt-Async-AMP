@@ -177,7 +177,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 |-------|----|------|---------|------------|
 | ✅ 已完成 | P1 | 单核原子 CS 后端（atomic-cas:false target）+ timer 直连 + 本地别名窗 + mailbox 去 Acquire | 294→240（D1）/ 209→189（D2） | 已合入 |
 | ❌ 已证伪 | ~~计时瘦身·换源~~ | **两度板上证伪并回滚**（counter1：6f4ec9d；AON_TIMER1：05691b0）。**根因定性（08-22 AON 轮定案）：mtime 的 24.5µs 冷读税在生产路径从未被支付**——stamp 点前后交织的 SHM/fence 流量把 mtime 路径保温，基线无税可省；替换计时器（无论域别）在真实间隔下读仍付 ~10µs 级（探针税≠生产税）。计时链维持 mtime；剩余可行项 = **减 mark 笔数**（探针/统计降频），收益重新评估 | 重新评估（原 −40~90µs 前提不成立） | — |
-| 第 2 刀 | **P3 fence 去冗余** | magic 缓存 + 自产索引 Relaxed + 自旋 6→2 笔（D2 发现粒度 ×3）+ ch2 查询瘦身 | −10µs/消息 + 自旋 18→6µs/轮 | 中 / 低——正确性论证已完成（SPSC 单写者 + RP 无缓存） |
+| **已实施待验收** | **P3 fence 去冗余** | **已落地（ov-channels b45bc0a + 主仓 bd662e7，08-22）**：magic → Relaxed（运行期不变量）+ 自产索引 → Relaxed（SPSC 单写者：try_send 的 write / try_recv·peek·has_pending·is_empty·len 的 read）；**对端索引 Acquire 与发布 Release 原样保留——数据可见性协议零妥协**。try_recv 3→1 笔 Acquire、try_send 3→1、自旋轮（ch0+ch2 has_pending）6→2 笔。QEMU 冒烟通过 | **−9~10µs/消息 + 自旋 18→6µs/轮**（待板上同启动 A/B 验收） | 已完成 / 待验收 |
 | 第 3 刀 | **W2 双向轮询** | AP 响应方向用户态自旋（已实测 −11µs）；绕过 MSIP 54µs 物理地板 | −11µs 起；延迟关键模式更多 | 小（bench 已预演）/ 烧 AP 核 |
 | ❌ 已否决 | ~~P2 ISR 直派~~ | ~~响应在 ISR 内写完~~ **否决（2026-08-21）**：不破坏 rt-async 的任务模型——实际处理必须留在 task 上下文（executor/waker 语义），ISR 只做唤醒/标记；ddisp 27.1µs 作为结构性成本保留 | —（预期 −22µs 放弃） | — |
 | 远期 | 硬件 | mailbox 载荷直传小消息（数据进门铃）/ 硬件 spinlock（0xCAC9_1C00，手册背书） | 再往下 | 大 |
