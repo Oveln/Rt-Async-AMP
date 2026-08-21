@@ -106,7 +106,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | **mtime MMIO 读（非背靠背）** | **~24.5µs** | 跨时钟域同步器重锁，231 倍；**任意非背靠背间隔触发**（poll 间隔几十 ns 亦冷——now_gapped 每轮 69µs，见 §6 附记） |
 | mcycle CSR 读（热） | **17ns** | 4 cycle/笔（cycle_hot 4158c/千笔），CSR 本地读无 MMIO |
 | mcycle CSR 读（间隔 ~400µs） | **~2.9ms** | 冷读税比 mtime 重 118 倍；但计数为**核频 245.84MHz**（cycle_cal 联标 1,229,222c/5ms，非 mtime 同源）——"仅冷读慢"型：stamp 链段间保温可用（保温笔仅 17ns），生产每消息级间隔计时冷读不可用 |
-| **soc-timer counter1（0xd4016094）** | **热读 277ns，无冷读税** | AP 域 APB 块，**12.8MHz** 自由运行（mux=0 默认）；时钟门经 `APBC_TIMERS1_CLK_RST@0xd4015044` 开启后读恒快（gapped 结构每轮 22.3µs，甚至把同结构的 mtime 都带热）——**换源可行，分辨率 78ns、回卷 335s** |
+| **soc-timer counter1（0xd4016094）** | 背靠背 277ns；**间隔读 ~13µs** | AP 域 APB 块，12.8MHz 自由运行（mux=0）。换源方案**板上证伪**（08-22）：277ns 是流水价，真实路径 mark 间隔 µs 级仍触发 ~13µs 重锁税（跨域同病、仅轻于 mtime 的 24.5µs），整链 8 笔净亏（rtt 240→248.5 实证）；驱动保留供探针 |
 
 **推论**：每条消息的计时/统计链（step 计时、SVC 统计、弹性窗计时、测量构建的 stamp 链）里有若干笔"间隔上百 ms 的冷读"——**每笔真等 24µs**。测量构建（probe 开）每消息 6-8 笔（40-70µs 税）；**生产构建（probe 关）只剩 step/SVC 计时 2-4 笔（24-48µs 税）**。
 
@@ -175,7 +175,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | 优先级 | 项 | 内容 | 预期收益 | 工作量/风险 |
 |-------|----|------|---------|------------|
 | ✅ 已完成 | P1 | 单核原子 CS 后端（atomic-cas:false target）+ timer 直连 + 本地别名窗 + mailbox 去 Acquire | 294→240（D1）/ 209→189（D2） | 已合入 |
-| **进行中** | **计时瘦身** | **换源已实施（c84cc64，待板上验证）**：`chip-k3-rt24::timer_k3` 驱动（APBC 开门 + 复位脉冲 + counter1 自由运行 @12.8MHz），ISR 戳/T_SCHED/stamp 链/step SVC/弹性窗/membench 括号/delay 全迁同钟；mtimecmp 睡眠唤醒保留 SysTimer；QEMU 零变化。预期板上 dd/s1/s2 复测 | **−35µs（D1）/ −34µs（D2）** | 已合入 |
+| **进行中** | **计时瘦身** | **换源已证伪回滚（6f4ec9d，08-22 板上）**：counter1 间隔读 ~13µs 重锁税（仅轻于 mtime），rtt 240→248.5 净亏。**方案转采样制/减 mark 笔数**（生产链 step/SVC 计时降频或删除；测量链 stamps 采样）——所有计时器（mtime 24.5µs / counter1 13µs / mcycle 2.9ms）间隔读均有跨域税，唯一出路是少读 | **−20~35µs（D1）**（按保留笔数） | 小 / 低 |
 | 第 2 刀 | **P3 fence 去冗余** | magic 缓存 + 自产索引 Relaxed + 自旋 6→2 笔（D2 发现粒度 ×3）+ ch2 查询瘦身 | −10µs/消息 + 自旋 18→6µs/轮 | 中 / 低——正确性论证已完成（SPSC 单写者 + RP 无缓存） |
 | 第 3 刀 | **W2 双向轮询** | AP 响应方向用户态自旋（已实测 −11µs）；绕过 MSIP 54µs 物理地板 | −11µs 起；延迟关键模式更多 | 小（bench 已预演）/ 烧 AP 核 |
 | ❌ 已否决 | ~~P2 ISR 直派~~ | ~~响应在 ISR 内写完~~ **否决（2026-08-21）**：不破坏 rt-async 的任务模型——实际处理必须留在 task 上下文（executor/waker 语义），ISR 只做唤醒/标记；ddisp 27.1µs 作为结构性成本保留 | —（预期 −22µs 放弃） | — |
@@ -183,7 +183,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 
 叠加预期（不含已否决项）：**D1 240→~184，D2 189→~134**。再往下就是 SPSC 协议本体（每消息 4 笔 fence ≈ 8.8µs）+ 数据搬运（~7.5µs）+ 任务模型结构性成本（ddisp ~27µs）的物理下限区。
 
-**计时源替换定案（2026-08-21 夜板上）：soc-timer counter1 换源可行**。裁决数据：`tmr_clkon` 从 RP 写 `APBC_TIMERS1_CLK_RST@0xd4015044` **写粘住**（时钟门常闭假设坐实、跨域写过滤证伪），counter1 自由运行 @**12.798MHz**（mux=0 默认，5ms 走 64013 ticks），CER 置位 retries=0；三面：热读 **277ns**、gapped 结构每轮 22.3µs **无冷读税**（还顺带把同结构 mtime 读带热——跨设备访问保持互连活跃，机理待好奇）。**落地 = chip-k3-rt24 增 soc-timer 驱动**（DTS 节点 + APBC 开门 + counter0/1 自由运行），step/SVC/stamp 计时链迁 counter1（分辨率 78ns、回卷 335s）。rcpu 侧 rtimer0@c0889000 反而死（RCPU5 门 0xc088c04c 写粘但块 CER 写不进/零计数，疑属 rcpu0 本地域）——弃。兜底不再需要。
+**计时源替换：换源证伪与回滚**（08-21 判可行 → 08-22 板上证伪，完整记录）：`tmr_clkon` 开门成功、counter1 @12.798MHz 自由运行、`tmr_cal`/`tmr_setup` 全绿——但迁移后复测 **rtt 240.0→248.5µs 反向**。归因：`tmr_hot` 277ns 是**背靠背流水价**，真实路径 stamp 间隔 µs 级时每笔 **~13µs 重锁税**（dslot 40.4/dpre 25.8/svc 146 反推一致；12.8MHz 计数钟到 RCPU 总线同样跨时钟域，病轻于 mtime 但整链 8 笔净亏）；`tmr_gapped` 的负 Δ 被"异设备读令 mtime 变热"效应掩盖——探针结构盲区教训。**已回滚（6f4ec9d）**，timer_k3 驱动保留供探针。结论固化：**三个可用计时器（mtime/counter1/mcycle）间隔读全部有跨域税（24.5/13/2900µs），"换源"路线死，计时瘦身唯一出路 = 少读（采样制/减 mark）**。另：本轮 dd 的 send 14.3 vs 之前 8.5µs（AP 侧路径未改，未解，待下轮确认是否环境漂移）。
 
 **附记（mtime 税模型再修正）**：now_gapped 69µs/轮（t0 + 首笔 poll 都吃 24.5µs 冷价）证明 **mtime 冷读由"任意非背靠背间隔"触发**（poll 间隔几十 ns 亦冷）；而 tmr_gapped 在 t1 前插入一笔异设备读（counter1 277ns）后每轮仅 22.4µs——mtime 读全部变热。机制未解（流水线/前端行为），不影响"去 mtime"决策；好奇心探针留给后续。
 
