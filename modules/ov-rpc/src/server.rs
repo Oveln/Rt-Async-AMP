@@ -190,10 +190,12 @@ impl RpcServer {
         let _ = &rx;
 
         // stamps 构建：手写展开 Channel::try_recv（语义与 ov-channels
-        // channel.rs/ring.rs 逐笔对齐），在双索引 Acquire 后插 IDX_DONE
-        // 细分戳——L0 归因（2026-08-20）：drx 43.6µs 中 fence 理论仅
-        // ~10µs，段内拆分定位其余归属。偏移与 ov-rpc cache.rs 编译期
-        // 断言同源：magic@0 / read@0x100 / write@0x108 / slots@0x110。
+        // channel.rs/ring.rs 逐笔对齐，**含 P3 内存序**——见 ov-channels
+        // b45bc0a：magic/自产 read Relaxed、对端 write Acquire），在
+        // 索引载入后插 IDX_DONE 细分戳——L0 归因（2026-08-20）：drx
+        // 43.6µs 中 fence 理论仅 ~10µs，段内拆分定位其余归属。偏移与
+        // ov-rpc cache.rs 编译期断言同源：magic@0 / read@0x100 /
+        // write@0x108 / slots@0x110。
         #[cfg(feature = "stamps")]
         let msg = {
             use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
@@ -203,11 +205,14 @@ impl RpcServer {
             unsafe {
                 let base = shm.channel_unchecked(ch) as *const ov_channels::Channel as usize;
                 let magic = &*(base as *const AtomicU16);
-                if magic.load(Ordering::Acquire) != ov_channels::MAGIC {
+                // P3：magic 运行期不变量 → Relaxed（免一笔 Acquire）
+                if magic.load(Ordering::Relaxed) != ov_channels::MAGIC {
                     None
                 } else {
                     let rb = (base + 0x100) as *const AtomicUsize;
-                    let read = (*rb).load(Ordering::Acquire);
+                    // P3：read 自产索引（消费者唯一写者）→ Relaxed；
+                    // write 对端（生产者 Release 发布）保持 Acquire。
+                    let read = (*rb).load(Ordering::Relaxed);
                     let _write = (*rb.add(1)).load(Ordering::Acquire);
                     mark(stamp_idx::IDX_DONE);
                     if read == _write {
