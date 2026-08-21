@@ -106,6 +106,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | **mtime MMIO 读（非背靠背）** | **~24.5µs** | 跨时钟域同步器重锁，231 倍；**任意非背靠背间隔触发**（poll 间隔几十 ns 亦冷——now_gapped 每轮 69µs，见 §6 附记） |
 | mcycle CSR 读（热） | **17ns** | 4 cycle/笔（cycle_hot 4158c/千笔），CSR 本地读无 MMIO |
 | mcycle CSR 读（间隔 ~400µs） | **~2.9ms** | 冷读税比 mtime 重 118 倍；但计数为**核频 245.84MHz**（cycle_cal 联标 1,229,222c/5ms，非 mtime 同源）——"仅冷读慢"型：stamp 链段间保温可用（保温笔仅 17ns），生产每消息级间隔计时冷读不可用 |
+| **soc-timer counter1（0xd4016094）** | **热读 277ns，无冷读税** | AP 域 APB 块，**12.8MHz** 自由运行（mux=0 默认）；时钟门经 `APBC_TIMERS1_CLK_RST@0xd4015044` 开启后读恒快（gapped 结构每轮 22.3µs，甚至把同结构的 mtime 都带热）——**换源可行，分辨率 78ns、回卷 335s** |
 
 **推论**：每条消息的计时/统计链（step 计时、SVC 统计、弹性窗计时、测量构建的 stamp 链）里有若干笔"间隔上百 ms 的冷读"——**每笔真等 24µs**。测量构建（probe 开）每消息 6-8 笔（40-70µs 税）；**生产构建（probe 关）只剩 step/SVC 计时 2-4 笔（24-48µs 税）**。
 
@@ -174,7 +175,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | 优先级 | 项 | 内容 | 预期收益 | 工作量/风险 |
 |-------|----|------|---------|------------|
 | ✅ 已完成 | P1 | 单核原子 CS 后端（atomic-cas:false target）+ timer 直连 + 本地别名窗 + mailbox 去 Acquire | 294→240（D1）/ 209→189（D2） | 已合入 |
-| **进行中** | **计时瘦身** | 计时源替换候选首轮受阻（soc-timer 块时钟常闭，开门探针在测，见表后）→ 兜底：生产链采样制/去冷读 + 测量链 mcycle+段间保温 | **−35µs（D1）/ −34µs（D2）**，生产构建立即可做 | 小 / 低——纯删减 |
+| **进行中** | **计时瘦身** | **换源可行已定案**：soc-timer counter1 @12.8MHz（无冷读税、277ns 读）——落地 = chip-k3-rt24 soc-timer 驱动（DTS+APBC 开门+自由运行），step/SVC/stamp 计时链迁移 | **−35µs（D1）/ −34µs（D2）** | 小 / 低 |
 | 第 2 刀 | **P3 fence 去冗余** | magic 缓存 + 自产索引 Relaxed + 自旋 6→2 笔（D2 发现粒度 ×3）+ ch2 查询瘦身 | −10µs/消息 + 自旋 18→6µs/轮 | 中 / 低——正确性论证已完成（SPSC 单写者 + RP 无缓存） |
 | 第 3 刀 | **W2 双向轮询** | AP 响应方向用户态自旋（已实测 −11µs）；绕过 MSIP 54µs 物理地板 | −11µs 起；延迟关键模式更多 | 小（bench 已预演）/ 烧 AP 核 |
 | ❌ 已否决 | ~~P2 ISR 直派~~ | ~~响应在 ISR 内写完~~ **否决（2026-08-21）**：不破坏 rt-async 的任务模型——实际处理必须留在 task 上下文（executor/waker 语义），ISR 只做唤醒/标记；ddisp 27.1µs 作为结构性成本保留 | —（预期 −22µs 放弃） | — |
@@ -182,7 +183,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 
 叠加预期（不含已否决项）：**D1 240→~184，D2 189→~134**。再往下就是 SPSC 协议本体（每消息 4 笔 fence ≈ 8.8µs）+ 数据搬运（~7.5µs）+ 任务模型结构性成本（ddisp ~27µs）的物理下限区。
 
-**计时源替换候选：首轮受阻，两个候选 + 开门探针**（2026-08-21 板上 + riscv-yocto 调查）：soc-timer counter1（0xd4016000，布局=上游 timer-k1x.c）——**CER bit1 写 8 次回读全 0**、counter1 5ms 零走；d4014000 在 K3 是 watchdog 非 timer。RP 对该块读正常（277ns/笔，不挂死）。riscv-yocto 调查定案两项：**① 复位 bit2 高有效**（reset-spacemit.c：assert=写 1/deassert=清 0）；**② 引导链（U-Boot/OpenSBI）从未使能过 TIMERS1 时钟门**，且 Yocto 版 AP 内核驱动自带"时钟关→写静默丢弃"的官方补偿代码（timer_write_check）——**"时钟门常闭"假设获得机理佐证**（StarrrOS 侧对应驱动未跑）。**两个候选、两个开门探针（0b2a998/3447bc2）**：**(a) AP 域** soc-timer counter1，`tmr_clkon` 写 `APBC_TIMERS1_CLK_RST @0xd4015044`（bit0=bus/bit1=func/bit2=reset 高有效/mux[6:4]，**mux=0 = 12.8MHz、78ns 分辨率、回卷 335s**）；**(b) RCPU 本地域（主选）** rtimer0@c0889000——esOS dts 全 disabled 无人用（esOS tick 也走 SysTimer mtime），门在自家 RCPU5 域 `0xc088c04c`，无跨域问题，`tmr_rt_on` 开门+计数验证（标称 fastclk 3.25MHz）。APBC 写粘住 ⇒ (a) 可用；也丢 ⇒ 跨域写过滤坐实转 (b)；(b) 无论 (a) 成败都值得一测。兜底不变：测量链 mcycle+段间保温，生产链采样制。
+**计时源替换定案（2026-08-21 夜板上）：soc-timer counter1 换源可行**。裁决数据：`tmr_clkon` 从 RP 写 `APBC_TIMERS1_CLK_RST@0xd4015044` **写粘住**（时钟门常闭假设坐实、跨域写过滤证伪），counter1 自由运行 @**12.798MHz**（mux=0 默认，5ms 走 64013 ticks），CER 置位 retries=0；三面：热读 **277ns**、gapped 结构每轮 22.3µs **无冷读税**（还顺带把同结构 mtime 读带热——跨设备访问保持互连活跃，机理待好奇）。**落地 = chip-k3-rt24 增 soc-timer 驱动**（DTS 节点 + APBC 开门 + counter0/1 自由运行），step/SVC/stamp 计时链迁 counter1（分辨率 78ns、回卷 335s）。rcpu 侧 rtimer0@c0889000 反而死（RCPU5 门 0xc088c04c 写粘但块 CER 写不进/零计数，疑属 rcpu0 本地域）——弃。兜底不再需要。
 
 **附记（mtime 税模型再修正）**：now_gapped 69µs/轮（t0 + 首笔 poll 都吃 24.5µs 冷价）证明 **mtime 冷读由"任意非背靠背间隔"触发**（poll 间隔几十 ns 亦冷）；而 tmr_gapped 在 t1 前插入一笔异设备读（counter1 277ns）后每轮仅 22.4µs——mtime 读全部变热。机制未解（流水线/前端行为），不影响"去 mtime"决策；好奇心探针留给后续。
 
@@ -218,4 +219,4 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 1. **槽区布局偏移错 0xF0**：`Message` 是 `align(256)`，`RingBuffer.buffer` 垫到 +0x100 而非朴素假设的 +0x10；sizeof 断言对两种布局同取整（0x8100）无法区分。修复：`ov_channels::RB_SLOTS_OFF` 作为布局唯一真相源 + host 回归单测。
 2. **AP 按行缓存刷新错位**（user-cbo `refresh_slot` 用了错的 SLOTS_OFF）：错位 0xF0 期间全靠内核 AWAIT 的 invalidate 兜底——"按行精确刷新"的优化贡献此前虚标。随 1 一并修复。
 3. **`csrr cycle` 在 M 态未实现**：用户态别名 CSR 触发 Illegal Instruction 打挂固件；改用 `mcycle`（0xB00）。
-4. **在查：fresh_scan D=100µs dummy 不可见**（08-21，三轮确定性复现 `got=0`、邻居 D=0/30/300+ 全成功）：RP 在 op 内 Acquire 轮询 200ms 未见 write 索引推进。**超时快照已回收**（RP 视角）：`r=112, w=112`——RP 自身的消费推进（r→112）已落 SRAM，dummy 的 w=113 **从未可见或被写回成 112**；排除"回卷出幻影"（那会 r≠w），定性为**发布丢失**。待分辨：AP 缓存侧 w=113 而 SRAM 112 ⇒ `cbo.flush` 丢失（X100 U 态 CBO 可靠性问题，严重——需内核 clean 兜底）；AP 侧就没推进 ⇒ try_send/索引路径 bug。侦查探针已备（92cad47，-cbo 变体 20:47 重建）——bench 侧交叉 AP 发布前后索引即可定案。
+4. **定案（08-21 夜）：fresh_scan D=100µs dummy 不可见 = user-cbo `cbo.flush` 静默丢失**（三轮确定性复现）。决定性数据：超时时 **AP 缓存视角发布后 (r=118, w=120)，SRAM/RP 视角 200ms 仍 (119,119)**——AP 的索引行 flush 未把新 write 值写回 SRAM（若写回即使带陈旧 r，RP 也会看到 w=120 出队）。非"同行回卷"分支。**user-cbo 发布链的真实正确性缺口**：publish（fence → cbo.flush → fence）在 X100 U 态存在静默丢失窗口（疑 store 尚在写缓冲时 flush 按行 clean 到的是旧行）。缓解方向：publish_send 后 refresh+回读校验 w，失败重试 flush（或退化内核整窗 clean）；待实施。
