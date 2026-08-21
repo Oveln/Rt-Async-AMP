@@ -475,12 +475,33 @@ pub mod membench_op {
     /// 定案）/ bit[6:4]=源 mux（0=12.8MHz）。首轮板上实锤：StarryOS 不用
     /// 该块（CER=0 全零、写不进），时钟常闭
     pub const TMR_CLKON: u32 = 40;
-    /// RCPU 域候选：rtimer0 @0xc0889000（esOS dts 全 disabled 无人用，
-    /// fastclk 3.25MHz/apb 52MHz）开门 + counter0 自由运行化 + 1ms 计数
-    /// 验证。门 = `RCPU5_TIMER1_CLK_RST` @0xc088c04c（esOS
-    /// ccu-spacemit-k3.h；RCPU5 基址 0xc088c000 与本仓寄存器探测一致），
-    /// 位语义同 APBC、复位高有效。RCPU 本地域 ⇒ 无跨域问题，主候选
+    /// RCPU 本地域候选（主选）：AON_TIMER1 @0xc0889000 开门 + counter0
+    /// 自由运行化 + 1ms 计数验证。门 = `MCU_TIMER1_CLK_RST` @0xc088c04c
+    /// （17_clock_reset.md）：**bit0 TIMER_SW_RSTN 低有效（复位值 0=保持
+    /// 复位，写 1 释放）**、bit1/2=双时钟门、bit[5:4]=SEL（0=25.6MHz）。
+    /// ⚠ 2026-08-21 首次尝试的死因：按 APBC 高有效复位惯例写了两笔
+    /// `keep|0x7`→`keep|0x3`，第二笔把 bit0 清零——外设被重新按住软
+    /// 复位（读全 0），并非域过滤。本版单笔 `keep|0x7` 一笔到位。
+    /// 布局假设 = APBC OS timer 同血脉（CER+0x00/CMR+0x04/PLCR+0x50/
+    /// CR+0x90），由本 op 的计数验证核实
     pub const TMR_RT_ON: u32 = 41;
+    /// AON_TIMER1↔mtime 5ms 频率联标 + 单调性哨兵：返回 (aon ticks,
+    /// mtime ticks)。标称 25.6MHz（SEL=0），实测换算 FREQ_HZ 供 dd 判读
+    pub const TMR_AON_CAL: u32 = 42;
+    /// AON counter0 热连读 ×4000（mtime 括号计时，括号本身 2 笔冷读
+    /// 摊薄）：背靠背单价，供与间隔读对照（counter1 教训：热价不代表
+    /// 间隔价）
+    pub const TMR_AON_HOT: u32 = 43;
+    /// AON counter0 间隔读单价（**换源判据 op**）：每轮 t0/t1 读 AON、
+    /// 中间固定圈数忙等（脱离 mtime 计时，避免插入他域读保温 mtime 的
+    /// 探针盲区）；整轮 mtime 首尾括号摊到 200 轮。判读：wall−Σaon
+    /// ≈ 每轮重锁税 + 忙等本身的 wall。返回 (Σaon ticks, mtime 括号
+    /// ticks)
+    pub const TMR_AON_GAPPED: u32 = 44;
+    /// 兄弟块兜底扫描：AON_TIMER2/3/4（0xc088c800/c900/ca00，门
+    /// 0xc088c070/78/7c）逐个单笔 `|0x7` 开门 + counter0 使能 + 1ms
+    /// 计数，log 各块结果——TIMER1 布局假设失败时的退路
+    pub const TMR_AON_SCAN: u32 = 45;
 }
 
 /// 共享窗尾部空闲区偏移（MEMBENCH 专用 scratch）。
@@ -1060,13 +1081,13 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             return (apbc1 as u64, ((cer as u64) << 32) | (d & 0xffff_ffff));
         }
         M::TMR_RT_ON => {
-            // RCPU 域 rtimer0（0xc0889000，esOS 无人用）开门 + counter0
-            // 自由运行化 + 1ms 计数验证。复位高有效（assert=bit2=1）。
+            // RCPU 本地 AON_TIMER1 开门 + counter0 自由运行化 + 1ms 计数
+            // 验证。bit0 RSTN 低有效：单笔 keep|0x7（门+释放复位）一笔
+            // 到位，无第二笔写（上一版在此清 bit0 重新按住复位）。
             use platform::Timer as _;
             let g0 = rccu_rd(RCPU5_TIMER1_CLK_RST);
             let keep = g0 & !0x7;
-            rccu_wr(RCPU5_TIMER1_CLK_RST, keep | 0x7); // 双门开 + 复位 assert
-            rccu_wr(RCPU5_TIMER1_CLK_RST, keep | 0x3); // 复位 deassert
+            rccu_wr(RCPU5_TIMER1_CLK_RST, keep | 0x7); // 双门开 + 释放软复位
             let g1 = rccu_rd(RCPU5_TIMER1_CLK_RST);
             let cmr = rt_rd(TMR_CMR);
             rt_wr(TMR_CMR, cmr | 1); // counter0 自由运行
@@ -1081,7 +1102,7 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 retries += 1;
             }
             let cer = rt_rd(TMR_CER);
-            // 1ms 计数验证（esOS dts 标称 fastclk 3.25MHz——Δ 换算见判读）
+            // 1ms 计数验证（标称 25.6MHz 预期 Δ≈25600；mtime 判据）
             let c0 = rt_rd(TMR_CR0) as u64;
             let t0 = chip_k3_rt24::clint_k3::TIMER.now();
             let target = t0 + 24_000; // 1ms @ 24MHz
@@ -1097,6 +1118,90 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 cer
             );
             return (g1 as u64, ((cer as u64) << 32) | (d & 0xffff_ffff));
+        }
+        M::TMR_AON_CAL => {
+            // AON_TIMER1↔mtime 频率联标：5ms mtime 判据忙等，返回
+            // (aon Δ, mtime Δ)。判读换算实测 FREQ_HZ。
+            use platform::Timer as _;
+            let m0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let c0 = rt_rd(TMR_CR0) as u64;
+            let target = m0 + 120_000; // 5ms @ 24MHz
+            while chip_k3_rt24::clint_k3::TIMER.now() < target {
+                core::hint::spin_loop();
+            }
+            let m1 = chip_k3_rt24::clint_k3::TIMER.now();
+            let c1 = rt_rd(TMR_CR0) as u64;
+            return (c1.wrapping_sub(c0), m1.wrapping_sub(m0));
+        }
+        M::TMR_AON_HOT => {
+            // AON counter0 热连读 ×4000（mtime 括号计时）。
+            use platform::Timer as _;
+            let mut sink = 0u64;
+            let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+            for _ in 0..4000 {
+                sink = sink.wrapping_add(rt_rd(TMR_CR0) as u64);
+            }
+            let t1 = chip_k3_rt24::clint_k3::TIMER.now();
+            let _ = sink;
+            return (t1.wrapping_sub(t0), 4000u64);
+        }
+        M::TMR_AON_GAPPED => {
+            // 间隔读单价（换源判据）：每轮 AON t0 → 忙等固定圈数 →
+            // AON t1，ΣΔ 是 AON 自己计的真实耗时；整轮 mtime 首尾
+            // 括号给 wall。wall−Σaon 摊到 200 轮 ≈ 每轮重锁税。
+            use platform::Timer as _;
+            let wall0 = chip_k3_rt24::clint_k3::TIMER.now();
+            let mut sum = 0u64;
+            for _ in 0..200 {
+                let a0 = rt_rd(TMR_CR0) as u64;
+                for _ in 0..12_000 {
+                    core::hint::spin_loop();
+                }
+                let a1 = rt_rd(TMR_CR0) as u64;
+                sum = sum.wrapping_add(a1.wrapping_sub(a0));
+            }
+            let wall1 = chip_k3_rt24::clint_k3::TIMER.now();
+            return (sum, wall1.wrapping_sub(wall0));
+        }
+        M::TMR_AON_SCAN => {
+            // 兄弟块兜底：AON_TIMER2/3/4 逐个单笔 |0x7 开门 + counter0
+            // 使能 + 1ms 计数，全部结果只进 log（返回 0/0——三块结果
+            // 由 RP console 判读）。
+            use platform::Timer as _;
+            const CAND: [(usize, usize); 3] = [
+                // (块基址, 门寄存器)
+                (0xc088_c800, 0xc088_c070),
+                (0xc088_c900, 0xc088_c078),
+                (0xc088_ca00, 0xc088_c07c),
+            ];
+            for (i, &(base, gate_addr)) in CAND.iter().enumerate() {
+                // SAFETY: 探针对文档载明的 AON_TIMER 门/计数寄存器做
+                // 纯 MMIO 读写，仅本 op 单线程执行。
+                unsafe {
+                    let gate = (gate_addr as *const u32).read_volatile();
+                    (gate_addr as *mut u32).write_volatile(gate | 0x7);
+                    let cer = base as *mut u32;
+                    cer.write_volatile(cer.read_volatile() | 1);
+                    let cmr = (base + 0x04) as *mut u32;
+                    cmr.write_volatile(cmr.read_volatile() | 1);
+                    ((base + 0x50) as *mut u32).write_volatile(0);
+                    let c0 = ((base + TMR_CR0) as *const u32).read_volatile() as u64;
+                    let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+                    while chip_k3_rt24::clint_k3::TIMER.now() < t0 + 24_000 {
+                        core::hint::spin_loop();
+                    }
+                    let c1 = ((base + TMR_CR0) as *const u32).read_volatile() as u64;
+                    log::info!(
+                        "[mb] aon_scan: timer{} gate {:#x}->{:#x} cer={:#x} cr0 Δ={}",
+                        i + 2,
+                        gate,
+                        (gate_addr as *const u32).read_volatile(),
+                        cer.read_volatile(),
+                        c1.wrapping_sub(c0)
+                    );
+                }
+            }
+            return (0, 0);
         }
         _ => return (0, 0),
     }

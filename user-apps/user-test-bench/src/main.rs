@@ -131,6 +131,10 @@ mod mb_op {
     pub const TMR_B_SCAN: u32 = 39;
     pub const TMR_CLKON: u32 = 40;
     pub const TMR_RT_ON: u32 = 41;
+    pub const TMR_AON_CAL: u32 = 42;
+    pub const TMR_AON_HOT: u32 = 43;
+    pub const TMR_AON_GAPPED: u32 = 44;
+    pub const TMR_AON_SCAN: u32 = 45;
 }
 
 /// MEMBENCH stride 扫描的 RP 侧 scratch 长度（镜像 SHM_SCRATCH_LEN）。
@@ -1692,7 +1696,10 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         // clkon/rt_on 先行：首轮实锤 AP 域块时钟常闭，须先开门去复位；
         // rt_on 为 RCPU 本地域候选（esOS rtimer0@c0889000，无人用）——主选
         (mb_op::TMR_CLKON, "tmr_clkon        APBC开TIMERS1时钟+复位", 0, 1),
-        (mb_op::TMR_RT_ON, "tmr_rt_on        RCPU开rtimer0+计数验证", 0, 1),
+        (mb_op::TMR_RT_ON, "tmr_rt_on        AON_TIMER1开门+计数验证", 0, 1),
+        (mb_op::TMR_AON_CAL, "tmr_aon_cal      5ms联标AON_TIMER1频率", 0, 1),
+        (mb_op::TMR_AON_HOT, "tmr_aon_hot      AON c0 热读×4000", 0, 4000),
+        (mb_op::TMR_AON_GAPPED, "tmr_aon_gapped   AON c0 间隔读×200(判据)", 0, 200),
         (mb_op::TMR_SETUP, "tmr_setup        soc-timer c1 自由运行化", 0, 1),
         (mb_op::TMR_HOT, "tmr_hot          counter1 热读×4000", 0, 4000),
         (mb_op::TMR_GAPPED, "tmr_gapped       间隔20µs读counter1", 0, 64),
@@ -1710,6 +1717,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     let mut tmr_rt_on_seen = false;
     let mut tmr_rt_on_ck: u64 = 0;
     let mut tmr_cal_ck: u64 = 0;
+    let mut aon_cal_ck: u64 = 0;
+    let mut aon_gapped_raw: (u64, u64) = (0, 0);
     let mut bscan_seen = false;
     let mut bscan_raw: (u64, u64) = (0, 0);
     for (i, &(op, name, arg, count)) in ops.iter().enumerate() {
@@ -1719,6 +1728,11 @@ fn run_mb(b: &mut Bench, line_n: u32) {
                 // 全零回读本身是有效结论：块不存在/时钟未开（未挂死）
                 println!("  {name:<40} 全零回读（d4014000 无此块或时钟未开）");
                 bscan_seen = true;
+                continue;
+            }
+            if op == mb_op::TMR_AON_SCAN {
+                // 结果只进 RP console log（三块逐一），AP 侧无判读数据
+                println!("  {name:<40} 完成（TIMER2/3/4 结果见 RP console log）");
                 continue;
             }
             println!("  {name:<40} 未知 op（固件/工具版本不匹配？）");
@@ -1738,6 +1752,8 @@ fn run_mb(b: &mut Bench, line_n: u32) {
                 tmr_rt_on_ck = ck;
             }
             x if x == mb_op::TMR_CAL => tmr_cal_ck = ck,
+            x if x == mb_op::TMR_AON_CAL => aon_cal_ck = ck,
+            x if x == mb_op::TMR_AON_GAPPED => aon_gapped_raw = (ns, ck),
             x if x == mb_op::TMR_B_SCAN => {
                 bscan_seen = true;
                 bscan_raw = (ns, ck);
@@ -1907,8 +1923,38 @@ fn run_mb(b: &mut Bench, line_n: u32) {
         let cer = tmr_rt_on_ck >> 32;
         let d = tmr_rt_on_ck & 0xffff_ffff;
         println!(
-            "  tmr_rt_on：CER={cer:#x}（bit0={}）1ms 计数 Δ={d} —— Δ≈3250 ⇒ 3.25MHz（esOS 标称 fastclk）；≈1000 ⇒ 1MHz；0 ⇒ RCPU 域门也没开（查 rccu 回读，RP console）",
+            "  tmr_rt_on：CER={cer:#x}（bit0={}）1ms 计数 Δ={d} —— Δ≈25600 ⇒ 25.6MHz 活（布局假设成立）；≈12800 ⇒ 12.8MHz（SEL 读回非 0，按 tmr_aon_cal 实测换算）；0 ⇒ 仍死（查 rccu 回读与 aon_scan，RP console）",
             cer & 1 != 0
+        );
+    }
+    if let Some(ac) = gop(mb_op::TMR_AON_CAL) {
+        let hz = ac as f64 * 24_000_000.0 / aon_cal_ck.max(1) as f64;
+        println!(
+            "  tmr_aon_cal：AON_TIMER1 5ms 走 {ac} ticks（mtime 窗口 {aon_cal_ck}）⇒ ≈{hz:.0} Hz（标称 25.6MHz）；单调 ⇒ 自由运行成立"
+        );
+    }
+    if let Some(ah) = gop(mb_op::TMR_AON_HOT) {
+        println!(
+            "  tmr_aon_hot {ah} ns/笔（mtime 括号计时；对照 counter1 277ns / rd_mtime 热 106ns / mailbox 寄存器 148ns——本地域应 ≤ 150ns）"
+        );
+    }
+    if aon_gapped_raw != (0, 0) {
+        let (aon_sum, wall) = aon_gapped_raw;
+        // Σaon = AON 自己计的每轮真实耗时（含忙等）；wall = mtime 计的
+        // 整段。wall − Σaon 摊 200 轮 = 每轮重锁税（正=有税）
+        let hz = if let Some(ac) = gop(mb_op::TMR_AON_CAL) {
+            ac as f64 * 24_000_000.0 / aon_cal_ck.max(1) as f64
+        } else {
+            25_600_000.0
+        };
+        let wall_ns = t2ns(wall, 24_000_000);
+        let aon_ns = ((aon_sum as f64) * 1e9 / hz) as u64;
+        let tax = (wall_ns.saturating_sub(aon_ns)) / 200;
+        println!(
+            "  tmr_aon_gapped：wall {}µs vs Σaon {}µs/200轮 ⇒ 每轮间隔读税 ≈ {tax} ns —— <1µs ⇒ 本地域免跨互连税、换源可行（对齐 mark 间隔复测后迁移）；~13µs ⇒ 与 counter1 同病，弃；另每轮忙等 wall≈{}ns（Σaon/200）",
+            wall_ns / 1000,
+            aon_ns / 1000,
+            aon_ns / 200
         );
     }
     if let (Some(ng), Some(tg)) = (g(30), gop(mb_op::TMR_GAPPED)) {

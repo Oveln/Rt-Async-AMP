@@ -1,93 +1,92 @@
-//! K3 soc-timer 计时源（AP 域 0xd4016000 空闲 counter1）。
+//! K3 本地计时源（RCPU AON 域 AON_TIMER1 @0xc0889000，counter0）。
 //!
-//! ⚠ **2026-08-22 板上证伪：换源方案未达预期**——counter1 间隔读有
-//! **~13µs/笔** 的重锁税（tmr_hot 的 277ns 是背靠背流水价；真实路径
-//! mark 间隔 µs 级仍触发，12.8MHz 计数钟到 RCPU 总线同样跨时钟域，
-//! 病比 mtime 轻：13 vs 24.5µs，但整链 8 笔反而净亏——迁移已回滚，
-//! rtt 240.0 → 248.5 实证）。生产计时链仍走 clint mtime。本模块保留：
-//! 开门（Board::init 调用）+ `now()` 供探针（membench tmr_* 组）与
-//! 未来用途（如需 12.8MHz 高分辨率短间隔测量）。
+//! **选型原则（2026-08-22 延迟战役定案，REPORT.md）**：RT24 的高延迟外设
+//! 访问根因是跨互连——mtime（SysTimer @0xe4000000）虽是 rcpu1 功能上的
+//! 计时器，但物理上是全 SoC 共享块（mtimecmp 按 hart<<27 分区），挂在
+//! 簇间互连上，RT24 本地总线上的外设只有 0xc088_xxxx AON 域这批。
+//! mtime 间隔读 24.5µs/笔、AP 域 counter1 间隔读 ~13µs/笔（均已板上
+//! 证伪，回滚 6f4ec9d）——替代者必须出自本地域。AON_TIMER1~4
+//! （0xc0889000 / 0xc088c800 / c900 / ca00）是文档载明的 RCPU 专属
+//! 计时器（k3_docs 06_address_map.md §6.2），本模块用 AON_TIMER1。
 //!
-//! 动机（2026-08-21 延迟战役，详见主仓 docs/latency-report/REPORT.md）：
-//! SysTimer mtime 读在非背靠背间隔后有 **24.5µs/笔** 的跨时钟域重锁税
-//! （热循环 106ns → 231 倍），生产计时链每条消息 2-6 笔全是冷读，
-//! 实测占 D1 rtt ~35µs。本计数器三面探针验证：**12.8MHz 自由运行
-//! （mux=0 默认）、背靠背读 277ns、单笔间隔读税 ~13µs**。
+//! 时钟/复位：`MCU_TIMER1_CLK_RST @0xc088c04c`（17_clock_reset.md
+//! RCPU_PMU，基址 0xc088c000）：
+//! - bit0 TIMER_SW_RSTN —— 复位值 0 = **保持复位**，写 1 释放（低有效
+//!   语义；与 APBC 的 bit2 高有效复位相反——2026-08-21 首次尝试栽在
+//!   这里：开门后又写 0x3 把 bit0 清零，外设被按回复位态读全 0）；
+//! - bit1 TIMER_FCLK_EN / bit2 TIMER_PCLK_EN —— 双时钟门；
+//! - bit[5:4] TIMER_FCLK_SEL —— 0=25.6MHz / 1=12.8MHz / 2=3.2MHz。
+//! 开门写 `keep|0x7` 一笔到位（mux 位 [18:8] 保留读回值，默认 SEL=0）。
 //!
-//! 资源：AP 域 soc-timer 块 0xd4016000。StarryOS 不使用该块（其
-//! clockevent 走 riscv-timer/Sstc，实测 CER=0 整块独占，无共享竞态）。
-//! 时钟门在 APBC `APBC_TIMERS1_CLK_RST @0xd4015044`：bit0=bus gate /
-//! bit1=func gate / bit2=reset（**高有效**：assert=1/deassert=0，
-//! riscv-yocto reset-spacemit.c 定案）/ bit[6:4]=源 mux（0=12.8MHz）。
-//! 位定义 = 主线 drivers/clk/spacemit/ccu-k3.c + esOS ccu-spacemit-k3.h。
-//! 寄存器布局 = 上游 timer-k1x.c（MMP 血统）：CER=+0x00（bit n=counter n
-//! 使能）/ CMR=+0x04（bit n=自由运行模式）/ PLCR(n)=+0x50+(n<<2)=0 自由
-//! 运行 / CR(n)=+0x90+(n<<2) 计数值。counter0/2 保留未用。
+//! 寄存器布局**文档未载**，按同血脉 APBC OS timer（timer-k1x.c，MMP
+//! 血统）假设：CER=+0x00（bit n=counter n 使能）/ CMR=+0x04（bit n=
+//! 自由运行）/ PLCR(n)=+0x50+(n<<2) / CR(n)=+0x90+(n<<2)——由探针
+//! （intercom TMR_RT_ON 组）板上验证计数递增后方可采信。
 //!
-//! 非 DT probe 的理由：时钟门位于 AP 域 APBC，不在本 crate CCU 驱动
-//! （RCPU 域 0xc088xxxx）的管理范围；以 `Board::init` 直连装配（与
-//! `spl_handshake` 同级），副作用边界 = 本块内。
+//! **状态：探针验证阶段**——生产计时链仍走 clint mtime；间隔读单价
+//! 经 TMR_AON_GAPPED 实测且优于 mtime 前不迁移（counter1 教训：
+//! 背靠背热读价不代表间隔读价，必须实测 mark 间隔路径）。
 //!
 //! 使用边界：
-//! - 32 位 @12.8MHz 回卷 335s——所有用途为 µs~2s 级**区间差**
-//!   （wrapping 语义），不做绝对时刻跨回卷比较；mtimecmp 睡眠唤醒
-//!   截止时间仍走 SysTimer（`clint_k3`）。
-//! - 时钟源为 PLL1 派生 12.8MHz（AP 电源域）：AP 深度低功耗时停——
-//!   本场景 AP 常跑；若未来 AP 换用带 `CONFIG_SPACEMIT_K1X_TIMER` 的
-//!   内核（如 Yocto 6.18）会抢占本块（清 CER + 改 1MHz），需届时协调。
+//! - 32 位 @25.6MHz 回卷 167s——只做 µs~秒级**区间差**（wrapping 语义），
+//!   不做绝对时刻跨回卷比较；mtimecmp 睡眠唤醒截止时间仍走 SysTimer
+//!   （`clint_k3`）。
+//! - FCLK 由 AON 域电源供给（非 AP PLL 派生），AP 低功耗不影响。
+//! - 若 AP 侧未来声明使用 AON_TIMER1（esOS/StarryOS 现均未用，dts
+//!   disabled），需跨核协调。
 
-const TMR1_BASE: usize = 0xd401_6000;
-const APBC_TIMERS1_CLK_RST: usize = 0xd401_5044;
+const AON_TMR1_BASE: usize = 0xc088_9000;
+const MCU_TIMER1_CLK_RST: usize = 0xc088_c04c;
 
-/// 计数频率（mux=0 = pll1_d192_12p8 标称值；板上联标实测 12.798MHz，
-/// −0.016% 归 PLL 容差——区间差测量内部自洽，无跨钟对齐需求）。
-pub const FREQ_HZ: u32 = 12_800_000;
+/// 计数频率标称值（FCLK_SEL=0 = 25.6MHz；实测值由 TMR_AON_CAL 板上
+/// 联标校准——区间差测量内部自洽，无跨钟对齐需求）。
+pub const FREQ_HZ: u32 = 25_600_000;
 
-/// counter1 计数值寄存器偏移（CR(1) = 0x90 + 1×4）。
-const TMR_CR1: usize = 0x94;
-/// counter1 预载控制寄存器偏移（PLCR(1) = 0x50 + 1×4；0 = 自由运行）。
-const TMR_PLCR1: usize = 0x54;
+/// counter0 计数值寄存器偏移（CR(0) = 0x90，布局假设见模块头）。
+const TMR_CR0: usize = 0x90;
+/// counter0 预载控制寄存器偏移（PLCR(0) = 0x50；0 = 自由运行）。
+const TMR_PLCR0: usize = 0x50;
 
-/// 开 APBC 时钟门 + 复位脉冲 + counter1 自由运行化。
+/// 开时钟门 + 释放软复位 + counter0 自由运行化。
 ///
-/// `Board::init` 调用（早于 DT boot，无依赖）。写后回读校验重试 ×8：
-/// 门刚开的边界窗口内寄存器写可能未及生效（上游 timer-k1x.c 的
-/// timer_write_check 同款防护）。
+/// `Board::init` 调用（早于 DT boot，无依赖；与 `spl_handshake` 同级
+/// 直连装配，理由：门在 AON_PMU 区，不在本 crate CCU 驱动的管理范围，
+/// 副作用边界 = 本块内）。CER 写后回读校验重试 ×8（门刚开的边界窗口
+/// 内寄存器写可能未及生效，上游 timer-k1x.c timer_write_check 同款防护）。
 pub fn init() {
     // SAFETY: 各访问均为本模块文档论证过的目标寄存器纯 MMIO 读写。
     unsafe {
-        let gate = (APBC_TIMERS1_CLK_RST as *const u32).read_volatile();
-        let keep = gate & !0x7; // 保留源 mux 位 [6:4]
-        // 双门开 + 复位脉冲（bit2 高有效：assert=1 → deassert=0）
-        (APBC_TIMERS1_CLK_RST as *mut u32).write_volatile(keep | 0x7);
-        (APBC_TIMERS1_CLK_RST as *mut u32).write_volatile(keep | 0x3);
-        // counter1 自由运行：CMR bit1 + PLCR1=0 + CER bit1（回读校验）
-        let cmr = (TMR1_BASE as *const u32).read_volatile();
-        (TMR1_BASE as *mut u32).write_volatile(cmr | (1 << 1));
-        ((TMR1_BASE + TMR_PLCR1) as *mut u32).write_volatile(0);
+        let gate = (MCU_TIMER1_CLK_RST as *const u32).read_volatile();
+        // 保留 bit[18:3]（DIV/SEL/其他），低 3 位 = RSTN|FCLK|PCLK 全开，
+        // 一笔到位——不再有第二笔写（上一版在此清了 bit0 重新按住复位）
+        (MCU_TIMER1_CLK_RST as *mut u32).write_volatile(gate | 0x7);
+        // counter0 自由运行：CMR bit0 + PLCR0=0 + CER bit0（回读校验）
+        let cmr = (AON_TMR1_BASE + 0x04) as *mut u32;
+        cmr.write_volatile(cmr.read_volatile() | 1);
+        ((AON_TMR1_BASE + TMR_PLCR0) as *mut u32).write_volatile(0);
+        let cer = AON_TMR1_BASE as *mut u32;
         let mut ok = false;
         for _ in 0..8 {
-            let cer = (TMR1_BASE as *const u32).read_volatile();
-            (TMR1_BASE as *mut u32).write_volatile(cer | (1 << 1));
-            if (TMR1_BASE as *const u32).read_volatile() & (1 << 1) != 0 {
+            cer.write_volatile(cer.read_volatile() | 1);
+            if cer.read_volatile() & 1 != 0 {
                 ok = true;
                 break;
             }
         }
         if !ok {
-            log::error!("[timer_k3] counter1 使能失败（APBC 门/复位异常）");
+            log::error!("[timer_k3] AON_TIMER1 使能失败（门/软复位异常，布局假设待探针核实）");
         }
     }
 }
 
-/// 读 counter1（32 位 @12.8MHz，回卷 335s——区间差用 wrapping 语义）。
+/// 读 counter0（32 位 @25.6MHz，回卷 167s——区间差用 wrapping 语义）。
 #[inline]
 pub fn now() -> u64 {
     // SAFETY: 纯 MMIO 读，无副作用。
-    unsafe { ((TMR1_BASE + TMR_CR1) as *const u32).read_volatile() as u64 }
+    unsafe { ((AON_TMR1_BASE + TMR_CR0) as *const u32).read_volatile() as u64 }
 }
 
-/// tick → ns（编译期常量频率，无额外访存）。
+/// tick → ns（标称频率，无额外访存；精确换算用探针联标值）。
 #[inline]
 pub fn ticks_to_ns(t: u64) -> u64 {
     t * 1_000_000_000 / FREQ_HZ as u64

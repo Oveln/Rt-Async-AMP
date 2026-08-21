@@ -77,11 +77,11 @@ impl Board for K3Rt24 {
         //    原 clock::early_init() 的握手职责抽出至此独立模块。
         handshake::spl_handshake();
 
-        // 1.5 soc-timer counter1 计时源开门（AP 域 APBC，直连装配——
-        //     见 timer_k3 模块头注释）。⚠ 生产计时链未迁移（2026-08-22
-        //     板上证伪：counter1 间隔读有 ~13µs 重锁税，仅比 mtime 的
-        //     24.5µs 轻，换源得不偿失）——此处开门仅供探针（tmr_* 组）
-        //     与未来用途，生产时间戳仍走 clint mtime（同钟不变量）。
+        // 1.5 本地计时源 AON_TIMER1 开门（RCPU AON 域 0xc0889000，直连
+        //     装配——见 timer_k3 模块头注释）。⚠ 生产计时链未迁移——
+        //     此处开门供探针（tmr_* 组）验证间隔读单价，达标（优于
+        //     mtime 24.5µs 且无重锁税）后方迁移；生产时间戳仍走 clint
+        //     mtime（同钟不变量）。
         timer_k3::init();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
