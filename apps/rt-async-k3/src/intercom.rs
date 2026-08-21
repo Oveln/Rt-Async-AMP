@@ -77,18 +77,17 @@ impl RtAsyncRpc {
     /// 精确延时（busy-wait）：在 process_all 中顺序执行，
     /// 保证前后 RPC 指令之间的时序精度。
     fn delay(us: u32) {
-        // ①′：clint 直连——timer() 全路径（Slot 查找）~3µs/次（TIMER_NOW
-        // 探针实测 3040ns vs 裸 mtime 105ns），延时循环不宜经 Slot。
-        use platform::Timer as _;
-        let t = &chip_k3_rt24::clint_k3::TIMER;
-        let freq = t.freq_hz() as u64;
-        let target = t.now() + (us as u64) * freq / 1_000_000;
-        while t.now() < target {
+        // soc-timer counter1（277ns/笔恒定；mtime 经 Slot ~3µs 且有冷读
+        // 税——延时循环不宜走 mtime）。wrapping 差值判限期（us 级 ≪ 335s
+        // 回卷）。
+        let limit = (us as u64) * chip_k3_rt24::timer_k3::FREQ_HZ as u64 / 1_000_000;
+        let start = chip_k3_rt24::timer_k3::now();
+        while chip_k3_rt24::timer_k3::now().wrapping_sub(start) & 0xffff_ffff < limit {
             core::hint::spin_loop();
         }
     }
-    /// 测量探针：回显 val + 发现路径标签（1..=4 = D1..D4）+ RP 侧 mtime
-    /// 分段时间戳（tick，见模块文档）。
+    /// 测量探针：回显 val + 发现路径标签（1..=4 = D1..D4）+ RP 侧
+    /// counter1 分段时间戳（tick，见模块文档；计时源迁移 2026-08-21）。
     ///
     /// 分段语义：
     /// - `t_isr`：最近一次 mailbox ISR 入口（D1 的唤醒源；D2/D3/D4 路径下
@@ -286,12 +285,12 @@ mod stats {
             return ov_rpc::RESP_SEND_FAILS.load(Ordering::Relaxed);
         }
         if i == stat_idx::T_NOW {
-            use platform::Timer as _;
-            return chip_k3_rt24::clint_k3::TIMER.now();
+            return chip_k3_rt24::timer_k3::now();
         }
         if i == stat_idx::FREQ_HZ {
-            use platform::Timer as _;
-            return chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
+            // 计时链频率（T_SCHED/stamp/ISR 戳同源 soc-timer counter1；
+            // bench 的 dd 分段换算用）
+            return chip_k3_rt24::timer_k3::FREQ_HZ as u64;
         }
         // dispatch 分解戳转发（feature "stamps"，未启用时恒 0）。
         #[cfg(feature = "probe")]
@@ -523,7 +522,10 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
     let local_blk = local_line as *const Blk256;
 
     let mut ck: u64 = 0;
-    let t0 = platform::timer().now();
+    // 计时括号 = soc-timer counter1（277ns 恒定；mtime 括号首笔常冷
+    // +24.5µs 污染小总额——计时源迁移 2026-08-21）。mtime 自研究 op
+    // （RD_MTIME/NOW_GAPPED/CYCLE_*/TMR_*）内部计时不变。
+    let t0 = chip_k3_rt24::timer_k3::now();
     match op {
         M::RD_LINE_SHM | M::RD_LINE_LOCAL => {
             let p = if op == M::RD_LINE_SHM { shm_line } else { local_line };
@@ -637,7 +639,9 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 // 场景可接受，重启即恢复）。
                 v = unsafe { p.read_volatile() };
             }
-            let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
+            let ns = chip_k3_rt24::timer_k3::ticks_to_ns(
+                chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
+            );
             return (ns, v as u64);
         }
         M::AQ_LOAD_LOCAL => {
@@ -1100,7 +1104,9 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
         }
         _ => return (0, 0),
     }
-    let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
+    let ns = chip_k3_rt24::timer_k3::ticks_to_ns(
+        chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
+    );
     (ns, ck)
 }
 
@@ -1449,12 +1455,12 @@ const ELASTIC_SPIN_LIMIT: u32 = 100000;
 // 公共 API
 // ============================================================================
 
-/// 装配 dispatch 分解戳时钟（clint mtime 直连——Slot 路径 ~3µs/次）。
+/// 装配 dispatch 分解戳时钟（soc-timer counter1 直连——277ns/笔恒定，
+/// mtime 冷读税根除；与 T_SCHED/ISR 戳同钟）。
 /// 见 ov-rpc feature "stamps"（经 `probe` 传递）。
 #[cfg(feature = "probe")]
 fn install_stamp_clock() {
-    use platform::Timer as _;
-    ov_rpc::stamp::set_clock(|| chip_k3_rt24::clint_k3::TIMER.now());
+    ov_rpc::stamp::set_clock(chip_k3_rt24::timer_k3::now);
 }
 
 /// 初始化共享内存（boot 期职责已迁至 AP 内核 rt_shm 驱动 probe 期，
@@ -1590,9 +1596,9 @@ pub fn process_elastic() -> usize {
     let shm = unsafe { SharedMemory::<3>::at(ov_shm::shm::base()) };
 
     // D1 分段基准：本函数入口 ≈ MBX3.recv().await 返回、IPC 任务恢复执行。
-    // ①′：clint 直连（每唤醒周期 3 次 timer()，Slot 路径 3µs/次）。
-    use platform::Timer as _;
-    let t_enter = chip_k3_rt24::clint_k3::TIMER.now();
+    // 计时源 = soc-timer counter1（与 ISR 戳/stamp 链同钟——dd 分段恒等式
+    // 前提；mtime 冷读税已根除）。
+    let t_enter = chip_k3_rt24::timer_k3::now();
     T_SCHED.store(t_enter, Ordering::Relaxed);
     DISCOVERY.store(path::D1_IRQ_WAKE, Ordering::Relaxed);
 
@@ -1614,7 +1620,7 @@ pub fn process_elastic() -> usize {
         }
 
         // 3. 无消息，弹性自旋
-        let win_start = chip_k3_rt24::clint_k3::TIMER.now();
+        let win_start = chip_k3_rt24::timer_k3::now();
         let mut spun = 0u32;
         while spun < ELASTIC_SPIN_LIMIT {
             if server().has_pending() || server().has_urgent() {
@@ -1631,7 +1637,9 @@ pub fn process_elastic() -> usize {
         }
 
         // 4. 弹性窗口完整耗尽，准备睡眠：记录实测窗口时长（S0 标定数据源）
-        let win_ns = ticks_to_ns(chip_k3_rt24::clint_k3::TIMER.now().saturating_sub(win_start));
+        let win_ns = chip_k3_rt24::timer_k3::ticks_to_ns(
+            chip_k3_rt24::timer_k3::now().wrapping_sub(win_start) & 0xffff_ffff,
+        );
         stats::set(stat_idx::WIN_LAST_NS, win_ns);
         stats::min(stat_idx::WIN_MIN_NS, win_ns);
         stats::max(stat_idx::WIN_MAX_NS, win_ns);
@@ -1698,9 +1706,9 @@ fn drain_all() -> usize {
 /// Notify 的 IPI 在 process_one 返回（响应已写入 CH1）之后发出，
 /// 与 `process_all` 的 on_notify 时机一致。
 fn step(urgent: bool) -> bool {
-    // ①′：clint 直连（每消息 2 次 timer() + ticks_to_ns 内 1 次 freq）。
-    use platform::Timer as _;
-    let t0 = chip_k3_rt24::clint_k3::TIMER.now();
+    // 计时源：soc-timer counter1（每消息 2 读 ×277ns 恒定——mtime 冷读
+    // 24.5µs/笔 税已根除，2026-08-21 计时源迁移）。
+    let t0 = chip_k3_rt24::timer_k3::now();
     let r = if urgent {
         server().process_urgent::<RtAsyncRpc>()
     } else {
@@ -1710,7 +1718,9 @@ fn step(urgent: bool) -> bool {
         return false;
     }
 
-    let svc_ns = ticks_to_ns(chip_k3_rt24::clint_k3::TIMER.now().saturating_sub(t0));
+    let svc_ns = chip_k3_rt24::timer_k3::ticks_to_ns(
+        chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
+    );
     stats::set(stat_idx::SVC_LAST_NS, svc_ns);
     stats::min(stat_idx::SVC_MIN_NS, svc_ns);
     stats::max(stat_idx::SVC_MAX_NS, svc_ns);

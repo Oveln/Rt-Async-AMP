@@ -35,6 +35,7 @@ pub mod pinctrl_k3;
 pub mod plic_k3;
 pub mod pxa_uart;
 pub mod reset_stub;
+pub mod timer_k3;
 
 use extern_trait::extern_trait;
 use platform::device::Driver;
@@ -75,6 +76,11 @@ impl Board for K3Rt24 {
         // 1. SPL 启动握手回写（最先，解锁 AP 的 6s 轮询）。
         //    原 clock::early_init() 的握手职责抽出至此独立模块。
         handshake::spl_handshake();
+
+        // 1.5 soc-timer counter1 计时源开门（AP 域 APBC，直连装配——
+        //     见 timer_k3 模块头注释）。stamp/SVC/ISR 时间戳链的时钟，
+        //     替代 mtime 冷读（24.5µs/笔跨域税）。
+        timer_k3::init();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
         //    .dtb 由 build.rs 在编译期用 dtc 从 .dts 生成到 OUT_DIR，路径经
