@@ -35,7 +35,7 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use fdt_parser::Node;
-use platform::device::{Driver, Mailbox};
+use platform::device::{Driver, Mailbox, Timer};
 use platform::irq::IrqLatch;
 use platform::Slot;
 use tock_registers::interfaces::{Readable, Writeable};
@@ -464,14 +464,14 @@ pub fn setup_interrupts() {
 
 // ── ISR ────────────────────────────────────────────────────────────
 
-/// 最近一次 mailbox ISR 入口的 AON_TIMER1 时间戳（tick，2MHz，0 = 尚无中断）。
+/// 最近一次 mailbox ISR 入口的 mtime 时间戳（tick，24MHz，0 = 尚无中断）。
 ///
 /// 延迟插桩用：intercom 读取该值拆分 D1（中断唤醒）路径的
 /// `t_sched − t_isr`（IRQ 进入 → IPC 任务恢复执行）分段。仅在 ISR 入口
 /// 单点写入，无锁；多次中断只保留最后一次（单请求在途的测量场景下精确）。
 pub static LAST_IRQ_TS: AtomicU64 = AtomicU64::new(0);
 
-/// 最近一次 mailbox ISR 排空舞步完成点的 AON_TIMER1 时间戳（tick，0 = 尚无中断）。
+/// 最近一次 mailbox ISR 排空舞步完成点的 mtime 时间戳（tick，0 = 尚无中断）。
 ///
 /// 延迟插桩用：把 D1 的 `t_sched − t_isr`（板上实测 69.8µs，2026-08-17）
 /// 拆成「ISR 内 mailbox MMIO 排空舞步」（t_drain − t_isr）与「trap 返回 +
@@ -489,10 +489,9 @@ pub static LAST_ISR_DONE_TS: AtomicU64 = AtomicU64::new(0);
 /// # Safety
 /// 中断上下文调用，关中断执行，不可阻塞。
 unsafe fn mbox_isr(irq: u32) {
-    // 入口时间戳（延迟插桩 D1 分段基准）。timer_k3::now() 是固定地址
-    // MMIO 读（AON_TIMER1 @2MHz，本地域热 4ns/笔），无 probe/slot 依赖，
-    // ISR 上下文安全——与 T_SCHED/stamp 链同钟（dd 分段恒等式前提）。
-    LAST_IRQ_TS.store(crate::timer_k3::now(), Ordering::Relaxed);
+    // 入口时间戳（延迟插桩 D1 分段基准）。clint_k3::TIMER.now() 是固定
+    // 地址 MMIO 读（0xe400bff8），无 probe/slot 依赖，ISR 上下文安全。
+    LAST_IRQ_TS.store(crate::clint_k3::TIMER.now(), Ordering::Relaxed);
     let mbox = match instance_for_irq(irq) {
         Some(m) => m,
         None => return,
@@ -536,7 +535,7 @@ unsafe fn mbox_isr(irq: u32) {
     }
 
     // 排空舞步完成点（延迟插桩：t_drain，见 LAST_ISR_DONE_TS 文档）。
-    LAST_ISR_DONE_TS.store(crate::timer_k3::now(), Ordering::Relaxed);
+    LAST_ISR_DONE_TS.store(crate::clint_k3::TIMER.now(), Ordering::Relaxed);
 
     // 唤醒等待中断的 async task（如有）。
     mbox.latch.notify();

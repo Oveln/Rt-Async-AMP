@@ -34,7 +34,7 @@
 //!
 //! 另有 D5（冗余门铃：弹性窗口期间到达的 IRQ，此时 AP 本应跳过 IPI）以
 //! 窗口计数观测。配套 RPC 服务：
-//! - `PING`：回显 val + 发现路径标签 + RP 侧 AON_TIMER1 分段时间戳（t_isr /
+//! - `PING`：回显 val + 发现路径标签 + RP 侧 mtime 分段时间戳（t_isr /
 //!   t_drain / t_sched / t_seen），供 AP 侧 bench 按路径分桶测延迟；
 //! - `STATS`：按索引查计数器（见 [`stat_idx`]，AP 侧镜像对齐义务）；
 //! - `MEMBENCH`：RP 侧内存/MMIO 访问微基准（见 [`membench_op`]），检验
@@ -77,16 +77,17 @@ impl RtAsyncRpc {
     /// 精确延时（busy-wait）：在 process_all 中顺序执行，
     /// 保证前后 RPC 指令之间的时序精度。
     fn delay(us: u32) {
-        // AON_TIMER1 本地域读（热 4ns/笔，间隔读税 ~1.9µs——mtime 经
-        // Slot ~3µs 且冷读 24.5µs，延时循环不宜走 mtime）。wrapping 差值
-        // 判限期（us 级 ≪ 35.8min 回卷）。
-        let limit = (us as u64) * chip_k3_rt24::timer_k3::FREQ_HZ as u64 / 1_000_000;
-        let start = chip_k3_rt24::timer_k3::now();
-        while chip_k3_rt24::timer_k3::now().wrapping_sub(start) & 0xffff_ffff < limit {
+        // ①′：clint 直连——timer() 全路径（Slot 查找）~3µs/次（TIMER_NOW
+        // 探针实测 3040ns vs 裸 mtime 105ns），延时循环不宜经 Slot。
+        use platform::Timer as _;
+        let t = &chip_k3_rt24::clint_k3::TIMER;
+        let freq = t.freq_hz() as u64;
+        let target = t.now() + (us as u64) * freq / 1_000_000;
+        while t.now() < target {
             core::hint::spin_loop();
         }
     }
-    /// 测量探针：回显 val + 发现路径标签（1..=4 = D1..D4）+ RP 侧 AON_TIMER1
+    /// 测量探针：回显 val + 发现路径标签（1..=4 = D1..D4）+ RP 侧 mtime
     /// 分段时间戳（tick，见模块文档）。
     ///
     /// 分段语义：
@@ -100,9 +101,9 @@ impl RtAsyncRpc {
     /// 多消息在途时（批处理）t_isr/t_drain 会被后续中断覆盖，仅单请求
     /// 在途的测量场景保证精确。
     fn ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64) {
-        // 计时源 = AON_TIMER1（与 ISR 戳/T_SCHED/stamp 链同钟——dd 分段
-        // 恒等式前提；counter1 迁移时此处漏迁致混合钟，前车之鉴）。
-        let t_seen = chip_k3_rt24::timer_k3::now();
+        // ①′：clint 直连（同 Slot 内同一 TIMER 实例，纯省 3µs 查找开销）。
+        use platform::Timer as _;
+        let t_seen = chip_k3_rt24::clint_k3::TIMER.now();
         (
             val,
             DISCOVERY.load(Ordering::Relaxed) as u8,
@@ -192,7 +193,7 @@ pub mod stat_idx {
     pub const SVC_MIN_NS: u32 = 13;
     /// 消息服务时长最大值（ns）
     pub const SVC_MAX_NS: u32 = 14;
-    /// 当前 AON_TIMER1 tick（采样时刻基准，供漂移研究）
+    /// 当前 mtime tick（采样时刻基准，供漂移研究）
     pub const T_NOW: u32 = 15;
     /// 定时器频率（Hz）
     pub const FREQ_HZ: u32 = 16;
@@ -285,12 +286,12 @@ mod stats {
             return ov_rpc::RESP_SEND_FAILS.load(Ordering::Relaxed);
         }
         if i == stat_idx::T_NOW {
-            return chip_k3_rt24::timer_k3::now();
+            use platform::Timer as _;
+            return chip_k3_rt24::clint_k3::TIMER.now();
         }
         if i == stat_idx::FREQ_HZ {
-            // 计时链频率（T_SCHED/stamp/ISR 戳同源 AON_TIMER1；bench 的
-            // dd 分段换算用）。
-            return chip_k3_rt24::timer_k3::FREQ_HZ as u64;
+            use platform::Timer as _;
+            return chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
         }
         // dispatch 分解戳转发（feature "stamps"，未启用时恒 0）。
         #[cfg(feature = "probe")]
@@ -543,10 +544,7 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
     let local_blk = local_line as *const Blk256;
 
     let mut ck: u64 = 0;
-    // 计时括号 = AON_TIMER1（热 4ns、间隔读税 ~1.9µs；mtime 括号首笔常冷
-    // +24.5µs 污染小总额——计时源迁移 2026-08-22）。mtime 自研究 op
-    // （RD_MTIME/NOW_GAPPED/CYCLE_*/TMR_*）内部计时不变。
-    let t0 = chip_k3_rt24::timer_k3::now();
+    let t0 = platform::timer().now();
     match op {
         M::RD_LINE_SHM | M::RD_LINE_LOCAL => {
             let p = if op == M::RD_LINE_SHM { shm_line } else { local_line };
@@ -660,9 +658,7 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
                 // 场景可接受，重启即恢复）。
                 v = unsafe { p.read_volatile() };
             }
-            let ns = chip_k3_rt24::timer_k3::ticks_to_ns(
-                chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
-            );
+            let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
             return (ns, v as u64);
         }
         M::AQ_LOAD_LOCAL => {
@@ -1209,9 +1205,7 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
         }
         _ => return (0, 0),
     }
-    let ns = chip_k3_rt24::timer_k3::ticks_to_ns(
-        chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
-    );
+    let ns = ticks_to_ns(platform::timer().now().saturating_sub(t0));
     (ns, ck)
 }
 
@@ -1560,12 +1554,12 @@ const ELASTIC_SPIN_LIMIT: u32 = 100000;
 // 公共 API
 // ============================================================================
 
-/// 装配 dispatch 分解戳时钟（AON_TIMER1 本地域直连——热 4ns/笔、间隔
-/// 读税 ~1.9µs；与 T_SCHED/ISR 戳同钟，dd 分段恒等式前提）。
+/// 装配 dispatch 分解戳时钟（clint mtime 直连——Slot 路径 ~3µs/次）。
 /// 见 ov-rpc feature "stamps"（经 `probe` 传递）。
 #[cfg(feature = "probe")]
 fn install_stamp_clock() {
-    ov_rpc::stamp::set_clock(chip_k3_rt24::timer_k3::now);
+    use platform::Timer as _;
+    ov_rpc::stamp::set_clock(|| chip_k3_rt24::clint_k3::TIMER.now());
 }
 
 /// 初始化共享内存（boot 期职责已迁至 AP 内核 rt_shm 驱动 probe 期，
@@ -1701,8 +1695,9 @@ pub fn process_elastic() -> usize {
     let shm = unsafe { SharedMemory::<3>::at(ov_shm::shm::base()) };
 
     // D1 分段基准：本函数入口 ≈ MBX3.recv().await 返回、IPC 任务恢复执行。
-    // 计时源 = AON_TIMER1（与 ISR 戳/stamp 链同钟——dd 分段恒等式前提）。
-    let t_enter = chip_k3_rt24::timer_k3::now();
+    // ①′：clint 直连（每唤醒周期 3 次 timer()，Slot 路径 3µs/次）。
+    use platform::Timer as _;
+    let t_enter = chip_k3_rt24::clint_k3::TIMER.now();
     T_SCHED.store(t_enter, Ordering::Relaxed);
     DISCOVERY.store(path::D1_IRQ_WAKE, Ordering::Relaxed);
 
@@ -1724,7 +1719,7 @@ pub fn process_elastic() -> usize {
         }
 
         // 3. 无消息，弹性自旋
-        let win_start = chip_k3_rt24::timer_k3::now();
+        let win_start = chip_k3_rt24::clint_k3::TIMER.now();
         let mut spun = 0u32;
         while spun < ELASTIC_SPIN_LIMIT {
             if server().has_pending() || server().has_urgent() {
@@ -1741,9 +1736,7 @@ pub fn process_elastic() -> usize {
         }
 
         // 4. 弹性窗口完整耗尽，准备睡眠：记录实测窗口时长（S0 标定数据源）
-        let win_ns = chip_k3_rt24::timer_k3::ticks_to_ns(
-            chip_k3_rt24::timer_k3::now().wrapping_sub(win_start) & 0xffff_ffff,
-        );
+        let win_ns = ticks_to_ns(chip_k3_rt24::clint_k3::TIMER.now().saturating_sub(win_start));
         stats::set(stat_idx::WIN_LAST_NS, win_ns);
         stats::min(stat_idx::WIN_MIN_NS, win_ns);
         stats::max(stat_idx::WIN_MAX_NS, win_ns);
@@ -1810,9 +1803,9 @@ fn drain_all() -> usize {
 /// Notify 的 IPI 在 process_one 返回（响应已写入 CH1）之后发出，
 /// 与 `process_all` 的 on_notify 时机一致。
 fn step(urgent: bool) -> bool {
-    // 计时源 = AON_TIMER1（每消息 2 笔；mtime 冷读 24.5µs/笔 是 D1
-    // 大头之一——本地域迁移 2026-08-22）。wrapping 差值（us 级 ≪ 回卷）。
-    let t0 = chip_k3_rt24::timer_k3::now();
+    // ①′：clint 直连（每消息 2 次 timer() + ticks_to_ns 内 1 次 freq）。
+    use platform::Timer as _;
+    let t0 = chip_k3_rt24::clint_k3::TIMER.now();
     let r = if urgent {
         server().process_urgent::<RtAsyncRpc>()
     } else {
@@ -1822,9 +1815,7 @@ fn step(urgent: bool) -> bool {
         return false;
     }
 
-    let svc_ns = chip_k3_rt24::timer_k3::ticks_to_ns(
-        chip_k3_rt24::timer_k3::now().wrapping_sub(t0) & 0xffff_ffff,
-    );
+    let svc_ns = ticks_to_ns(chip_k3_rt24::clint_k3::TIMER.now().saturating_sub(t0));
     stats::set(stat_idx::SVC_LAST_NS, svc_ns);
     stats::min(stat_idx::SVC_MIN_NS, svc_ns);
     stats::max(stat_idx::SVC_MAX_NS, svc_ns);
@@ -1845,10 +1836,9 @@ fn step(urgent: bool) -> bool {
     true
 }
 
-/// mtime tick → ns（仅 mtime 自研究 op 使用——RD_MTIME/NOW_GAPPED/
-/// CYCLE_*/TMR_* 组；生产计时链已迁 AON_TIMER1）。
-#[cfg(feature = "probe")]
+/// mtime tick → ns。freq_hz() 返回编译期常量（24MHz），无额外 MMIO。
 fn ticks_to_ns(t: u64) -> u64 {
+    // ①′：clint 直连（与 Slot 内同一 TIMER 实例；被每消息/每窗口调用）。
     use platform::Timer as _;
     t * 1_000_000_000 / chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64
 }

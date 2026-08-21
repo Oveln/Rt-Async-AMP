@@ -78,10 +78,10 @@ impl Board for K3Rt24 {
         handshake::spl_handshake();
 
         // 1.5 本地计时源 AON_TIMER1 开门（RCPU AON 域 0xc0889000，直连
-        //     装配——见 timer_k3 模块头注释）。板上验证达标（热 4ns、
-        //     间隔读税 ~1.9µs vs mtime 24.5µs）——**生产计时链已迁移
-        //     本钟**（ISR 戳/T_SCHED/SVC/弹性窗/stamp 链同源）；mtimecmp
-        //     睡眠唤醒仍走 clint SysTimer。
+        //     装配——见 timer_k3 模块头注释）。⚠ 生产计时链迁移二度
+        //     证伪已回滚（08-22 板上：mtime 税在生产路径被交织流量保温，
+        //     无税可省；替换计时器真实间隔读仍 ~10µs 级）——此处开门
+        //     仅供探针（tmr_aon_* 组），生产时间戳仍走 clint mtime。
         timer_k3::init();
 
         // 2. 注入内嵌 DTB（U-Boot 不 handoff DTB，只能内嵌进 ELF）。
