@@ -201,11 +201,12 @@ def fig4_mtime_trap():
 # ============================================================================
 def fig5_roadmap():
     fig, ax = plt.subplots(figsize=(11, 5))
-    # ISR 直派已否决（2026-08-21 用户决策：保 rt-async 任务模型，实际处理留
-    # task 上下文），从轨迹中移除该步。
-    steps = ["P1 现状\n(08-20)", "计时瘦身\n(P1.5)", "fence 去冗余\n(P3)", "双向轮询\n(W2)"]
-    d1 = [240, 205, 195, 184]
-    d2 = [189, 155, 145, 134]
+    # ISR 直派已否决（08-21）；计时瘦身换源已证伪（08-22，生产路径 mtime
+    # 被交织流量保温无税可省）——轨迹移除该步，P3 已验收（08-22 板测
+    # didx 7.6→3.1、同环境 rtt −10µs）。
+    steps = ["P1 现状\n(08-20)", "fence 去冗余\n(P3 已验收)", "双向轮询\n(W2)"]
+    d1 = [240, 230, 219]
+    d2 = [189, 179, 168]
     x = np.arange(len(steps))
     ax.plot(x, d1, "o-", lw=2.2, color=C_AP, label="D1 路径（睡眠唤醒）")
     ax.plot(x, d2, "s-", lw=2.2, color=C_FENCE, label="D2 路径（弹性自旋）")
@@ -216,9 +217,9 @@ def fig5_roadmap():
                     ha="center", fontsize=9, color=C_FENCE)
     ax.set_xticks(x, steps, fontsize=9.5)
     ax.set_ylabel("rtt (µs)")
-    ax.set_title("图5  优化路线收益叠加（预期值，µs）\n"
-                 "计时瘦身=每消息 1-2 笔冷 mtime 税（24-48µs，生产构建立即可做）\n"
-                 "P3=fence 4→2 笔/消息 + 自旋 6→2 笔/轮；W2 已实测 −11µs（spin-await）；ISR 直派已否决——处理留 task（保 rt-async 模型）", fontsize=10.5)
+    ax.set_title("图5  优化路线收益叠加（µs）\n"
+                 "P3 已验收（08-22 板测：didx 7.6→3.1µs、同环境 rtt −10µs、自旋 18→9.4µs/轮）；W2 已实测 −11µs（spin-await）\n"
+                 "计时瘦身换源已证伪（生产路径无税可省）；ISR 直派已否决——处理留 task（保 rt-async 模型）", fontsize=10.5)
     ax.grid(ls=":", alpha=0.5)
     ax.legend(fontsize=10)
     ax.set_ylim(110, 260)
