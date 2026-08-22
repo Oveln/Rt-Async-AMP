@@ -52,7 +52,7 @@ use ov_rpc::{define_service, HandledKind, ProcessResult, RpcServer};
 // ============================================================================
 
 define_service! {
-    /// rt-async 侧的 RPC 服务。MEMBENCH/LITMUS 为延迟归因战役测量探针，
+    /// rt-async 侧的 RPC 服务。MEMBENCH/LITMUS 为延迟归因工作测量探针，
     /// 经 `probe` feature 门控（见 Cargo.toml 注释）——正常开发不编译。
     RtAsyncRpc {
         ECHO:  0 => call echo(val: u32) -> u32;
@@ -197,7 +197,7 @@ pub mod stat_idx {
     pub const T_NOW: u32 = 15;
     /// 定时器频率（Hz）
     pub const FREQ_HZ: u32 = 16;
-    // ── 以下为 `probe` feature 扩展列（延迟归因战役测量面）──
+    // ── 以下为 `probe` feature 扩展列（延迟归因工作测量面）──
     /// LITMUS：RP 侧观测到的违例数（op 语义见 [`litmus_op`]）
     #[cfg(feature = "probe")]
     pub const LIT_VIOL: u32 = 17;

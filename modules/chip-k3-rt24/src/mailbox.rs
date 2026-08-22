@@ -139,7 +139,7 @@ fn instance_for_irq(irq: u32) -> Option<&'static MboxK3> {
 /// 字段访问序约定：`base`/`irq`/`user_local`/`user_remote` 均由 probe
 /// （boot DFS、开中断前、同 hart 串行）写入一次后只读，运行期读取统一用
 /// `Relaxed`——同 hart 程序序已保证可见，Acquire 在 K3 上是 ~2.2µs/笔的
-/// Atomics Wrapper 序列化开销（热路径实测归因见 2026-08-17 延迟战役）。
+/// Atomics Wrapper 序列化开销（热路径实测归因见 2026-08-17 延迟归因工作）。
 pub struct MboxK3 {
     base: AtomicUsize,
     irq: AtomicU32,

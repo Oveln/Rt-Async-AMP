@@ -17,7 +17,7 @@ pub static RESP_SEND_FAILS: portable_atomic::AtomicU64 = portable_atomic::Atomic
 // ── 延迟插桩（feature "stamps"）─────────────────────────────────────────
 //
 // 把 `process_channel` 内部分解为四段（dispatch 分解戳，dseen/svc 残余
-// 归因用，2026-08-17 延迟战役）：入口 / try_recv 完成 / handler 完成 /
+// 归因用，2026-08-17 延迟归因工作）：入口 / try_recv 完成 / handler 完成 /
 // 响应写入完成。时钟由 app 注入（ov-rpc 平台无关，不直接依赖任何定时器；
 // K3 app 装配 clint mtime，见 intercom::init/wait_ready 的 set_clock）。
 // 每戳 = fn 指针 Relaxed 载入（纯 ld）+ mtime MMIO 读 + Relaxed store，

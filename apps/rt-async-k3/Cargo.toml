@@ -39,7 +39,7 @@ cs-atomics = [
     "platform/cs-atomics",
     "portable-atomic/critical-section",
 ]
-# 延迟归因战役测量面（MEMBENCH / LITMUS 服务、STATS 扩展列、dispatch
+# 延迟归因工作测量面（MEMBENCH / LITMUS 服务、STATS 扩展列、dispatch
 # 分解戳）。默认关闭：正常开发视角 intercom 只含生产服务（ECHO/ADD/
 # DELAY/PING/STATS 基础列）。xtask 的 k3 平台 bins 构建自动带上——
 # 板上固件恒有探针（dd/lit/mb 场景依赖），源码默认干净。
