@@ -179,28 +179,38 @@ pub fn publish_recv(ch: usize) {
     publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
 }
 
-/// A4 三代恢复原语（08-23）：重写同值再发布。
+/// A4 三代恢复原语（08-23）：重写同值再发布（v2：read 字段取 SRAM 真值）。
 ///
 /// 二代（纯重发 flush）板上证伪：fresh_scan D=100µs 丢发布后，看门狗
 /// 1ms 周期数百次 refresh+publish 重发，RP 整个 200ms 自旋期始终不见
 /// （超时快照 r==w）——丢发布行对 AP 侧重复 CBO 呈**粘滞**，"重试
-/// 收敛"不成立。而紧接着的下一档（D=300µs，含新 store 的正常发送）
-/// 立刻成功 ⇒ 疑粘滞态绑定"该笔旧 store 留下的行状态"，**新 store
-/// 可破**。故本原语在重发前先把索引字段按缓存视图重写同值（造出新
-/// 的脏行），再走标准发布（槽先于索引）。安全性同 [`publish_send`]
-/// 幂等论证——同值重写不改变任何观察者可见状态。
+/// 收敛"不成立。三代（08-23 04:06 轮验收通过）：fresh_scan 全 8 档
+/// got=1（D=100µs 历史三连丢点转收取），重写造新脏行的 flush 即破
+/// 粘滞——粘滞态绑定旧 store 的行状态。
+///
+/// **v2 回卷地雷修正（同轮复查发现）**：v1 把 read 字段也按缓存快照
+/// 重写——干净行场景（请求已发布且 RP 已消费，mb 类合法长 op 超软
+/// 期限的误报恢复即此形态）快照里的 read 是 RP 消费前的陈旧值，重写
+/// 落地会回卷 RP 消费进度、制造幻影消息（该轮恰未显形，不可依赖）。
+/// v2 只快照 AP 自有的 write 字段；read 在 inval 后重读——无论 inval
+/// 写回了滞留脏行还是丢弃了干净副本，读到的都与 SRAM/RP 视角一致，
+/// 重写无回卷窗口。
 ///
 /// 须在发送路径互斥锁内调用（与 try_send/publish_send 临界区互斥，
 /// 调用方 bench ROUND_LOCK）。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn republish(ch: usize, slot: usize) {
-    // 缓存视图快照：行脏 ⇒ 持有最新值（即便 SRAM 未更新）。
     // SAFETY: ch/RB_OFF 为窗口内通道基址（调用方持有映射），偏移由
     // 本模块常量与编译期布局断言保证。
     let rb = (ch + RB_OFF) as *mut usize;
-    let (r, w) = unsafe { (rb.read_volatile(), rb.add(1).read_volatile()) };
+    // 仅快照 write（AP 自有，行脏 ⇒ 持有最新值，即便 SRAM 未更新）。
+    let w = unsafe { rb.add(1).read_volatile() };
     refresh_before_send(ch);
-    // SAFETY: 同值重写（见上论证）；volatile 绕过 &self 共享内存限制。
+    // inval 后 read 读到 SRAM 真值（RP 消费进度；inval 被粘滞吞掉时
+    // 读到的缓存副本也因 write 未发布而与 RP 一致——两种情况同安全）。
+    // SAFETY: 同上。
+    let r = unsafe { rb.read_volatile() };
+    // SAFETY: read=真值、write=最新值重写，无观察者可见状态变化。
     unsafe {
         rb.write_volatile(r);
         rb.add(1).write_volatile(w);
