@@ -20,13 +20,12 @@
 //! 与 ov-channels 0.2.0 布局的耦合以编译期断言对账（见 [`RB_OFF`]），
 //! 版本漂移即编译失败。已知的残余竞态（read/write 同行、AP 端 flush 写回
 //! 陈旧 read 索引可回卷 RP 消费进度）仅并发流水线场景可达，单请求在途
-//! 协议不可达。**A4（2026-08-22 二代定案）**：X100 cbo.flush 对在途
-//! store 存在静默丢失，且**同核视角不可检测**——回读由 L1/L2 服务
-//! 恒见新值，一代"发布后回读校验"缓解已被板上证伪（fresh_scan
-//! D=100µs 走 flush+clean-inval 组合仍丢，itb f6fc7682 轮）。本模块
-//! 回归单遍发布；丢失的检测与恢复移交时间视角——在途超时后走
-//! [`republish`]（三代：重写同值造新脏行再发布；二代纯重发已被粘滞
-//! 证伪，载体为 bench 看门狗；W2 轮询产品化后内建于轮询回路的软期限）。
+//! 协议不可达。**A4（2026-08-22 定案）**：X100 cbo.flush 对在途 store
+//! 存在静默丢失，同核视角不可检测（回读由 L1/L2 服务恒见新值），且丢
+//! 失行对重复 CBO 呈粘滞（仅新 store 可破——重试族全部无效）。按设计
+//! 决策（08-23）**不设运行时恢复**：本模块保持单遍发布；问题存在性
+//! 检测 = bench fresh_scan（时间视角 + AP 缓存/AP 失效回读/RP SRAM
+//! 三方索引视角交叉）。
 
 #[cfg(all(feature = "user-cbo", not(target_arch = "riscv64")))]
 compile_error!("ov-rpc feature \"user-cbo\" 仅支持 riscv64 目标（Zicbom cbo 指令）");
@@ -133,15 +132,6 @@ pub fn refresh_before_send(ch: usize) {
 ///
 /// 顺序 = **槽数据先于索引**（SPSC 发布序：RP 见 write 推进前槽内容
 /// 必须已落 SRAM；此前索引在前的写法靠时序侥幸）。
-///
-/// **A4 重发布幂等性论证**（在途超时后重发本函数的安全性依据，
-/// 单请求在途协议）：重发时索引行只有两种状态——干净（上次发布
-/// 已落地 ⇒ 重发 flush 无脏可清，为 no-op）或脏（上次发布丢失 ⇒
-/// write 推进从未达 SRAM ⇒ RP 不可能已消费 ⇒ 行内 read 字段仍与
-/// RP 一致）。后者重发不存在"把陈旧 read 写回、回卷 RP 消费进度"
-/// 的窗口（该残余竞态仅并发流水线可达）；槽数据行同理。随重发
-/// 多发的门铃只造成 RP 一次空轮询，无重复执行（环形队 try_recv
-/// 单消费者 exactly-once）。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn publish_send(ch: usize, slot: usize) {
     publish(slot_addr(ch, slot), core::mem::size_of::<ov_channels::Message>());
@@ -176,46 +166,6 @@ pub fn refresh_slot(ch: usize, slot: usize) {
 /// 不可达），下一次成功发布自愈，无挂死类风险，不做恢复。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn publish_recv(ch: usize) {
-    publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
-}
-
-/// A4 三代恢复原语（08-23）：重写同值再发布（v2：read 字段取 SRAM 真值）。
-///
-/// 二代（纯重发 flush）板上证伪：fresh_scan D=100µs 丢发布后，看门狗
-/// 1ms 周期数百次 refresh+publish 重发，RP 整个 200ms 自旋期始终不见
-/// （超时快照 r==w）——丢发布行对 AP 侧重复 CBO 呈**粘滞**，"重试
-/// 收敛"不成立。三代（08-23 04:06 轮验收通过）：fresh_scan 全 8 档
-/// got=1（D=100µs 历史三连丢点转收取），重写造新脏行的 flush 即破
-/// 粘滞——粘滞态绑定旧 store 的行状态。
-///
-/// **v2 回卷地雷修正（同轮复查发现）**：v1 把 read 字段也按缓存快照
-/// 重写——干净行场景（请求已发布且 RP 已消费，mb 类合法长 op 超软
-/// 期限的误报恢复即此形态）快照里的 read 是 RP 消费前的陈旧值，重写
-/// 落地会回卷 RP 消费进度、制造幻影消息（该轮恰未显形，不可依赖）。
-/// v2 只快照 AP 自有的 write 字段；read 在 inval 后重读——无论 inval
-/// 写回了滞留脏行还是丢弃了干净副本，读到的都与 SRAM/RP 视角一致，
-/// 重写无回卷窗口。
-///
-/// 须在发送路径互斥锁内调用（与 try_send/publish_send 临界区互斥，
-/// 调用方 bench ROUND_LOCK）。
-#[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
-pub fn republish(ch: usize, slot: usize) {
-    // SAFETY: ch/RB_OFF 为窗口内通道基址（调用方持有映射），偏移由
-    // 本模块常量与编译期布局断言保证。
-    let rb = (ch + RB_OFF) as *mut usize;
-    // 仅快照 write（AP 自有，行脏 ⇒ 持有最新值，即便 SRAM 未更新）。
-    let w = unsafe { rb.add(1).read_volatile() };
-    refresh_before_send(ch);
-    // inval 后 read 读到 SRAM 真值（RP 消费进度；inval 被粘滞吞掉时
-    // 读到的缓存副本也因 write 未发布而与 RP 一致——两种情况同安全）。
-    // SAFETY: 同上。
-    let r = unsafe { rb.read_volatile() };
-    // SAFETY: read=真值、write=最新值重写，无观察者可见状态变化。
-    unsafe {
-        rb.write_volatile(r);
-        rb.add(1).write_volatile(w);
-    }
-    publish(slot_addr(ch, slot), core::mem::size_of::<ov_channels::Message>());
     publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
 }
 

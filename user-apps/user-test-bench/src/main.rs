@@ -60,12 +60,11 @@
 //! 前提：内核已置 senvcfg（somehal enable_user_cbo，随 zicbom feature 编译）。
 //! 2026-08-21 起为唯一形态（用户决策：普通整窗 ioctl 变体已删，A/B 对照
 //! 实验结束并胜出）。
-//! 2026-08-22 起：A4 丢发布（X100 cbo.flush 偶发静默丢失在途 store，同核
-//! 不可检测）由在途看门狗接管——超软期限（3ms）恢复 + 视 BUSY 补门铃
-//!（WD_* 静态量 + ROUND_LOCK 与发送段互斥），正常轮零开销。三代（08-23）
-//! 恢复改 [`ov_rpc::cache::republish`]（重写同值造新脏行再发布——二代
-//! 纯重发被粘滞证伪），节拍指数退避（1→64ms），guard 收口逐轮打印恢
-//! 重发次数（丢失/恢复可对账）。
+//! A4 丢发布（X100 cbo.flush 偶发静默丢失在途 store，同核不可检测）按
+//! 设计决策（08-23）**不设运行时恢复**：发送路径保持单遍发布，IPI 等待
+//! 挂死由既有心跳超时（SIGALRM 10s，退出码 2）给出诊断退出。该问题
+//! 是否真实存在由 fresh_scan（mb 场景）检测——超时时交叉 AP 缓存 /
+//! AP 失效回读 / RP SRAM 三方索引视角给出逐档判定。
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -217,7 +216,7 @@ fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Resu
 struct RtShm {
     fd: libc::c_int,
     ptr: *mut std::ffi::c_void,
-    /// 本轮 syscall 计数（notify/flush/await 各 +1，诊断/看门狗路径不计）。
+    /// 本轮 syscall 计数（notify/flush/await 各 +1，诊断路径不计）。
     /// user-cbo 路径的优化效果直接体现为该值下降（D2 轮 = 1）。
     sysc: std::cell::Cell<u32>,
 }
@@ -390,72 +389,18 @@ fn sleep_until(deadline_ns: u64) {
 }
 
 // ── 看门狗：挂死 10s 内可诊断，无需复位板子 ─────────────────
+//
+// 仅为心跳诊断（SIGALRM 打断阻塞中的 AWAIT）；A4 丢发布不设运行时
+// 恢复（模块头注释），检测走 fresh_scan。
 
 static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 static TIMED_OUT: AtomicBool = AtomicBool::new(false);
-
-// ── A4 丢发布恢复（在途看门狗，2026-08-22 二代 / 08-23 三代）────
-//
-// A4 定案（REPORT 附录）：X100 U 态 cbo.flush 偶发静默丢失在途 store，
-// 同核不可检测（回读由 L1/L2 服务恒见新值，flush+clean-inval 组合在
-// fresh_scan D=100µs 仍丢已证伪一切 CBO 重试检测）。唯一可信视角 =
-// 时间——响应迟迟不回即疑似丢失。恢复动作 = [`ov_rpc::cache::republish`]
-//（三代：索引字段重写同值造新脏行再发布——二代纯重发在 08-23 轮被
-// 粘滞证伪：数百次重发 RP 200ms 全盲）+ 视 BUSY 补门铃。恢复在独立
-// 线程执行，与主线程发送段经 ROUND_LOCK 互斥：杜绝把"下一轮刚写、
-// 尚未发布"的索引提前冲出去的乱序窗口（槽数据未达 SRAM 而 write 先行）。
-//
-// 观测（08-23 教训）：全局计数限流打印会把关键证据藏掉（该轮 D=100µs
-// 超时期间的重发行疑似被交错吞掉）——三代加**每轮收口计数**：guard
-// Drop 时打印本轮恢重发次数，与超时行直接对齐。恢复节拍指数退避
-//（1→64ms）：合法长 op（gapped 计时类 5s 级）不再刷屏，真丢失在
-// 3ms+1ms 内首试、之后拉开间隔探测粘滞。
-static ROUND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static WD_ACTIVE: AtomicBool = AtomicBool::new(false);
-static WD_SLOT: AtomicU64 = AtomicU64::new(0);
-static WD_T_SEND_END: AtomicU64 = AtomicU64::new(0);
-static WD_RECOVERIES: AtomicU64 = AtomicU64::new(0);
-/// 当前 guard 存续期间的恢重发次数（arm 清零，Drop 收口打印）。
-static WD_GUARD_HITS: AtomicU64 = AtomicU64::new(0);
-
-/// 在途软期限：rtt ~240µs，取 >10 倍余量；正常轮次远在此之前完成，
-/// 误触发只多一次幂等重发布（无副作用）。
-const A4_SOFT_NS: u64 = 3_000_000;
-
-/// 在途保护句柄：Drop 撤防并收口打印（仅发生过恢复时），覆盖"响应
-/// 到达 / 出错返回"全部路径——A4 丢与否、恢复了几次，逐轮可对账。
-struct WdPending {
-    slot: usize,
-}
-
-impl WdPending {
-    fn arm(slot: usize, t_send_end: u64) -> Self {
-        WD_SLOT.store(slot as u64, Ordering::Relaxed);
-        WD_T_SEND_END.store(t_send_end, Ordering::Relaxed);
-        WD_GUARD_HITS.store(0, Ordering::Relaxed);
-        WD_ACTIVE.store(true, Ordering::Release);
-        WdPending { slot }
-    }
-}
-
-impl Drop for WdPending {
-    fn drop(&mut self) {
-        WD_ACTIVE.store(false, Ordering::Release);
-        let hits = WD_GUARD_HITS.load(Ordering::Relaxed);
-        if hits > 0 {
-            eprintln!(
-                "[wd] A4 在途保护收口：slot={} 恢重发 {} 次（本轮响应到达/超时）",
-                self.slot, hits
-            );
-        }
-    }
-}
 
 extern "C" fn on_sigalrm(_sig: libc::c_int) {
     TIMED_OUT.store(true, Ordering::SeqCst);
 }
 
-fn spawn_watchdog(fd: libc::c_int, shm_ptr: usize) {
+fn spawn_watchdog() {
     // flags=0（无 SA_RESTART）：SIGALRM 使阻塞中的 AWAIT ioctl 返回 EINTR。
     unsafe {
         let mut act: libc::sigaction = std::mem::zeroed();
@@ -464,67 +409,13 @@ fn spawn_watchdog(fd: libc::c_int, shm_ptr: usize) {
         libc::sigemptyset(&mut act.sa_mask);
         libc::sigaction(libc::SIGALRM, &act, std::ptr::null_mut());
     }
-    std::thread::spawn(move || {
-        // 恢复节拍指数退避：新 guard（t0 变化）重置为 1ms，每次恢复翻倍、
-        // 64ms 封顶——合法长 op（gapped 计时类 5s 级）不刷屏不空转，
-        // 真丢失 3ms+1ms 内首试后拉开间隔探测粘滞。
-        let mut backoff_ms: u64 = 1;
-        let mut last_t0: u64 = 0;
-        loop {
-            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
-            let t0 = WD_T_SEND_END.load(Ordering::Relaxed);
-            if t0 != last_t0 {
-                backoff_ms = 1;
-                last_t0 = t0;
-            }
-            // 一级（A4 恢复）：在途请求超软期限 → republish（重写同值造
-            // 新脏行再发布，三代）+ 视 BUSY 补门铃。退避间隔下每次都是
-            // 独立尝试；恢复幂等（cache.rs 论证），误触发无副作用。
-            if WD_ACTIVE.load(Ordering::Acquire)
-                && mono_ns().saturating_sub(t0) > A4_SOFT_NS
-            {
-                // SAFETY: shm_ptr 为本进程 mmap 的共享窗，线程存续期内有效。
-                let shm = unsafe { &*(shm_ptr as *const SharedMemory<3>) };
-                // SAFETY: CH0 恒存在（窗口建立期校验过），此处只取基址。
-                let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-                let slot = WD_SLOT.load(Ordering::Relaxed) as usize;
-                let kicked = {
-                    let _g = ROUND_LOCK.lock().unwrap();
-                    // 拿锁后复核：轮次可能刚好完成（guard Drop 已撤防），
-                    // 此时槽位数据作废，放弃本轮恢复。
-                    if !WD_ACTIVE.load(Ordering::Acquire) {
-                        continue;
-                    }
-                    ov_rpc::cache::republish(ch0, slot);
-                    ov_rpc::cache::refresh_busy(shm_ptr);
-                    !shm.is_busy()
-                };
-                if kicked {
-                    // 补门铃在锁外：ioctl µs 级，无与之互斥的共享状态。
-                    let _ = do_ioctl(
-                        fd,
-                        rtshm_abi::IOC_NOTIFY as libc::c_ulong,
-                        rtshm_abi::ARG_USER_CBO as libc::c_ulong,
-                    );
-                }
-                WD_GUARD_HITS.fetch_add(1, Ordering::Relaxed);
-                let n = WD_RECOVERIES.fetch_add(1, Ordering::Relaxed) + 1;
-                backoff_ms = (backoff_ms * 2).min(64);
-                if n <= 3 || n % 50 == 0 {
-                    eprintln!(
-                        "[wd] A4 丢发布恢复 #{n}：slot={slot} 在途 {:.1}ms，重写同值+重发布{}",
-                        mono_ns().saturating_sub(t0) as f64 / 1e6,
-                        if kicked { " + 补门铃" } else { "（RP 忙，待自轮询）" }
-                    );
-                }
-            }
-            // 二级（心跳兜底，原有）：停滞 10s = 恢复也救不回的更深故障
-            // （RP 死 / 中断线挂高）——SIGALRM 打断 AWAIT 走诊断退出路径。
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let hb = HEARTBEAT.load(Ordering::Relaxed);
+        if hb != 0 && mono_ns().saturating_sub(hb) > 10_000_000_000 {
+            // 心跳停滞超 10s：发 SIGALRM 打断主线程的 AWAIT。
             // 不退出本循环：主线程若恢复则心跳更新，继续正常监测。
-            let hb = HEARTBEAT.load(Ordering::Relaxed);
-            if hb != 0 && mono_ns().saturating_sub(hb) > 10_000_000_000 {
-                unsafe { libc::kill(libc::getpid(), libc::SIGALRM) };
-            }
+            unsafe { libc::kill(libc::getpid(), libc::SIGALRM) };
         }
     });
 }
@@ -670,58 +561,48 @@ impl Bench {
             self.verbose_left -= 1;
         }
 
-        // 发送段全程持 ROUND_LOCK：与看门狗的 A4 恢复重发互斥（WD_* 注释），
-        // 封闭"try_send 已写槽、publish_send 未发"期间索引被他者提前冲出
-        // 的乱序发布窗口。
-        let (slot_sent, sent_ipi) = {
-            let _send_g = ROUND_LOCK.lock().unwrap();
-            // try_send 前刷新 ch0 索引行并记发送槽位（write 索引），供发送后
-            // 按行发布。重试循环中 Full 失败不推进 write，槽位不变。
-            let slot_sent = {
-                let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-                ov_rpc::cache::refresh_before_send(ch0);
-                ov_rpc::cache::ring_indices(ch0).1
-            };
+        // try_send 前刷新 ch0 索引行并记发送槽位（write 索引），供发送后
+        // 按行发布。重试循环中 Full 失败不推进 write，槽位不变。
+        let slot_sent = {
+            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
+            ov_rpc::cache::refresh_before_send(ch0);
+            ov_rpc::cache::ring_indices(ch0).1
+        };
 
-            // 背压：单请求在途 CH0 不应满；100ms 内重试失败按异常退出。
-            loop {
-                match tx.try_send(&msg) {
-                    Ok(()) => break,
-                    Err(ov_channels::SendError::Full) => {
-                        self.backpressure += 1;
-                        if mono_ns().saturating_sub(t0) > 100_000_000 {
-                            eprintln!("[FATAL] CH0 持续 Full 超过 100ms（seq={}）", self.last_seq);
-                            std::process::exit(4);
-                        }
-                        std::hint::spin_loop();
+        // 背压：单请求在途 CH0 不应满；100ms 内重试失败按异常退出。
+        loop {
+            match tx.try_send(&msg) {
+                Ok(()) => break,
+                Err(ov_channels::SendError::Full) => {
+                    self.backpressure += 1;
+                    if mono_ns().saturating_sub(t0) > 100_000_000 {
+                        eprintln!("[FATAL] CH0 持续 Full 超过 100ms（seq={}）", self.last_seq);
+                        std::process::exit(4);
                     }
-                    Err(e) => {
-                        eprintln!("[FATAL] CH0 send error: {e:?}");
-                        std::process::exit(3);
-                    }
+                    std::hint::spin_loop();
+                }
+                Err(e) => {
+                    eprintln!("[FATAL] CH0 send error: {e:?}");
+                    std::process::exit(3);
                 }
             }
-            vlog!(self, "sent rid={rid}");
+        }
+        vlog!(self, "sent rid={rid}");
 
-            // 发送决策 + 写发布（与 ov-rpc client::call_inner 同型的丢失唤醒
-            // 防护，叠加 AP 用户态 cacheable 映射的写发布义务）。
-            // 写发布按行完成（槽 4 行 + 索引 1 行，含 fence），随后刷新
-            // BUSY 行再读——真值单判：读得 1 则 RP 确在弹性自旋且其重查
-            // 闭环必见已发布请求；读得 0 则门铃唤醒。
-            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-            ov_rpc::cache::publish_send(ch0, slot_sent);
-            ov_rpc::cache::refresh_busy(self.rt.shm_ptr());
-            let sent_ipi = !shm.is_busy();
-            if sent_ipi {
-                self.rt.notify().map_err(BenchErr::Io)?;
-            }
-            (slot_sent, sent_ipi)
-        };
+        // 发送决策 + 写发布（与 ov-rpc client::call_inner 同型的丢失唤醒
+        // 防护，叠加 AP 用户态 cacheable 映射的写发布义务）。
+        // 写发布按行完成（槽 4 行 + 索引 1 行，含 fence），随后刷新
+        // BUSY 行再读——真值单判：读得 1 则 RP 确在弹性自旋且其重查
+        // 闭环必见已发布请求；读得 0 则门铃唤醒。
+        let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
+        ov_rpc::cache::publish_send(ch0, slot_sent);
+        ov_rpc::cache::refresh_busy(self.rt.shm_ptr());
+        let sent_ipi = !shm.is_busy();
+        if sent_ipi {
+            self.rt.notify().map_err(BenchErr::Io)?;
+        }
         vlog!(self, "send decision done (sent_ipi={sent_ipi})");
         let t_send_end = mono_ns();
-        // A4 在途保护：软期限内响应未回由看门狗幂等重发布兜底（WD_* 注释），
-        // guard Drop（响应到达 / 出错返回）自动撤防。
-        let _wd = WdPending::arm(slot_sent, t_send_end);
         // dd 探针：kpre 在 NOTIFY 内部（门铃 MMIO 写前）已落定，此处读出
         // 不影响 send 段计时。非 dd 场景零开销。
         let kpre = if self.probe_kts {
@@ -1698,15 +1579,22 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
     /// 读"AP 新鲜写（posted 写未落地）"的行有确定性税，即 drx 43.6 与
     /// dserde 34.4 中 32µs 级差额的物理来源（dserde 同理：读 AP 刚写的
     /// 请求槽做反序列化）；D→∞ 回落探针价。
+    ///
+    /// 08-23 起兼作 **A4 存在性检测**（运行时恢复已按设计决策移除）：超时
+    /// 档交叉三方索引视角判定——AP 缓存视角（③ 前后快照，w 字段 AP 自有
+    /// 恒见新值；r 字段 RP 所有、可能陈旧）、RP SRAM 视角（超时快照，RP
+    /// 整个 200ms 自旋期所见）、AP 失效回读（超时后 inval 索引行再读；
+    /// 注意该读可能恰好令迟滞脏行落地，属扰动性探测，只作行驻留态参考）。
+    /// RP w 落后 AP 缓存 w ⇒ 发布未跨核可见——A4 在位的直接证据。
     fn fresh_scan(b: &mut Bench) {
         use ov_rpc::cache;
         println!("\n[mb] H8 新鲜写衰减扫描（D = dummy 写入到 RP 收取的间隔）");
         let shm = b.rt.shm();
         let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
         let dummy = Message::notification(0xF00D);
-        // D=100µs got=0 两轮确定性复现：AP 视角索引快照（③ 发布前后）与
-        // RP 超时快照交叉，定位发布链（同行 flush 回卷 vs 未落地 vs 其他）
-        let (mut r2, mut w2, mut r3, mut w3) = (0usize, 0usize, 0usize, 0usize);
+        // A4 检测计数（AP 缓存视角快照 r2/w2/r3/w3 为循环内局部量，判读
+        // 见函数文档）。
+        let mut a4_detected = 0u32;
         for d_ns in [0u64, 30_000, 100_000, 300_000, 1_000_000, 3_000_000, 10_000_000, 50_000_000] {
             let rid = mono_ns();
             // ① fire 请求（发布 + 门铃一发拉 RP 进 handler）
@@ -1722,16 +1610,13 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
             while mono_ns() < dl {
                 std::hint::spin_loop();
             }
-            // ③ dummy（不门铃——RP 在 op 内自旋收取）
-            (r2, w2) = cache::ring_indices(ch0);
+            // ③ dummy（不门铃——RP 在 op 内自旋收取）。此发布即历史
+            // 丢发布点（D=100µs 曾三连丢）；无恢复机制，丢失如实上报。
+            let (r2, w2) = cache::ring_indices(ch0);
             let slot2 = w2;
             shm.sender(CH0).unwrap().try_send(&dummy).expect("dummy send");
             cache::publish_send(ch0, slot2);
-            // A4 恢复复现验证：③ 的发布正是历史确定性丢失点（D=100µs
-            // got=0 两轮复现）——挂上看门狗，恢复生效则 got=1 且 ns>0
-            // （判据从"超时"转"收取"）。guard 至本轮 ④ 结束自动撤防。
-            let _wd = WdPending::arm(slot2, mono_ns());
-            (r3, w3) = cache::ring_indices(ch0);
+            let (r3, w3) = cache::ring_indices(ch0);
             // ④ 等响应（超时兜底由 op 的 arg=200ms 承担；此处 2s 硬超时）
             let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
             let rx1 = shm.receiver(CH1).unwrap();
@@ -1764,18 +1649,50 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                     d_ns as f64 / 1e3,
                     ns as f64 / 1e3
                 ),
-                // ns==0 ⇔ 固件超时：got 字段是 RP 视角快照 (w<<32|r)
+                // ns==0 ⇔ 固件超时：got 字段是 RP 视角快照 (w<<32|r)。
+                // A4 判定：RP 整个 200ms 自旋期 w 停在 AP 已发布值之前
+                // ⇒ 发布未跨核可见。失效回读再取 AP 侧 SRAM 视角：仍
+                // 落后 ⇒ 迟滞脏行驻留缓存（粘滞特征）；已推进 ⇒ 该回读
+                // 本身令其落地（扰动性探测），不影响超时档判定。
                 Some((_, packed)) => {
                     let r = packed & 0xffff_ffff;
                     let w = packed >> 32;
+                    let a4 = w < w3 as u64;
+                    if a4 {
+                        a4_detected += 1;
+                    }
+                    cache::refresh_before_send(ch0);
+                    let (r4, w4) = cache::ring_indices(ch0);
                     println!(
-                        "  D={:>8.1}µs → 超时：RP 视角 r={r}/w={w}；AP ③发布前 r={r2}/w={w2} 后 r={r3}/w={w3}（RP console log 另有队首槽 kind）—— RP r==w 且 AP w 已推进 ⇒ 发布未落地或同行 flush 回卷到相等",
-                        d_ns as f64 / 1e3
+                        "  D={:>8.1}µs → RP 超时：{}。AP 缓存视角 ({r2},{w2})→({r3},{w3})（w 已发布），RP 200ms 视角 r={r}/w={w}，失效回读 r={r4}/w={w4}",
+                        d_ns as f64 / 1e3,
+                        if a4 { "A4 确认——发布未达 RP" } else { "非 A4——RP 已见 w 推进，另查" },
                     );
                 }
-                None => println!("  D={:>8.1}µs → 超时（2s 硬超时，响应未达）", d_ns as f64 / 1e3),
+                // 2s 硬超时（连 RP 的超时响应都未达）：①/③ 的发布之一
+                // 疑似丢失。无 RP 视角可交叉，以失效回读代行——SRAM w
+                // 落后缓存 w ⇒ 至少一笔发布未落地。
+                None => {
+                    cache::refresh_before_send(ch0);
+                    let (r4, w4) = cache::ring_indices(ch0);
+                    let a4 = w4 < w3;
+                    if a4 {
+                        a4_detected += 1;
+                    }
+                    println!(
+                        "  D={:>8.1}µs → 2s 硬超时（RP 超时响应也未达）：{}。AP 缓存视角 ({r2},{w2})→({r3},{w3})，失效回读 r={r4}/w={w4}",
+                        d_ns as f64 / 1e3,
+                        if a4 { "A4 特征——SRAM w 落后已发布值" } else { "发布已落地，响应链另查" },
+                    );
+                }
             }
         }
+        // 短 D 丢发布为概率性（08-23 04:06 轮 0/30/100µs 档都曾丢失），
+        // 零复现不构成"问题不存在"的证明。
+        println!(
+            "  [A4 检测] 本轮 {a4_detected}/8 档判定丢发布{}",
+            if a4_detected == 0 { "（未复现——概率性问题，零复现不构成不存在证明）" } else { "——问题在位" }
+        );
     }
 
 fn run_mb(b: &mut Bench, line_n: u32) {
@@ -2532,7 +2449,7 @@ fn main() {
     } else {
         apply_realtime(2); // 避开处理 IRQ 的 core0（与 user-test-sched 相同）
     }
-    spawn_watchdog(rt.fd, rt.shm_ptr());
+    spawn_watchdog();
 
     let mut b = Bench {
         rt,
