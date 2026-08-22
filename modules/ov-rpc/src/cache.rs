@@ -20,7 +20,9 @@
 //! 与 ov-channels 0.2.0 布局的耦合以编译期断言对账（见 [`RB_OFF`]），
 //! 版本漂移即编译失败。已知的残余竞态（read/write 同行、AP 端 flush 写回
 //! 陈旧 read 索引可回卷 RP 消费进度）仅并发流水线场景可达，单请求在途
-//! 协议不可达。
+//! 协议不可达。**A4 缓解（2026-08-22）**：索引发布点走
+//! [`publish_verified`]——发布后 refresh+回读校验+有界重试，对付 X100
+//! cbo.flush 对在途 store 的静默丢失（详见该函数文档）。
 
 #[cfg(all(feature = "user-cbo", not(target_arch = "riscv64")))]
 compile_error!("ov-rpc feature \"user-cbo\" 仅支持 riscv64 目标（Zicbom cbo 指令）");
@@ -83,6 +85,42 @@ pub fn publish(base: usize, len: usize) {
     }
 }
 
+/// 发布校验最终失败累计（诊断计数；fresh_scan/dd 功能面即验收，
+/// 此计数供探针观测硬件丢失率）。
+#[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+pub static PUBLISH_VERIFY_FAILS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// publish + 回读校验 + 有界重试（A4 静默丢失缓解，2026-08-22）。
+///
+/// A4 定案（REPORT 附录）：X100 上 cbo.flush 对"仍在写缓冲的 store"
+/// 静默失效——flush 清走的是旧行，store 随后才落缓存并滞留，SRAM
+/// 停在旧值（D=100µs 发布丢失四轮复现：AP cache 视图 w 已推进、
+/// RP 200ms 不见）。缓解：发布后 [`refresh`]（CBIE=01 下按
+/// clean+invalidate 执行，把仍脏的行写回）再从 SRAM 回读比对；
+/// 不符则重试整段。校验只比对 `verify_off` 处的 usize——调用方
+/// 所有/刚推进的字段（发送 = write 索引、接收 = read 索引）；同行
+/// 对端字段（read/write 同 cache line）不比对，避免流水线场景对端
+/// 并发推进造成误报误重试。
+#[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+fn publish_verified(base: usize, len: usize, verify_off: usize) -> bool {
+    // 期望值取发布前缓存视图（store 在 publish 前已完成，缓存持有
+    // 最新值——即便它尚未写回 SRAM）。
+    // SAFETY: base/verify_off 来自本模块常量算得的窗口内偏移。
+    let expect = unsafe { ((base + verify_off) as *const usize).read_volatile() };
+    for _ in 0..4 {
+        publish(base, len);
+        refresh(base, len);
+        // SAFETY: 同上；refresh 后该读取自 SRAM 真值。
+        let got = unsafe { ((base + verify_off) as *const usize).read_volatile() };
+        if got == expect {
+            return true;
+        }
+    }
+    PUBLISH_VERIFY_FAILS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    false
+}
+
 /// 作废 `[base, base+len)` 的驻留行（for-cpu 刷新点，读到 SRAM 真值）。
 /// CBIE=01 下按 flush 语义执行，含脏写的行不丢数据。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
@@ -124,10 +162,14 @@ pub fn refresh_before_send(ch: usize) {
 
 /// 发送后发布：把刚写的消息槽（4 行）+ 索引行（1 行）清到 SRAM。
 /// `slot` 为发送时的 write 索引（0..CHANNEL_CAPACITY）。
+///
+/// 顺序 = **槽数据先于索引**（SPSC 发布序：RP 见 write 推进前槽内容
+/// 必须已落 SRAM；此前索引在前的写法靠时序侥幸）。索引行走
+/// [`publish_verified`]（write 字段回读校验，A4 缓解）。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn publish_send(ch: usize, slot: usize) {
-    publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
     publish(slot_addr(ch, slot), core::mem::size_of::<ov_channels::Message>());
+    publish_verified(ch + RB_OFF, 2 * core::mem::size_of::<usize>(), 8);
 }
 
 /// 读 BUSY 前刷新窗口头行：陈旧 BUSY=1（RP 已 clear 并入睡）会误跳过
@@ -153,10 +195,11 @@ pub fn refresh_slot(ch: usize, slot: usize) {
 }
 
 /// 接收后发布：read 索引推进后调用，消费进度对 RP 可见（RP 回包的满判定
-/// 读它；滞留缓存会导致 RP 侧幻影 pending / 假 Full）。
+/// 读它；滞留缓存会导致 RP 侧幻影 pending / 假 Full）。read 字段走
+/// [`publish_verified`] 回读校验（A4 缓解——与发送对称的丢失风险）。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn publish_recv(ch: usize) {
-    publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
+    publish_verified(ch + RB_OFF, 2 * core::mem::size_of::<usize>(), 0);
 }
 
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
