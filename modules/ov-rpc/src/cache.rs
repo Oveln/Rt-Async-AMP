@@ -24,9 +24,9 @@
 //! store 存在静默丢失，且**同核视角不可检测**——回读由 L1/L2 服务
 //! 恒见新值，一代"发布后回读校验"缓解已被板上证伪（fresh_scan
 //! D=100µs 走 flush+clean-inval 组合仍丢，itb f6fc7682 轮）。本模块
-//! 回归单遍发布；丢失的检测与恢复移交时间视角——在途超时后幂等
-//! 重发布（安全性论证见 [`publish_send`]，载体为 bench 看门狗；W2
-//! 轮询产品化后内建于轮询回路的软期限）。
+//! 回归单遍发布；丢失的检测与恢复移交时间视角——在途超时后走
+//! [`republish`]（三代：重写同值造新脏行再发布；二代纯重发已被粘滞
+//! 证伪，载体为 bench 看门狗；W2 轮询产品化后内建于轮询回路的软期限）。
 
 #[cfg(all(feature = "user-cbo", not(target_arch = "riscv64")))]
 compile_error!("ov-rpc feature \"user-cbo\" 仅支持 riscv64 目标（Zicbom cbo 指令）");
@@ -176,6 +176,36 @@ pub fn refresh_slot(ch: usize, slot: usize) {
 /// 不可达），下一次成功发布自愈，无挂死类风险，不做恢复。
 #[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
 pub fn publish_recv(ch: usize) {
+    publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
+}
+
+/// A4 三代恢复原语（08-23）：重写同值再发布。
+///
+/// 二代（纯重发 flush）板上证伪：fresh_scan D=100µs 丢发布后，看门狗
+/// 1ms 周期数百次 refresh+publish 重发，RP 整个 200ms 自旋期始终不见
+/// （超时快照 r==w）——丢发布行对 AP 侧重复 CBO 呈**粘滞**，"重试
+/// 收敛"不成立。而紧接着的下一档（D=300µs，含新 store 的正常发送）
+/// 立刻成功 ⇒ 疑粘滞态绑定"该笔旧 store 留下的行状态"，**新 store
+/// 可破**。故本原语在重发前先把索引字段按缓存视图重写同值（造出新
+/// 的脏行），再走标准发布（槽先于索引）。安全性同 [`publish_send`]
+/// 幂等论证——同值重写不改变任何观察者可见状态。
+///
+/// 须在发送路径互斥锁内调用（与 try_send/publish_send 临界区互斥，
+/// 调用方 bench ROUND_LOCK）。
+#[cfg(all(target_arch = "riscv64", feature = "user-cbo"))]
+pub fn republish(ch: usize, slot: usize) {
+    // 缓存视图快照：行脏 ⇒ 持有最新值（即便 SRAM 未更新）。
+    // SAFETY: ch/RB_OFF 为窗口内通道基址（调用方持有映射），偏移由
+    // 本模块常量与编译期布局断言保证。
+    let rb = (ch + RB_OFF) as *mut usize;
+    let (r, w) = unsafe { (rb.read_volatile(), rb.add(1).read_volatile()) };
+    refresh_before_send(ch);
+    // SAFETY: 同值重写（见上论证）；volatile 绕过 &self 共享内存限制。
+    unsafe {
+        rb.write_volatile(r);
+        rb.add(1).write_volatile(w);
+    }
+    publish(slot_addr(ch, slot), core::mem::size_of::<ov_channels::Message>());
     publish(ch + RB_OFF, 2 * core::mem::size_of::<usize>());
 }
 

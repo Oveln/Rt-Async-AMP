@@ -61,9 +61,11 @@
 //! 2026-08-21 起为唯一形态（用户决策：普通整窗 ioctl 变体已删，A/B 对照
 //! 实验结束并胜出）。
 //! 2026-08-22 起：A4 丢发布（X100 cbo.flush 偶发静默丢失在途 store，同核
-//! 不可检测）由在途看门狗恢复——超软期限（3ms）幂等重发布 + 视 BUSY 补
-//! 门铃（WD_* 静态量 + ROUND_LOCK 与发送段互斥），正常轮零开销，丢失轮
-//! 自愈（论证见 ov-rpc cache.rs）。
+//! 不可检测）由在途看门狗接管——超软期限（3ms）恢复 + 视 BUSY 补门铃
+//!（WD_* 静态量 + ROUND_LOCK 与发送段互斥），正常轮零开销。三代（08-23）
+//! 恢复改 [`ov_rpc::cache::republish`]（重写同值造新脏行再发布——二代
+//! 纯重发被粘滞证伪），节拍指数退避（1→64ms），guard 收口逐轮打印恢
+//! 重发次数（丢失/恢复可对账）。
 
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
@@ -392,41 +394,60 @@ fn sleep_until(deadline_ns: u64) {
 static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
 static TIMED_OUT: AtomicBool = AtomicBool::new(false);
 
-// ── A4 丢发布恢复（在途看门狗，2026-08-22 二代）─────────────────
+// ── A4 丢发布恢复（在途看门狗，2026-08-22 二代 / 08-23 三代）────
 //
 // A4 定案（REPORT 附录）：X100 U 态 cbo.flush 偶发静默丢失在途 store，
 // 同核不可检测（回读由 L1/L2 服务恒见新值，flush+clean-inval 组合在
 // fresh_scan D=100µs 仍丢已证伪一切 CBO 重试检测）。唯一可信视角 =
-// 时间——响应迟迟不回即疑似丢失。恢复动作 = 幂等重发布
-// （refresh_before_send + publish_send）+ 视 BUSY 补门铃，安全性论证
-// 见 ov-rpc cache.rs `publish_send`。恢复在独立线程执行，与主线程
-// 发送段经 ROUND_LOCK 互斥：杜绝把"下一轮刚写、尚未发布"的索引
-// 提前冲出去的乱序窗口（槽数据未达 SRAM 而 write 先行）。
+// 时间——响应迟迟不回即疑似丢失。恢复动作 = [`ov_rpc::cache::republish`]
+//（三代：索引字段重写同值造新脏行再发布——二代纯重发在 08-23 轮被
+// 粘滞证伪：数百次重发 RP 200ms 全盲）+ 视 BUSY 补门铃。恢复在独立
+// 线程执行，与主线程发送段经 ROUND_LOCK 互斥：杜绝把"下一轮刚写、
+// 尚未发布"的索引提前冲出去的乱序窗口（槽数据未达 SRAM 而 write 先行）。
+//
+// 观测（08-23 教训）：全局计数限流打印会把关键证据藏掉（该轮 D=100µs
+// 超时期间的重发行疑似被交错吞掉）——三代加**每轮收口计数**：guard
+// Drop 时打印本轮恢重发次数，与超时行直接对齐。恢复节拍指数退避
+//（1→64ms）：合法长 op（gapped 计时类 5s 级）不再刷屏，真丢失在
+// 3ms+1ms 内首试、之后拉开间隔探测粘滞。
 static ROUND_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static WD_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WD_SLOT: AtomicU64 = AtomicU64::new(0);
 static WD_T_SEND_END: AtomicU64 = AtomicU64::new(0);
 static WD_RECOVERIES: AtomicU64 = AtomicU64::new(0);
+/// 当前 guard 存续期间的恢重发次数（arm 清零，Drop 收口打印）。
+static WD_GUARD_HITS: AtomicU64 = AtomicU64::new(0);
 
 /// 在途软期限：rtt ~240µs，取 >10 倍余量；正常轮次远在此之前完成，
 /// 误触发只多一次幂等重发布（无副作用）。
 const A4_SOFT_NS: u64 = 3_000_000;
 
-/// 在途保护句柄：Drop 撤防，覆盖"响应到达 / 出错返回"全部路径。
-struct WdPending;
+/// 在途保护句柄：Drop 撤防并收口打印（仅发生过恢复时），覆盖"响应
+/// 到达 / 出错返回"全部路径——A4 丢与否、恢复了几次，逐轮可对账。
+struct WdPending {
+    slot: usize,
+}
 
 impl WdPending {
     fn arm(slot: usize, t_send_end: u64) -> Self {
         WD_SLOT.store(slot as u64, Ordering::Relaxed);
         WD_T_SEND_END.store(t_send_end, Ordering::Relaxed);
+        WD_GUARD_HITS.store(0, Ordering::Relaxed);
         WD_ACTIVE.store(true, Ordering::Release);
-        WdPending
+        WdPending { slot }
     }
 }
 
 impl Drop for WdPending {
     fn drop(&mut self) {
         WD_ACTIVE.store(false, Ordering::Release);
+        let hits = WD_GUARD_HITS.load(Ordering::Relaxed);
+        if hits > 0 {
+            eprintln!(
+                "[wd] A4 在途保护收口：slot={} 恢重发 {} 次（本轮响应到达/超时）",
+                self.slot, hits
+            );
+        }
     }
 }
 
@@ -443,54 +464,67 @@ fn spawn_watchdog(fd: libc::c_int, shm_ptr: usize) {
         libc::sigemptyset(&mut act.sa_mask);
         libc::sigaction(libc::SIGALRM, &act, std::ptr::null_mut());
     }
-    std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        // 一级（A4 恢复）：在途请求超软期限 → 幂等重发布 + 视 BUSY 补
-        // 门铃。1ms 周期连续重试：每次 flush 都是独立尝试，单次丢失
-        // 概率下指数收敛；重试幂等（cache.rs 论证），误触发无副作用。
-        if WD_ACTIVE.load(Ordering::Acquire)
-            && mono_ns().saturating_sub(WD_T_SEND_END.load(Ordering::Relaxed)) > A4_SOFT_NS
-        {
-            // SAFETY: shm_ptr 为本进程 mmap 的共享窗，线程存续期内有效。
-            let shm = unsafe { &*(shm_ptr as *const SharedMemory<3>) };
-            // SAFETY: CH0 恒存在（窗口建立期校验过），此处只取基址。
-            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-            let slot = WD_SLOT.load(Ordering::Relaxed) as usize;
-            let kicked = {
-                let _g = ROUND_LOCK.lock().unwrap();
-                // 拿锁后复核：轮次可能刚好完成（guard Drop 已撤防），
-                // 此时槽位数据作废，放弃本轮恢复。
-                if !WD_ACTIVE.load(Ordering::Acquire) {
-                    continue;
+    std::thread::spawn(move || {
+        // 恢复节拍指数退避：新 guard（t0 变化）重置为 1ms，每次恢复翻倍、
+        // 64ms 封顶——合法长 op（gapped 计时类 5s 级）不刷屏不空转，
+        // 真丢失 3ms+1ms 内首试后拉开间隔探测粘滞。
+        let mut backoff_ms: u64 = 1;
+        let mut last_t0: u64 = 0;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            let t0 = WD_T_SEND_END.load(Ordering::Relaxed);
+            if t0 != last_t0 {
+                backoff_ms = 1;
+                last_t0 = t0;
+            }
+            // 一级（A4 恢复）：在途请求超软期限 → republish（重写同值造
+            // 新脏行再发布，三代）+ 视 BUSY 补门铃。退避间隔下每次都是
+            // 独立尝试；恢复幂等（cache.rs 论证），误触发无副作用。
+            if WD_ACTIVE.load(Ordering::Acquire)
+                && mono_ns().saturating_sub(t0) > A4_SOFT_NS
+            {
+                // SAFETY: shm_ptr 为本进程 mmap 的共享窗，线程存续期内有效。
+                let shm = unsafe { &*(shm_ptr as *const SharedMemory<3>) };
+                // SAFETY: CH0 恒存在（窗口建立期校验过），此处只取基址。
+                let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
+                let slot = WD_SLOT.load(Ordering::Relaxed) as usize;
+                let kicked = {
+                    let _g = ROUND_LOCK.lock().unwrap();
+                    // 拿锁后复核：轮次可能刚好完成（guard Drop 已撤防），
+                    // 此时槽位数据作废，放弃本轮恢复。
+                    if !WD_ACTIVE.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    ov_rpc::cache::republish(ch0, slot);
+                    ov_rpc::cache::refresh_busy(shm_ptr);
+                    !shm.is_busy()
+                };
+                if kicked {
+                    // 补门铃在锁外：ioctl µs 级，无与之互斥的共享状态。
+                    let _ = do_ioctl(
+                        fd,
+                        rtshm_abi::IOC_NOTIFY as libc::c_ulong,
+                        rtshm_abi::ARG_USER_CBO as libc::c_ulong,
+                    );
                 }
-                ov_rpc::cache::refresh_before_send(ch0);
-                ov_rpc::cache::publish_send(ch0, slot);
-                ov_rpc::cache::refresh_busy(shm_ptr);
-                !shm.is_busy()
-            };
-            if kicked {
-                // 补门铃在锁外：ioctl µs 级，无与之互斥的共享状态。
-                let _ = do_ioctl(
-                    fd,
-                    rtshm_abi::IOC_NOTIFY as libc::c_ulong,
-                    rtshm_abi::ARG_USER_CBO as libc::c_ulong,
-                );
+                WD_GUARD_HITS.fetch_add(1, Ordering::Relaxed);
+                let n = WD_RECOVERIES.fetch_add(1, Ordering::Relaxed) + 1;
+                backoff_ms = (backoff_ms * 2).min(64);
+                if n <= 3 || n % 50 == 0 {
+                    eprintln!(
+                        "[wd] A4 丢发布恢复 #{n}：slot={slot} 在途 {:.1}ms，重写同值+重发布{}",
+                        mono_ns().saturating_sub(t0) as f64 / 1e6,
+                        if kicked { " + 补门铃" } else { "（RP 忙，待自轮询）" }
+                    );
+                }
             }
-            let n = WD_RECOVERIES.fetch_add(1, Ordering::Relaxed) + 1;
-            if n <= 3 || n % 50 == 0 {
-                eprintln!(
-                    "[wd] A4 丢发布恢复 #{n}：slot={slot} 在途 {:.1}ms，重发布{}",
-                    mono_ns().saturating_sub(WD_T_SEND_END.load(Ordering::Relaxed)) as f64 / 1e6,
-                    if kicked { " + 补门铃" } else { "（RP 忙，待自轮询）" }
-                );
+            // 二级（心跳兜底，原有）：停滞 10s = 恢复也救不回的更深故障
+            // （RP 死 / 中断线挂高）——SIGALRM 打断 AWAIT 走诊断退出路径。
+            // 不退出本循环：主线程若恢复则心跳更新，继续正常监测。
+            let hb = HEARTBEAT.load(Ordering::Relaxed);
+            if hb != 0 && mono_ns().saturating_sub(hb) > 10_000_000_000 {
+                unsafe { libc::kill(libc::getpid(), libc::SIGALRM) };
             }
-        }
-        // 二级（心跳兜底，原有）：停滞 10s = 恢复也救不回的更深故障
-        // （RP 死 / 中断线挂高）——SIGALRM 打断 AWAIT 走诊断退出路径。
-        // 不退出本循环：主线程若恢复则心跳更新，继续正常监测。
-        let hb = HEARTBEAT.load(Ordering::Relaxed);
-        if hb != 0 && mono_ns().saturating_sub(hb) > 10_000_000_000 {
-            unsafe { libc::kill(libc::getpid(), libc::SIGALRM) };
         }
     });
 }
