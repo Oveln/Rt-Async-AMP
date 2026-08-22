@@ -179,7 +179,7 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | ❌ 已证伪 | ~~计时瘦身·换源~~ | **两度板上证伪并回滚**（counter1：6f4ec9d；AON_TIMER1：05691b0）。**根因定性（08-22 AON 轮定案）：mtime 的 24.5µs 冷读税在生产路径从未被支付**——stamp 点前后交织的 SHM/fence 流量把 mtime 路径保温，基线无税可省；替换计时器（无论域别）在真实间隔下读仍付 ~10µs 级（探针税≠生产税）。计时链维持 mtime；剩余可行项 = **减 mark 笔数**（探针/统计降频），收益重新评估 | 重新评估（原 −40~90µs 前提不成立） | — |
 | ✅ **已验收** | **P3 fence 去冗余** | **板上验收通过（08-22 08:11 轮，ov-channels b45bc0a + ov-rpc stamps 对齐 + 主仓 bd662e7）**：magic → Relaxed（运行期不变量）+ 自产索引 → Relaxed（SPSC 单写者）；对端索引 Acquire 与发布 Release 原样保留——数据可见性协议零妥协。**验收数据：didx 7.6→3.1µs**（σ=0.02，3→1 笔 Acquire 精确兑现）、drx 48.2→43.5、dpre 25.1→20.6（ch2 检查瘦身）、dseen −9.5、**同环境态系（send≈14.5）rtt 246.9→236.9（−10.0µs）**；自旋 18→9.4µs/轮（spin_iter 17997→9420ns，D2 收益）。中间弯路：ov-rpc stamps 手写展开取包序列是 ov-channels 的逐笔复刻，改内存序须双处同步（首轮漏对齐致 didx 不动，已修） | **−10µs/消息（已兑现）+ 自旋 −8.6µs/轮（已兑现）** | 已闭环 |
 | 第 3 刀 | **W2 双向轮询** | AP 响应方向用户态自旋（已实测 −11µs）；绕过 MSIP 54µs 物理地板 | −11µs 起；延迟关键模式更多 | 小（bench 已预演）/ 烧 AP 核 |
-| **已实施待验收** | **A4 缓解（正确性）** | **`publish_verified`（56c79da，08-22）**：索引发布点（发送 write / 接收 read）publish 后 refresh（clean+invalidate）+ SRAM 回读比对 + 有界重试 ×4——对付 X100 cbo.flush 对在途 store 的静默丢失（D=100µs 四轮复现）；附带 `publish_send` 序改槽先于索引（SPSC 发布序） | **正确性修复**（非延迟项；验收判据 = fresh_scan D=100µs 转收取） | 已完成 / 待板上 |
+| **已实施待验收（二代）** | **A4 缓解（正确性）** | **一代回读校验板上证伪（08-22 13:09 轮）→ 二代在途看门狗（b95e950/894f358）**：fresh_scan D=100µs 走 flush+clean-inval 仍丢 ⇒ **同核视角不可检测**（回读由 L1/L2 服务恒见新值，校验恒过、重试从未触发；CBO 重试族含双遍 flush 全部无依据）。二代改时间视角：看门狗线程 1ms 节拍，在途 >3ms → 幂等重发布（refresh_before_send+publish_send，单请求在途协议下重发无回卷风险，论证在 cache.rs）+ 视 BUSY 补门铃；fresh_scan ③ 已挂防，成为复现验证位 | **正确性修复**（验收 = fresh_scan D=100µs 行"超时"→"收取" + mb/dd 长跑无空唤醒挂死） | 已完成 / 待板上 |
 | ❌ 已否决 | ~~P2 ISR 直派~~ | ~~响应在 ISR 内写完~~ **否决（2026-08-21）**：不破坏 rt-async 的任务模型——实际处理必须留在 task 上下文（executor/waker 语义），ISR 只做唤醒/标记；ddisp 27.1µs 作为结构性成本保留 | —（预期 −22µs 放弃） | — |
 | 远期 | 硬件 | mailbox 载荷直传小消息（数据进门铃）/ 硬件 spinlock（0xCAC9_1C00，手册背书） | 再往下 | 大 |
 
@@ -220,10 +220,11 @@ D1 路径六段（dd 场景闭环恒等式 `rtt = send + ddrain + ddisp + dseen 
 | mtime 模型修正 | mb now_gapped vs tmr_gapped | 69µs vs 22.4µs/轮——t1 前插入一笔异设备读（277ns）使 mtime 全热（机制待查） |
 | W2 预演 | BENCH_SPIN_AWAIT=1 dd | rtt p50 178.1（σ4.1） |
 
-## 附录 A：战役意外修出的三个潜伏 bug（+1 在查）
+## 附录 A：战役意外修出的三个潜伏 bug（+1 已定案，二代缓解待板上验收）
 
 1. **槽区布局偏移错 0xF0**：`Message` 是 `align(256)`，`RingBuffer.buffer` 垫到 +0x100 而非朴素假设的 +0x10；sizeof 断言对两种布局同取整（0x8100）无法区分。修复：`ov_channels::RB_SLOTS_OFF` 作为布局唯一真相源 + host 回归单测。
 2. **AP 按行缓存刷新错位**（user-cbo `refresh_slot` 用了错的 SLOTS_OFF）：错位 0xF0 期间全靠内核 AWAIT 的 invalidate 兜底——"按行精确刷新"的优化贡献此前虚标。随 1 一并修复。
 3. **`csrr cycle` 在 M 态未实现**：用户态别名 CSR 触发 Illegal Instruction 打挂固件；改用 `mcycle`（0xB00）。
 4. **定案（08-21 夜）：fresh_scan D=100µs dummy 不可见 = user-cbo `cbo.flush` 静默丢失**（三轮确定性复现）。决定性数据：超时时 **AP 缓存视角发布后 (r=118, w=120)，SRAM/RP 视角 200ms 仍 (119,119)**——AP 的索引行 flush 未把新 write 值写回 SRAM（若写回即使带陈旧 r，RP 也会看到 w=120 出队）。非"同行回卷"分支。**user-cbo 发布链的真实正确性缺口**：publish（fence → cbo.flush → fence）在 X100 U 态存在静默丢失窗口（疑 store 尚在写缓冲时 flush 按行 clean 到的是旧行）。
-   **缓解已实施（08-22，56c79da）**：`publish_verified`——索引发布点（发送 write@+8 / 接收 read@+0）publish 后 refresh（CBIE=01 下 clean+invalidate，给滞留 store 第二次写回机会）+ SRAM 回读比对，不符有界重试 ×4；只校验调用方所有的索引字，同行对端字段不比对（避免流水线误报）；`PUBLISH_VERIFY_FAILS` 计数器供探针观侧丢失率。附带修正：`publish_send` 发布序改**槽先于索引**（SPSC 发布序，此前索引在前的写法靠时序侥幸）。**验收判据 = fresh_scan D=100µs 行由"超时"转"收取"**（待板上）。
+   **一代缓解（08-22 晨，56c79da）→ 板上证伪（08-22 13:09 轮，itb f6fc7682）**：`publish_verified`（publish 后 refresh+回读比对+重试 ×4）下 fresh_scan D=100µs 仍丢，且生产路径首次命中（寄存器探测 rd#44：杂散 Notification → 空唤醒 → 强刷后仍空 → 挂死；丢的是 AP→RP 请求索引发布——RP 从未见请求，回包自然永不到）。**证伪的机制结论：同核回读由 L1/L2 服务、恒见新值——校验恒通过、重试从未触发，检测等于不存在**；flush+clean-inval 组合既已失效，双遍 flush 等 CBO 重试族同样无依据（重发与检测同一视角）。内核 S 态 flush 亦不天然免疫（同一 CBO 指令、PBMT 不生效无 NC 视角可借）。
+   **二代缓解（08-22，b95e950/894f358）= 唯一可信视角是时间**：在途看门狗（bench 侧）——请求发出 3ms（rtt 的 >10 倍余量）未见响应即疑似丢失，幂等重发布（refresh_before_send+publish_send）+ 视 BUSY 补门铃，1ms 连续重试（每次 flush 独立尝试，指数收敛）。安全性：单请求在途协议下，重发时索引行要么干净（重发 no-op）要么脏（发布必未落地 ⇒ RP 未消费 ⇒ 行内 read 与 RP 一致）——二择一，无回卷窗口；多发门铃仅 RP 一次空轮询。恢复线程与主线程发送段互斥（ROUND_LOCK，封闭"已写槽未发布"期间索引被提前冲出的乱序窗口）。**验收判据：fresh_scan D=100µs 行由"超时"转"收取"（③ 已挂防，got=1）+ mb/dd 长跑无空唤醒/挂死**；正常轮零开销（无额外 syscall/CBO）。W2 轮询产品化时把恢复内建于轮询回路软期限（产品级收口）。
