@@ -264,6 +264,63 @@ pub fn opensbi(root: &Path, cfg: &Config, env_name: &str) {
     eprintln!("OpenSBI → {}", dst.display());
 }
 
+/// K3 板上 OpenSBI（opensbi-k3/ 子仓：官方 spacemit 仓 tag k3-br-v1.0.0
+/// 基线 + feat/pma-audio-io 两笔补丁——k3_defconfig 开 CONFIG_ENABLE_LOGGING
+/// （banner）、fw_base.S audio buffer PMA 改 IO=0x22 即 AMP 共享窗物理
+/// 非缓存）。构建参数与官方 yocto 配方 opensbi-k3_1.4.bb 一致
+/// （PLATFORM=generic + PLATFORM_DEFCONFIG=k3_defconfig + FW_PIC=y），
+/// itb 由仓内 platform/generic/spacemit/fw_dynamic.its 打包（仅
+/// fw_dynamic.bin + crc32，与官方产物同构）→ build/<env>/opensbi.itb。
+///
+/// 工具链用系统 riscv64-linux-gnu-（Linux 交叉、PIE 链接器，FW_PIC=y
+/// 必需；vendor 配方用其自带 riscv64-unknown-linux-gnu-，等价角色；
+/// 本仓 riscv64-elf- 无 PIE 不可用——上游 QEMU 链为此曾打补丁禁 PIE）。
+pub fn opensbi_k3(root: &Path, env_name: &str) {
+    let dir = root.join("opensbi-k3");
+    assert!(
+        dir.join(".git").exists(),
+        "opensbi-k3 submodule missing. Run 'git submodule update --init opensbi-k3'."
+    );
+
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "4".into());
+
+    util::run(
+        &dir,
+        "make",
+        &[
+            &format!("-j{nproc}"),
+            "PLATFORM=generic",
+            "PLATFORM_DEFCONFIG=k3_defconfig",
+            "FW_PIC=y",
+            "CROSS_COMPILE=riscv64-linux-gnu-",
+            "O=build",
+        ],
+    );
+
+    let fw = dir.join("build/platform/generic/firmware");
+    let itb = fw.join("fw_dynamic.itb");
+    assert!(
+        itb.exists(),
+        "fw_dynamic.itb 未产出（{}）——检查 mkimage/dtc 是否安装",
+        itb.display()
+    );
+
+    let build_dir = root.join("build").join(env_name);
+    fs::create_dir_all(&build_dir).unwrap();
+    let dst = build_dir.join("opensbi.itb");
+    fs::copy(&itb, &dst).unwrap();
+    // bin/elf 一并留档（诊断/反汇编用，不入 git）。
+    for ext in ["bin", "elf"] {
+        let src = fw.join(format!("fw_dynamic.{ext}"));
+        if src.exists() {
+            let _ = fs::copy(&src, build_dir.join(format!("opensbi-fw_dynamic.{ext}")));
+        }
+    }
+    eprintln!("opensbi.itb → {}", dst.display());
+}
+
 /// 构建环境对应的 StarryOS（经 tg-xtask，板级配置来自环境 profile）。
 pub fn starryos(root: &Path, profile: &EnvProfile) {
     let tgoskits_root = root.join("tgoskits");
@@ -362,6 +419,7 @@ pub fn build_env(root: &Path, cfg: &Config, profile: &EnvProfile, envs: &[EnvPro
             );
         }
         "k3" => {
+            opensbi_k3(root, &profile.name);
             for bin in &bins {
                 build_rt_async(root, bin, &profile.name);
             }
