@@ -24,14 +24,16 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 │   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，产物 → build/k3-com260/*.elf）
 │   └── rt-async-app/          ←   QEMU virt 固件
 ├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
-│   ├── user-test-{ipc,mbox,rpc,sched,bench}/ ←  AMP 测试程序（bench=路径分离延迟基准）
+│   ├── user-test-{ipc,mbox,rpc,sched,bench,pbmt}/ ← AMP 测试程序（bench=延迟基准，pbmt=PMA 非缓存判窗）
 │   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
 ├── scripts/flash/             ←   K3 ITB 打包脚本（k3-pack-itb.sh）+ 固定 payload
 ├── xtask/                     ←   构建工具链（cargo xtask build/run/...）
 ├── amp.toml                   ←   QEMU 运行所需地址布局 + 上游 pin（其余地址在 DT/dts）
-├── patches/ opensbi/ qemu/    ←   上游依赖与补丁
+├── patches/ opensbi/ qemu/    ←   上游依赖与补丁（opensbi/ 为 QEMU 链克隆+patch）
+├── opensbi-k3/                ←   K3 板上 OpenSBI 子模块（官方仓 tag k3-br-v1.0.0
+│                                  + feat/pma-audio-io：banner + PMA 窗口翻 IO）
 ├── tgoskits/                  ←   通用内核子模块（StarryOS 衍生，AGENTS.md 自带）
 └── build/                     ←   构建产物（.elf/.bin/.dtb/.itb/.uimg，不入 git）
 ```
@@ -60,9 +62,17 @@ RP 侧会挂，见 envs/qemu-aia.toml）、`k3-com260`（真板）。产物按�
 ```bash
 cargo xtask build qemu-plic        # 环境聚合：opensbi + starryos + 全部 qemu bins + user-apps
 cargo xtask run                     # 启动 QEMU 双核 AMP（默认 qemu-plic，可 --env qemu-aia）
-cargo xtask build k3-com260         # K3 环境聚合：bins + esos.itb + starryos.uimg 两个交付产物
+cargo xtask build k3-com260         # K3 环境聚合：opensbi.itb + bins + esos.itb + starryos.uimg
+cargo xtask build k3-opensbi        # 单独构建 K3 OpenSBI（opensbi.itb = PMA 非缓存 + banner）
 cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
 ```
+
+> **K3 共享窗一致性 = PMA 非缓存（硬依赖）**：X100 硅忽略 Svpbmt PTE 位，
+> 由 opensbi-k3 固件每 hart 把覆盖窗口的 PMA entry 翻 IO 实现物理非缓存。
+> 内核与用户态**无任何 CBO 缓存维护**（rt_shm 四个同步点、somehal U 态
+> cbo 放行、ov-rpc user-cbo 均已撤除）——板上必须刷上述 opensbi.itb
+> （官方固件下窗口 cacheable，协议不可用）。判窗工具：user-test-pbmt
+> （配 RP 固件 pbmt_probe）。QEMU TCG 无 dcache，天然成立。
 
 K3 刷写为手动 U-Boot fastboot 序列（见 README「使用方法 · K3 真板」），
 xtask 职责到产物为止。
@@ -287,6 +297,8 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 - `log::info!()`/`log::error!()` 输出到 console UART，阻塞写，**中断上下文勿高频打印**。
 - 构建产物（`build/*.elf`、`*.bin`、`*.dtb`、`*.itb`、`*.uimg`）不入 git，由 build.rs / xtask 派生。
 - **过程中产生的设计文档、计划文档不入 git**（如 `docs/superpowers/`），除非用户明确要求。
+- **共享窗缓存一致性**：PMA 物理非缓存（opensbi-k3 固件翻 entry，K3 硬
+  依赖）；内核/用户态零 CBO 维护，QEMU 侧 TCG 无 dcache 天然成立。
 - **地址布局的真相源分层**：`amp.toml` 只管 QEMU 运行所需（引导链 + 补丁 +
   loader + 上游 pin，均为"能解析 DT 之前"就要用的值）；共享内存窗口以
   `its/rt-async-shm.dtsi`（qemu）/ `its/rt-async-k3.dts` + tgoskits AP dts
@@ -320,6 +332,10 @@ submodule(rt-async): bump 指针到 main 最新 merge commit（对齐 no-ff merg
 #   U-Boot: fastboot -l $loadaddr -s 0x100000 usb 0
 #   Host:   fastboot stage build/k3-com260/esos.itb
 #   U-Boot: Ctrl-C 后：mtd erase esos && mtd write esos $loadaddr && reset
+# OpenSBI（opensbi.itb → opensbi MTD 分区，PMA 非缓存窗口固件——硬依赖）：
+#   U-Boot: fastboot -l $loadaddr -s 0x100000 usb 0
+#   Host:   fastboot stage build/k3-com260/opensbi.itb
+#   U-Boot: Ctrl-C 后：mtd erase opensbi && mtd write opensbi $loadaddr && reset
 # AP（starryos.uimg，bootm 直接引导，不落 flash）：
 #   U-Boot: fastboot -l 0x180000000 -s 0x04000000 usb 0
 #   Host:   fastboot stage build/k3-com260/starryos.uimg

@@ -64,7 +64,7 @@ K3 真板环境：AP 侧 X100 大核跑 StarryOS（APLIC+IMSIC 中断架构，�
 |---|---|---|---|
 | `qemu-plic` | `cargo xtask build qemu-plic` | `cargo xtask run`（默认环境） | `fw_dynamic.bin` / `starryos.bin` / `rt-async*.bin` / `ap.dtb` / `rt-async.dtb`（dtb 首次 run 时自动生成） |
 | `qemu-aia` | `cargo xtask build qemu-aia` | `cargo xtask run --env qemu-aia`（**仅 AP 侧完整**，见下） | 同上（`ap.dtb` 由 dumpdtb+overlay 自动生成） |
-| `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（RP/AP 各一套，见下文 K3 小节） | `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
+| `k3-com260` | `cargo xtask build k3-com260` | 手动 U-Boot fastboot 序列（opensbi/RP/AP 各一套，见下文 K3 小节） | `opensbi.itb`（M 态）/ `esos.itb`（RP 侧）/ `starryos.uimg`（AP 侧）/ `rt-async-k3-*.elf` |
 
 > user-apps 与环境无关，产物留在 `build/` 顶层。`amp.toml` 只管 QEMU 运行所需的引导链地址与上游 repo pin；机器参数等环境属性在 `envs/`，共享内存窗口等其余地址布局以设备树为准（运行时双端 DT probe）。
 
@@ -173,6 +173,26 @@ fastboot stage build/k3-com260/starryos.uimg  # Host：上传 uimg
 bootm 0x180000000
 ```
 
+刷 OpenSBI（写入 `opensbi` MTD 分区——**PMA 非缓存窗口固件**，K3 共享窗一致性的唯一依赖）：
+
+```bash
+fastboot -l $loadaddr -s 0x100000 usb 0     # U-Boot：进入 fastboot（阻塞命令）
+fastboot stage build/k3-com260/opensbi.itb  # Host：上传 itb
+# ↓ U-Boot：Ctrl-C 退出 fastboot 后逐条执行：
+mtd erase opensbi
+mtd write opensbi $loadaddr
+reset
+```
+
+> 该固件 = 官方 spacemit/opensbi（tag k3-br-v1.0.0）+ 两笔补丁：k3_defconfig 开
+> CONFIG_ENABLE_LOGGING（启动横幅，banner 列出 ISA 扩展含 svpbmt）、每 hart
+> 启动时按界址定位覆盖共享窗（0xc0800000..0xc0880000，本板 boot ROM 表 =
+> entry4）的 PMA entry 翻 IO——X100 硅忽略 Svpbmt PTE 位，PMA 是窗口非缓存
+> 的唯一途径。启动日志出现 `K3 PMA: AMP window -> entryN IO (was 0x20)` 即
+> 生效；验收/回归用 `user-test-pbmt`（十秒判窗：写直达 + 读前进 + 时延
+> 数十倍于缓存命中）。刷回官方固件则窗口回到 cacheable——内核与用户态的
+> CBO 缓存维护已全部撤除，官方固件下协议**不再可用**（写被缓存吸收）。
+
 > K3 的 rcpu0 跑**本仓库的握手占位固件**（`scripts/flash/payloads/rt24_os0_rcpu.S`：入口写 BOOT_ENTRY 寄存器解锁 AP 的 6s 启动轮询后永久 wfi，不参与 AMP 通信；mailbox3 留给未来），rcpu1 跑本仓库构建的 rt-async；两者由 SPL 从同一 itb（沿用官方 `esos` 分区命名）的不同节点加载，无 DTB handoff（DTB 内嵌进 ELF）。AP 与 RP 是两套独立镜像；bootargs 已固化在设备树 chosen 节点，无需 setenv。
 
 ### 用户态应用（user-apps）开发循环
@@ -259,19 +279,20 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   **前提：starryos.uimg 含内核双戳（RD_KTS ioctl）——需重刷 uimg。**
 - `lit`：跨核免 fence 顺序性实验（迁移前测量，2026-08-17）——L1 消费侧
   （AP 顺序发布、RP 按读模式矩阵轮询：纯读/fence 读/邻址读）、L2 生产侧
-  （RP 免 fence 发布 + 裸门铃绕过 notify fence、AP cbo 轮询校验）、
+  （RP 免 fence 发布 + 裸门铃绕过 notify fence、AP 轮询校验）、
   L3 Dekker 对照。每组含正序判据 + 反序对照组（验证检测器有效）。
   判读：L1 fence 读 PASS ⇒ RP 读新鲜度需每读一条 fence（≈Acquire 价，
   邻址读已证无逐出效果）；L2 正序 PASS ⇒ RP 免 fence 写落地保序、
   notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
   （或换硬件 spinlock）。
 
-**缓存维护形态（user-cbo，唯一）**：`cargo xtask build user-test-bench` 产出
-`build/user-test-bench`——U 态 Zicbom 按行缓存维护（ov-rpc `user-cbo`
-feature 默认启用：发送发布槽+索引 5 行、接收刷新索引+待读槽，NOTIFY/AWAIT 带
-`ARG_USER_CBO` 跳过内核整窗 0x19000 同步点）。2026-08-21 起普通（整窗 ioctl）
-变体删除——A/B 对照实验结束并胜出（下方实测表）。前提：
-本 README 上方 starryos.uimg（内核 somehal 已置 senvcfg，随 zicbom 编译）。
+**缓存一致性（PMA 非缓存，2026-08-26 定案）**：共享窗经 OpenSBI 固件
+（`opensbi-k3` 子仓 `feat/pma-audio-io`，见上文刷写小节）把覆盖窗口的 PMA
+entry 翻为 IO，AP 侧内核与用户态的读写物理直达 SRAM——**无任何 CBO 缓存
+维护**（内核 rt_shm 四个同步点、somehal U 态 cbo 放行、ov-rpc `user-cbo`
+按行维护均已撤除；ioctl `FLUSH` 与 `ARG_USER_CBO` 一并删除）。验收/回归
+检测：`cargo xtask build user-test-pbmt` 产出的 `user-test-pbmt`（配对 RP
+固件 `pbmt_probe`），十秒判窗。
 
 **RT24 微架构基准（rtbench，2026-08-17 新增）**：RP 本地自跑、不依赖 AP，
 上电自动执行全_suite 后打 R_UART0 串口，用于微架构单价定标与优化路径评估：
@@ -300,8 +321,8 @@ ELF_SRC=build/k3-com260/rt-async-k3-rtbench.elf bash scripts/flash/k3-pack-itb.s
 7. 取指与 I$ 存在性——热调用 vs 16 函数散布冷调用，pass1 vs pass2
    （dseen/svc 残余 ~85µs 的冷取指假设判别）；
 8. trap 与 WFI——MSIP 自环（entry/resume 分解）与 mtimecmp 唤醒误差。
-mb 与 rtbench 均需 K3 真板（QEMU 固件无插桩服务）；bench 另依赖 U 态
-Zicbom（senvcfg 已置）。
+mb 与 rtbench 均需 K3 真板（QEMU 固件无插桩服务）；bench 依赖 PMA 非缓存
+固件（opensbi.itb，见上文刷写小节）。
 
 K3 真板实测（2026-08-17，CPU2 pin，s1=4s 间隔 / s2=200µs 间隔，σ 均 <2µs）：
 
@@ -312,6 +333,9 @@ K3 真板实测（2026-08-17，CPU2 pin，s1=4s 间隔 / s2=200µs 间隔，σ �
 | syscall/轮（D2） | 2（FLUSH+AWAIT） | 1（仅 AWAIT） | 门铃决策零 syscall |
 | D1 RTT p50（cbo） | — | 288.5µs | 弹性窗口净省 ~80µs/轮 |
 
+（上表为 user-cbo 时代实测留档；2026-08-26 起缓存维护整体撤除，两列对照
+不复存在——PMA 非缓存窗口下发送段只剩纯写 + BUSY 判定。）
+
 标定结论：弹性窗口 W ≈ 2.0s（每次自旋迭代 ~20µs，无缓存 SRAM 读索引），
 间隔 < 2s 的稳态流量全走 D2；`ELASTIC_SPIN_LIMIT` 调整见 intercom.rs 注释。
 
@@ -321,11 +345,12 @@ K3 真板实测（2026-08-17，CPU2 pin，s1=4s 间隔 / s2=200µs 间隔，σ �
 # 环境聚合构建（一个环境一条命令，产物落 build/<env>/）
 cargo xtask build qemu-plic  #   OpenSBI + StarryOS + 全部 qemu bins + user-apps
 cargo xtask build qemu-aia   #   同上（AIA 机器；AP DTB 由 dumpdtb+overlay 自动生成）
-cargo xtask build k3-com260  #   全部 k3 bins + esos.itb + starryos.uimg
+cargo xtask build k3-com260  #   全部 k3 bins + opensbi.itb + esos.itb + starryos.uimg
 # 构建单个目标：组件（opensbi / starryos / user-test-*）或 rt-async bin
 cargo xtask build <target>   #   rt-async bin 用 <平台>-<bin> 命名（落平台默认环境目录）：
                              #     qemu-demo / qemu-console / qemu-console-interrupt → flat bin（QEMU loader）
                              #     k3-sched-demo → ELF（esos 脚本整合进 itb）
+cargo xtask build k3-opensbi # 单独构建 K3 OpenSBI 固件（opensbi.itb，PMA 非缓存 + banner）
 cargo xtask build qemu       # 构建全部 QEMU rt-async bin
 cargo xtask build k3         # 构建全部 K3 rt-async bin
 cargo xtask run --env qemu-aia # 启动指定环境的 QEMU AMP（--bin demo 换 RP bin，run 用短名）

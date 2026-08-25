@@ -488,8 +488,7 @@ pub fn user_test_sched(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-sched", "user-test-sched", &[]);
 }
 
-/// IPC 延迟基准（唯一形态 = user-cbo 默认开，见 user-test-bench Cargo.toml
-/// default；2026-08-21 起普通整窗 ioctl 变体已删）。
+/// IPC 延迟基准（K3 板测主工具；缓存维护已随 PMA 非缓存窗口撤除）。
 pub fn user_test_bench(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-bench", "user-test-bench", &[]);
 }
