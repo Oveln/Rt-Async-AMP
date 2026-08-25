@@ -18,9 +18,6 @@ portable-atomic = { version = "1", default-features = false }
 [features]
 default = []
 logging = ["dep:log"]
-# U 态按行共享窗缓存维护（Zicbom，仅 riscv64；K3 AP 用户态）。
-# 依赖内核置 senvcfg（CBCFE|CBIE=flush，tgoskits somehal enable_user_cbo）。
-user-cbo = []
 # 服务端 dispatch 分解戳（延迟插桩：ch_enter/recv_done/handle_done/
 # resp_done 四截 + app 时钟钩子，见 server::stamp）。K3 固件启用，
 # 每消息开销 <0.5µs；关闭零开销。
