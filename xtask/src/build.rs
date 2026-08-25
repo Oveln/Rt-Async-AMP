@@ -426,7 +426,7 @@ pub fn build_env(root: &Path, cfg: &Config, profile: &EnvProfile, envs: &[EnvPro
             pack_itb(root, profile);
             starryos(root, profile);
             eprintln!(
-                "Env {} build complete. Deliverables: build/{}/{{esos.itb, {}}}",
+                "Env {} build complete. Deliverables: build/{}/{{opensbi.itb, esos.itb, {}}}",
                 profile.name, profile.name, profile.starry_artifact
             );
         }
