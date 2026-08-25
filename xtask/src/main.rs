@@ -118,6 +118,11 @@ fn main() {
                 "user-test-rpc" => build::user_test_rpc(&root, &cfg),
                 "user-test-sched" => build::user_test_sched(&root, &cfg),
                 "user-test-bench" => build::user_test_bench(&root, &cfg),
+                // K3 板上 OpenSBI（opensbi-k3 子仓，PMA IO + banner 补丁）→ opensbi.itb。
+                "k3-opensbi" => {
+                    let k3_env = env_profile::default_for_platform(&envs, "k3");
+                    build::opensbi_k3(&root, &k3_env.name);
+                }
                 // 平台聚合：构建该平台所有 rt-async bin（落平台默认环境目录）。
                 // qemu/k3 先于 env 名匹配，新增同名环境会被此分支遮蔽。
                 "qemu" | "k3" => {
