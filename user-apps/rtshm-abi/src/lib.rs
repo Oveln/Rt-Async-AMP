@@ -17,14 +17,9 @@ pub const IOC_AWAIT: u32 = 0x735_002;
 pub const IOC_CLR_PENDING: u32 = 0x735_003;
 /// ioctl：软件注入 mailbox new_msg（自测 APLIC→handler 全链路）
 pub const IOC_TEST_MBOX: u32 = 0x735_004;
-/// ioctl：仅 flush 共享窗（clean+invalidate，不发门铃）。
-///
-/// BUSY=1 跳过 NOTIFY 的发送方（ov-rpc 省 IPI 优化）用它发布缓存滞留的
-/// 写到 SRAM——用户态映射实际 cacheable（X100 PBMT 不生效），NOTIFY 的
-/// flush 是唯一发布点，跳过门铃时必须补这个纯 flush，否则请求对 RP
-/// 不可见、read 索引不推进（幻影 pending）。
-/// 值须与 tgoskits rt_shm.rs 内核侧保持同值（双仓对齐义务）。
-pub const IOC_FLUSH: u32 = 0x735_005;
+/// （已撤除）原 0x735_005 = 仅 flush 共享窗不发门铃——PMA 非缓存窗口
+/// （opensbi-k3 固件翻 entry）后无缓存可维护，ioctl 与内核侧实现一并
+/// 删除。号位保留注释防止误复用；内核侧同款注记见 tgoskits rt_shm.rs。
 
 /// ioctl：读内核延迟插桩时间戳（诊断，K3 专用）。
 ///
@@ -35,12 +30,9 @@ pub const IOC_FLUSH: u32 = 0x735_005;
 /// 回程耗时。值须与 tgoskits rt_shm.rs 内核侧保持同值（双仓对齐义务）。
 pub const IOC_RD_KTS: u32 = 0x735_006;
 
-/// `IOC_NOTIFY` / `IOC_AWAIT` 的 arg 标志位：调用方已按行完成缓存维护
-/// （ov-rpc `user-cbo` feature，cbo.flush/cbo.inval 精确到消息槽+索引行），
-/// 内核跳过整窗 clean+invalidate——NOTIFY 只发门铃（前插一道 fence），
-/// AWAIT 不做返回前 flush、就绪检查的作废也缩至 ch1 magic+索引两行。
-/// 为 0（默认）保持整窗同步点语义，老程序不受影响。
-pub const ARG_USER_CBO: usize = 1;
+/// （已撤除）原 NOTIFY/AWAIT 的 arg 标志位（=1，调用方已完成 U 态按行
+/// 缓存维护、内核跳过整窗同步点）——随 PMA 非缓存窗口一并删除，两个
+/// ioctl 的 arg 现被忽略（传 0）。
 
 /// qemu-plic / qemu-aia 共享窗大小（reg 真源：its/rt-async-shm.dtsi）
 pub const QEMU_SHM_SIZE: usize = 0x19000;

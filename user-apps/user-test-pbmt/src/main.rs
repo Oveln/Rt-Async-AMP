@@ -8,28 +8,25 @@
 //! （3.1 vs 1.2 周期/读，同为 L1 命中量级）；本实验在用户态路径、以行为
 //! 级观测复测。
 //!
-//! 四阶段，观测期零 ioctl / 零 cbo——内核 CBO 同步点完全不参与（A'/D 的
-//! 单行 cbo.inval 只作用于各自单元，不触碰被观测行）：
-//! - 阶段A 写直达性：写 REQ 值（前缀 | 本轮 nonce=pid）到 flag，1s 后
-//!   **首读** ack。ack 行从未被本进程读过（mmap 时内核整窗作废后无驻留
-//!   副本），首读 L1/L2 均未命中必取 SRAM 真值——判定不依赖待测属性本身。
-//!   RP 回显 flag 原值，回显等于本轮 nonce 才算直达——跨轮残留不可能
-//!   误判（见阶段A 注释）。
-//! - 阶段A' 迟到回执：3s 后作废 ack 行重读。写若被缓存滞留，脏行被逐出
-//!   迟到送达 SRAM 时 RP 会补回执——显形即"写被缓存"的直接证据；未见
-//!   不构成反证（脏行可能长期不逐出）。
-//! - 阶段B RP 活性：首读 cnt，seq=0 说明 pbmt_probe 未运行/未过门控，
+//! 四阶段，观测期零 ioctl（内核无任何缓存同步点可参与——窗口 PMA 物理
+//! 非缓存）：
+//! - 阶段A 写直达性：写 REQ 值（前缀 | 本轮 nonce=pid）到 flag，1s 后读
+//!   ack。RP 回显 flag 原值，回显等于本轮 nonce 才算直达——跨轮残留
+//!   不可能误判（见阶段A 注释）。
+//! - 阶段A' 迟到回执：3s 后重读 ack。历史上（缓存时代）用于捕捉脏行
+//!   迟到逐出送达；非缓存窗口下读恒真值，仅作延迟对照留存。
+//! - 阶段B RP 活性：读 cnt，seq=0 说明 pbmt_probe 未运行/未过门控，
 //!   实验无效。
 //! - 阶段C 读新鲜度：3s 内每 1ms 裸读 cnt.seq。非缓存读每次直达 SRAM，
-//!   seq 平滑前进（RP 以 ~100µs 步长推进）；缓存读行驻留 L1/L2、陈旧行
-//!   对全 hart 一致（线程迁移救不了），首读后冻结。
-//! - 阶段D 时延佐证：同址重读三回路 ns/读（3 轮取最小）——(a) DDR 匿名
-//!   页校准循环自身开销（L1 命中量级）；(b) 窗口行裸读；(c) 窗口行每读先
-//!   cbo.inval——本系统"非缓存访问 SRAM"的代价下界锚点。
+//!   seq 平滑前进（RP 以 ~100µs 步长推进）；缓存读（PMA 退化时）行驻留
+//!   L1/L2、陈旧行对全 hart 一致（线程迁移救不了），首读后冻结。
+//! - 阶段D 时延佐证：同址重读两回路 ns/读（3 轮取最小）——(a) DDR 匿名
+//!   页校准循环自身开销（L1 命中量级）；(b) 窗口行读。b/a ≈ 1× 即缓存
+//!   命中（PMA 未生效），数十倍即非缓存直达。
 //!
 //! 运行：板上 wget 本 bin 后直接运行；每上电至少跑 3 遍（进程重启即重新
-//! mmap，内核整窗作废，状态干净）。现亦用作 PMA 固件（opensbi-k3
-//! feat/pma-audio-io）的验收/回归检测：非缓存生效与否即固件配置是否在岗。
+//! mmap，状态干净）。现用作 PMA 固件（opensbi-k3 feat/pma-audio-io）的
+//! 验收/回归检测：非缓存生效与否即固件配置是否在岗。
 
 use std::ffi::c_void;
 use std::hint::black_box;
@@ -44,24 +41,6 @@ const CNT_OFF: usize = 0x6c0;
 const LAT_OFF: usize = 0x700;
 const REQ_PREFIX: u64 = (u32::from_be_bytes(*b"PBMT") as u64) << 32;
 const ACK_MAGIC: u64 = u64::from_be_bytes(*b"PBMT_ACK");
-/// cache line（X100 `riscv,cbom-block-size` = 64，同 ov-rpc CACHE_LINE）。
-const CACHE_LINE: usize = 64;
-
-/// 单行 cbo.inval + fence——与 ov-rpc `cache::refresh` 同编码
-/// （`.insn i 15,2,x0,rs1,0` = cbo.inval；senvcfg.CBIE=01 下按
-/// clean+invalidate 执行）。独立 bin 不引协议 crate，就地内联这一条。
-#[cfg(target_arch = "riscv64")]
-#[inline]
-fn line_inval(addr: usize) {
-    unsafe {
-        core::arch::asm!(
-            ".insn i 15, 2, x0, {addr}, 0",
-            addr = in(reg) addr & !(CACHE_LINE - 1),
-            options(nostack)
-        );
-        core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
-    }
-}
 
 /// 读 scratch 单元（`off` 相对 SCRATCH_OFF）。**必须**经此助手访问单元——
 /// 首版曾在调用点漏加 SCRATCH_OFF，误读写 ch0 槽区（窗口 0x600 一带），
@@ -77,18 +56,14 @@ fn wr_cell(shm: *mut c_void, off: usize, v: u64) {
     unsafe { ((shm as usize + SCRATCH_OFF + off) as *mut u64).write_volatile(v) }
 }
 
-/// N 次同址 volatile 读，3 轮取最小，返回 ns/读。`inval` = 每读先作废该行
-/// （仅 riscv64）。异或累积 + black_box 防优化裁剪。
-fn lat_loop(addr: usize, n: u64, inval: bool) -> f64 {
+/// N 次同址 volatile 读，3 轮取最小，返回 ns/读。异或累积 + black_box
+/// 防优化裁剪。
+fn lat_loop(addr: usize, n: u64) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..3 {
         let mut acc: u64 = 0;
         let t = Instant::now();
         for _ in 0..n {
-            #[cfg(target_arch = "riscv64")]
-            if inval {
-                line_inval(addr);
-            }
             acc ^= unsafe { (addr as *const u64).read_volatile() };
         }
         black_box(acc);
@@ -97,7 +72,7 @@ fn lat_loop(addr: usize, n: u64, inval: bool) -> f64 {
     best
 }
 
-/// 打开 /dev/rt_shm 并 mmap 全窗。内核 mmap 钩子会先整窗 cbo 作废
+/// 打开 /dev/rt_shm 并 mmap 全窗
 /// （tgoskits rt_shm `mmap()`），返回后窗口行无驻留副本。fd 故意持有
 /// 不关——实验进程生命周期即映射生命周期。
 fn open_window() -> *mut c_void {
@@ -136,13 +111,13 @@ fn main() {
 
     let shm = open_window();
     println!(
-        "[pbmt] 窗口 vaddr={:p} size={:#x}（mmap 时内核已整窗作废；配对固件 pbmt_probe）",
+        "[pbmt] 窗口 vaddr={:p} size={:#x}（PMA 非缓存；配对固件 pbmt_probe）",
         shm, SHM_SIZE
     );
 
     // ── 阶段A：写直达性 ─────────────────────────────────────────────
     // flag = REQ 前缀 | 本轮 nonce(pid)。nonce 回显使跨轮残留不可能误判：
-    // 缓存模式下上一轮滞留的 REQ 写会在本轮 mmap 时被内核整窗作废
+    // 缓存模式下（PMA 退化）上一轮滞留的 REQ 写不因进程重启消散
     // （CBIE=01 = clean+invalidate）冲刷进 SRAM 迟到触发回执，但回显的
     // 是上一轮 nonce，与本轮比对不上。
     let nonce = unsafe { libc::getpid() } as u64;
@@ -168,24 +143,24 @@ fn main() {
         }
     );
 
-    // ── 阶段A'：迟到回执诊断 ────────────────────────────────────────
+    // ── 阶段A'：延迟对照读 ──────────────────────────────────────────
+    // （历史用途为捕捉缓存滞留脏行的迟到逐出——非缓存窗口下读恒 SRAM
+    // 真值，仅作延迟对照留存。）
     std::thread::sleep(Duration::from_secs(3));
-    #[cfg(target_arch = "riscv64")]
-    line_inval(shm as usize + SCRATCH_OFF + ACK_OFF);
     let ack2_magic = rd_cell(shm, ACK_OFF);
     let ack2_echo = rd_cell(shm, ACK_OFF + 8);
     println!(
-        "[pbmt] 阶段A' 迟到回执: ack={:#x} echo={:#x} → {}",
+        "[pbmt] 阶段A' 延迟对照: ack={:#x} echo={:#x} → {}",
         ack2_magic,
         ack2_echo,
         if write_direct {
             "（阶段A 已直达，不适用）"
         } else if ack2_magic == ACK_MAGIC && ack2_echo == req_val {
-            "本轮迟到回执显形——写确曾被缓存滞留（仅逐出送达）"
+            "迟到回执显形——写存在滞留（PMA 退化特征）"
         } else if ack2_magic == ACK_MAGIC {
-            "迟到回执为其它轮残留——同为本轮未直达的佐证"
+            "回执为其它轮残留——同为本轮未直达的佐证"
         } else {
-            "未见（不构成反证：脏行可能未逐出）"
+            "未见"
         }
     );
 
@@ -246,18 +221,17 @@ fn main() {
     // 先写一次落页，防缺页异常进回路。
     unsafe { (ddr as *mut u64).write_volatile(1) };
     let lat_addr = shm as usize + SCRATCH_OFF + LAT_OFF;
-    let ns_a = lat_loop(ddr as usize, 1_000_000, false);
-    let ns_b = lat_loop(lat_addr, 1_000_000, false);
-    let ns_c = lat_loop(lat_addr, 100_000, true);
+    let ns_a = lat_loop(ddr as usize, 1_000_000);
+    let ns_b = lat_loop(lat_addr, 1_000_000);
     println!(
-        "[pbmt] 阶段D 时延(ns/读,3轮最小): DDR对照 a={:.2} 窗口裸读 b={:.2} 窗口逐读inval c={:.2}",
-        ns_a, ns_b, ns_c
+        "[pbmt] 阶段D 时延(ns/读,3轮最小): DDR对照 a={:.2} 窗口读 b={:.2}",
+        ns_a, ns_b
     );
 
     // ── 汇总判定 ────────────────────────────────────────────────────
     let ratio_ba = ns_b / ns_a;
     println!(
-        "[pbmt] 判定: 写路径={} | 读路径={} | 时延 b/a={:.1}×（c/a={:.1}×）",
+        "[pbmt] 判定: 写路径={} | 读路径={} | 时延 b/a={:.1}×",
         if write_direct { "直达" } else { "未直达" },
         if read_nc {
             "非缓存"
@@ -266,8 +240,7 @@ fn main() {
         } else {
             "混合"
         },
-        ratio_ba,
-        ns_c / ns_a
+        ratio_ba
     );
     if write_direct && read_nc {
         println!("[pbmt] 结论: 用户态映射非缓存生效（机制 = PMA 固件翻转 entry 或 PBMT 兑现；对照启动日志 K3 PMA 行归因）");

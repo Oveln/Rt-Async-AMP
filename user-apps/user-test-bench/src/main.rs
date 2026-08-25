@@ -53,13 +53,11 @@
 //! dseen_ns,isr,drain,sched,seen）。
 //! 环境变量 `BENCH_CSV=/tmp/x.csv` 时另存纯 CSV 文件。
 //!
-//! ## 缓存维护形态（唯一 = user-cbo）
+//! ## 缓存维护形态（无）
 //!
-//! U 态 Zicbom 按行维护（槽 4 行 + 索引 1 行），NOTIFY/AWAIT 带
-//! ARG_USER_CBO 跳过内核整窗 clean+invalidate 同步点（0x19000=1600 行/次）。
-//! 前提：内核已置 senvcfg（somehal enable_user_cbo，随 zicbom feature 编译）。
-//! 2026-08-21 起为唯一形态（用户决策：普通整窗 ioctl 变体已删，A/B 对照
-//! 实验结束并胜出）。
+//! 共享窗经 PMA 物理非缓存（opensbi-k3 feat/pma-audio-io 固件翻转 entry，
+//! 2026-08-26 板测三判据闭环）：读写直达 SRAM，本程序与内核均不做任何
+//! CBO 缓存维护（原 user-cbo 按行维护与内核整窗同步点已全部撤除）。
 //! A4 丢发布（X100 cbo.flush 偶发静默丢失在途 store，同核不可检测）按
 //! 设计决策（08-23）**不设运行时恢复**：发送路径保持单遍发布，IPI 等待
 //! 挂死由既有心跳超时（SIGALRM 10s，退出码 2）给出诊断退出。该问题
@@ -216,8 +214,7 @@ fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Resu
 struct RtShm {
     fd: libc::c_int,
     ptr: *mut std::ffi::c_void,
-    /// 本轮 syscall 计数（notify/flush/await 各 +1，诊断路径不计）。
-    /// user-cbo 路径的优化效果直接体现为该值下降（D2 轮 = 1）。
+    /// 本轮 syscall 计数（notify/await 各 +1，诊断路径不计）。
     sysc: std::cell::Cell<u32>,
 }
 
@@ -251,17 +248,9 @@ impl RtShm {
         self.ptr as usize
     }
 
-    /// NOTIFY 门铃。带 ARG_USER_CBO（内核跳过门铃前整窗 flush——写已按行
-    /// 发布）；诊断/轮询等需要整窗刷新语义的调用方用 [`Self::notify_full`]。
+    /// NOTIFY 门铃（纯门铃，无缓存维护语义——窗口 PMA 物理非缓存）。
     fn notify(&self) -> io::Result<()> {
-        let arg = rtshm_abi::ARG_USER_CBO as libc::c_ulong;
         self.sysc.set(self.sysc.get() + 1);
-        do_ioctl(self.fd, rtshm_abi::IOC_NOTIFY as libc::c_ulong, arg).map(|_| ())
-    }
-
-    /// NOTIFY 且保持内核整窗 flush（arg=0）：启动期 is_valid 轮询靠它刷新
-    /// 用户态视图，空唤醒现场取证也靠它对照"强刷后视图"。
-    fn notify_full(&self) -> io::Result<()> {
         do_ioctl(self.fd, rtshm_abi::IOC_NOTIFY as libc::c_ulong, 0).map(|_| ())
     }
 
@@ -270,9 +259,8 @@ impl RtShm {
     }
 
     fn await_ipi(&self) -> io::Result<()> {
-        let arg = rtshm_abi::ARG_USER_CBO as libc::c_ulong;
         self.sysc.set(self.sysc.get() + 1);
-        do_ioctl(self.fd, rtshm_abi::IOC_AWAIT as libc::c_ulong, arg).map(|_| ())
+        do_ioctl(self.fd, rtshm_abi::IOC_AWAIT as libc::c_ulong, 0).map(|_| ())
     }
 
     /// 诊断：hexdump ch0/ch1 通道头 0x20 字节（magic "VO"=0x4F56 LE、
@@ -442,7 +430,7 @@ struct RoundOut {
     t_send_end: u64,
     /// AWAIT 返回并取到 rid 匹配响应
     t1: u64,
-    /// 本轮 syscall 数（notify/flush/await；user-cbo 路径 D2 轮 = 1）
+    /// 本轮 syscall 数（notify/await）
     sysc: u32,
     /// dd 探针：内核门铃 MMIO 写前一瞬的戳（NOTIFY 内部落定，t_send_end
     /// 后读出，不污染 send 段）。probe_kts=false 时为 0。
@@ -459,8 +447,7 @@ struct Sample {
     sent_ipi: bool,
     rtt_ns: u64,
     send_ns: u64,
-    /// 本轮 syscall 数（notify/flush/await；user-cbo 构建的优化直接体现
-    /// 为该值下降：D1 轮 2→1，D2 轮 2→1 且无整窗 CBO）
+    /// 本轮 syscall 数（notify/await）
     sysc: u32,
     /// RP 分段：t_drain − t_isr（ISR 内 mailbox MMIO 排空舞步，仅 D1 有意义）
     d_drain_ns: u64,
@@ -503,10 +490,10 @@ struct Bench {
     /// dd 场景开关：round_msg 在发送后/响应后各取一次内核双戳。
     /// 非 dd 场景保持 false（零额外 syscall）。
     probe_kts: bool,
-    /// H9 对照模式（env BENCH_SPIN_AWAIT=1，仅 user-cbo 构建）：响应等待
-    /// 跳过 AWAIT syscall，纯用户态轮询（零 syscall/零内核原子/零调度）。
-    /// drx/dserde 应声下跌 ⇒ AP 内核路径（syscall 原子 + AWAIT 整窗 cbo
-    /// 写流）与 RP 的 fence 在全局 Atomics Wrapper/互连上排队竞争。
+    /// H9 对照模式（env BENCH_SPIN_AWAIT=1）：响应等待跳过 AWAIT syscall，
+    /// 纯用户态轮询（零 syscall/零内核原子/零调度）。
+    /// drx/dserde 应声下跌 ⇒ AP 内核路径（syscall 原子 + 调度）与 RP 的
+    /// fence 在全局 Atomics Wrapper/互连上排队竞争。
     spin_await: bool,
 }
 
@@ -538,14 +525,12 @@ impl Bench {
         eprintln!("  对照手段：BENCH_NO_RT=1 跳过 CPU pin 复跑；抓 RP UART 与 dmesg");
     }
 
-    /// 发一条请求（写 CH0 → 写发布 → 按 BUSY 决定是否 NOTIFY），
-    /// 阻塞等待并返回 rid 匹配的响应。手写协议路径（非 ov-rpc 客户端），
-    /// 以捕获 sent_ipi 决策与各段耗时。
+    /// 发一条请求（写 CH0 → 按 BUSY 决定是否 NOTIFY），阻塞等待并返回
+    /// rid 匹配的响应。手写协议路径（非 ov-rpc 客户端），以捕获 sent_ipi
+    /// 决策与各段耗时。
     ///
-    /// 缓存维护（ov_rpc::cache 按行）：发送前刷新索引行（陈旧 read 索引
-    /// → 假 Full）、发送后发布槽位+索引行、读 BUSY 前刷新头行（陈旧
-    /// BUSY=1 → 误跳门铃丢失唤醒）。BUSY 读的是 SRAM 真值，单一判定
-    /// 即可，D2 命中轮零 syscall。
+    /// （原按行缓存维护已随 PMA 非缓存窗口撤除——BUSY 读的是 SRAM 真值，
+    /// 单一判定即可，D2 命中轮零 syscall。）
     fn round_msg(&mut self, msg: Message) -> Result<RoundOut, BenchErr> {
         HEARTBEAT.store(mono_ns(), Ordering::Relaxed);
         // 定速睡眠期间的 SIGALRM 已由 sleep_until 刷心跳杜绝，但残留的
@@ -561,14 +546,7 @@ impl Bench {
             self.verbose_left -= 1;
         }
 
-        // try_send 前刷新 ch0 索引行并记发送槽位（write 索引），供发送后
-        // 按行发布。重试循环中 Full 失败不推进 write，槽位不变。
-        let slot_sent = {
-            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-            ov_rpc::cache::refresh_before_send(ch0);
-            ov_rpc::cache::ring_indices(ch0).1
-        };
-
+        // （原发送前后按行缓存维护已随 PMA 非缓存窗口撤除——读写直达 SRAM。）
         // 背压：单请求在途 CH0 不应满；100ms 内重试失败按异常退出。
         loop {
             match tx.try_send(&msg) {
@@ -589,14 +567,11 @@ impl Bench {
         }
         vlog!(self, "sent rid={rid}");
 
-        // 发送决策 + 写发布（与 ov-rpc client::call_inner 同型的丢失唤醒
-        // 防护，叠加 AP 用户态 cacheable 映射的写发布义务）。
-        // 写发布按行完成（槽 4 行 + 索引 1 行，含 fence），随后刷新
-        // BUSY 行再读——真值单判：读得 1 则 RP 确在弹性自旋且其重查
-        // 闭环必见已发布请求；读得 0 则门铃唤醒。
-        let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-        ov_rpc::cache::publish_send(ch0, slot_sent);
-        ov_rpc::cache::refresh_busy(self.rt.shm_ptr());
+        // 发送决策（与 ov-rpc client::call_inner 同型的丢失唤醒防护）：
+        // fence 排序写与 BUSY 读——真值单判：读得 1 则 RP 确在弹性自旋且
+        // 其重查闭环必见请求；读得 0 则门铃唤醒。BUSY 读经非缓存窗口
+        // 恒新鲜。
+        std::sync::atomic::fence(Ordering::SeqCst);
         let sent_ipi = !shm.is_busy();
         if sent_ipi {
             self.rt.notify().map_err(BenchErr::Io)?;
@@ -636,17 +611,8 @@ impl Bench {
                 }
                 Err(e) => return Err(BenchErr::Io(e)),
             }
-            // AWAIT 返回后的读新鲜度：ioctl 路径内核已整窗 invalidate，
-            // 这里按行刷新（索引行 + 待读槽位——try_recv 的内部
-            // 读不自查新鲜度，陈旧槽位会解析出旧响应）。
-            {
-                let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
-                let (r, w) = ov_rpc::cache::refresh_before_recv(ch1);
-                let pending = w.wrapping_sub(r) % ov_channels::CHANNEL_CAPACITY;
-                for k in 0..pending {
-                    ov_rpc::cache::refresh_slot(ch1, (r + k) % ov_channels::CHANNEL_CAPACITY);
-                }
-            }
+            // （原 AWAIT 返回后的按行刷新与消费发布已撤除——非缓存窗口下
+            // try_recv 的内部读恒新鲜，read 推进直达 SRAM 对 RP 可见。）
             let mut found: Option<Message> = None;
             loop {
                 match rx.try_recv() {
@@ -670,12 +636,6 @@ impl Bench {
                     None => break, // 空唤醒：回外层重等
                 }
             }
-            // 消费发布：read 索引推进须对 RP 可见（其回包满判定读它），
-            // 按行发布（1 行）。
-            {
-                let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
-                ov_rpc::cache::publish_recv(ch1);
-            }
             if let Some(resp) = found {
                 let t1 = mono_ns();
                 // dd 探针：kirq 在唤醒本轮 AWAIT 的 IRQ handler 入口已落定，
@@ -698,9 +658,8 @@ impl Bench {
                 });
             }
             // spin_await 模式：无数据 = 正常轮询节拍（RP 尚未写完响应），
-            // 静默重试——不走 AWAIT 语义的空唤醒取证（其 notify_full 整窗
-            // flush ioctl 会污染 H9 对照条件，且取证 try_recv 会把消息
-            // 消费在 found 流程之外造成本轮永久丢失——warmup 首轮实锤）。
+            // 静默重试——取证 try_recv 会把消息消费在 found 流程之外造成
+            // 本轮永久丢失（warmup 首轮实锤）。
             if self.spin_await {
                 continue;
             }
@@ -711,20 +670,17 @@ impl Bench {
             );
             self.spurious_wake += 1;
             if self.spurious_wake <= 3 {
-                // 现场取证：通道头 hexdump（当前用户态视图）→ 经 notify 强制
-                // 内核 clean+invalidate → 再 dump（刷新后视图）→ 重试 try_recv。
-                // "强刷后索引变化/取到消息" = 用户态陈旧视图；"magic 非 4f56"
-                // = 通道头被破坏（try_recv 拒收、内核 has_pending 仍真）。
+                // 现场取证：通道头 hexdump + 重试 try_recv。窗口非缓存，
+                // 读恒 SRAM 真值；"magic 非 4f56" = 通道头被破坏（try_recv
+                // 拒收、内核 has_pending 仍真，两视图检查不对称）。
                 self.rt.dump_ch_headers("空唤醒现场");
-                let _ = self.rt.notify_full();
-                self.rt.dump_ch_headers("notify 强刷后");
                 match rx.try_recv() {
                     Some(m) => eprintln!(
-                        "  强刷后取到消息: ty={:?} rid={:?}",
+                        "  重试取到消息: ty={:?} rid={:?}",
                         m.ty(),
                         m.request_id()
                     ),
-                    None => eprintln!("  强刷后仍空"),
+                    None => eprintln!("  重试仍空"),
                 }
             }
         }
@@ -797,11 +753,6 @@ impl Bench {
             .expect("LITMUS request serialize failed");
         let shm = self.rt.shm();
         let tx = shm.sender(CH0).unwrap();
-        let slot_sent = {
-            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-            ov_rpc::cache::refresh_before_send(ch0);
-            ov_rpc::cache::ring_indices(ch0).1
-        };
         let t0 = mono_ns();
         loop {
             match tx.try_send(&msg) {
@@ -818,10 +769,6 @@ impl Bench {
                     std::process::exit(3);
                 }
             }
-        }
-        {
-            let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
-            ov_rpc::cache::publish_send(ch0, slot_sent);
         }
         self.rt.notify().map_err(BenchErr::Io)?;
         Ok(())
@@ -1147,18 +1094,16 @@ fn run_measured(b: &mut Bench, scen: &str, n: usize, interval_cfg: Option<u64>, 
 // lit 场景：跨核免 fence 顺序性实验（LITMUS，fence 豁免判定）
 // ============================================================================
 
-/// AP 侧写 LITMUS scratch 并立即按行发布（顺序受控：先写者先落 SRAM）。
+/// AP 侧写 LITMUS scratch 字（非缓存窗口，写直达 SRAM）。
 fn lit_wr64(b: &mut Bench, scr: usize, off: usize, v: u64) {
     HEARTBEAT.store(mono_ns(), Ordering::Relaxed);
-    let _ = &*b; // 按行发布，无需整窗 flush；保留参数形状一致
+    let _ = &*b; // 保留参数形状一致
     unsafe { ((scr + off) as *mut u64).write_volatile(v) };
-    ov_rpc::cache::publish(scr + off, 8);
 }
 
-/// AP 侧读 RP 写的 LITMUS scratch 字（先刷新行再读 SRAM 真值）。
+/// AP 侧读 RP 写的 LITMUS scratch 字（非缓存窗口直读 SRAM 真值）。
 fn lit_rd64(b: &mut Bench, scr: usize, off: usize) -> u64 {
     let _ = &*b; // 同上
-    ov_rpc::cache::refresh(scr + off, 8);
     unsafe { ((scr + off) as *const u64).read_volatile() }
 }
 
@@ -1425,7 +1370,7 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
         }
     };
     println!(
-        "  syscall/轮：D1={:.2} D2={:.2}（user-cbo 构建 D1/D2 均 1；ioctl 构建 2+）",
+        "  syscall/轮：D1={:.2} D2={:.2}（D2 命中轮 1，仅 AWAIT）",
         avg_sysc(TAG_D1),
         avg_sysc(2),
     );
@@ -1569,7 +1514,7 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
 ///   下一步加段内细分探针。
 /// 历史锚点（2026-08-17）：旧"256B 取读 ~105µs"假设已被 RD_BLK256_SHM
 /// 证伪（②c 别名窗后 ~0.4µs）；邮箱寄存器价 = 驱动 Acquire 而非 MMIO。
-    /// H8 新鲜写衰减扫描（user-cbo 构建）：两段式控制"AP 写入"与"RP 读取"
+    /// H8 新鲜写衰减扫描：两段式控制"AP 写入"与"RP 读取"
     /// 的间隔 D——① fire MEMBENCH(FRESH_WAIT_RECV)（RP 进入自旋收取）→
     /// ② 自旋延迟 D → ③ 写 dummy notification（不门铃，RP 在 op 内收取）
     /// → ④ 等 FRESH 响应。响应的 ns = RP 成功笔（读 AP 于 ~D 前写入的
@@ -1592,33 +1537,26 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
         let shm = b.rt.shm();
         let ch0 = unsafe { shm.channel_unchecked(CH0) } as *const _ as usize;
         let dummy = Message::notification(0xF00D);
-        // A4 检测计数（AP 缓存视角快照 r2/w2/r3/w3 为循环内局部量，判读
-        // 见函数文档）。
+        // A4/PMA 退化检测计数（AP 视角快照 r2/w2/r3/w3 为循环内局部量，
+        // 判读见函数文档）。
         let mut a4_detected = 0u32;
         for d_ns in [0u64, 30_000, 100_000, 300_000, 1_000_000, 3_000_000, 10_000_000, 50_000_000] {
             let rid = mono_ns();
-            // ① fire 请求（发布 + 门铃一发拉 RP 进 handler）
+            // ① fire 请求（门铃一发拉 RP 进 handler）
             let req = Message::request(rid, M_MEMBENCH | ov_rpc::NOTIFY_FLAG, &(29u32, 200u32))
                 .expect("FRESH req serialize");
-            cache::refresh_before_send(ch0);
-            let slot = cache::ring_indices(ch0).1;
             shm.sender(CH0).unwrap().try_send(&req).expect("FRESH req send");
-            cache::publish_send(ch0, slot);
             b.rt.notify().expect("notify");
             // ② 精确延迟（自旋，AP 无他事）
             let dl = mono_ns() + d_ns;
             while mono_ns() < dl {
                 std::hint::spin_loop();
             }
-            // ③ dummy（不门铃——RP 在 op 内自旋收取）。此发布即历史
-            // 丢发布点（D=100µs 曾三连丢）；无恢复机制，丢失如实上报。
+            // ③ dummy（不门铃——RP 在 op 内自旋收取）。
             let (r2, w2) = cache::ring_indices(ch0);
-            let slot2 = w2;
             shm.sender(CH0).unwrap().try_send(&dummy).expect("dummy send");
-            cache::publish_send(ch0, slot2);
             let (r3, w3) = cache::ring_indices(ch0);
             // ④ 等响应（超时兜底由 op 的 arg=200ms 承担；此处 2s 硬超时）
-            let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
             let rx1 = shm.receiver(CH1).unwrap();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             let mut got_ns: Option<(u64, u64)> = None;
@@ -1628,10 +1566,6 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                     break;
                 }
                 let _ = b.rt.await_ipi();
-                let (r, w) = cache::refresh_before_recv(ch1);
-                for k in 0..(w.wrapping_sub(r) % ov_channels::CHANNEL_CAPACITY) {
-                    cache::refresh_slot(ch1, (r + k) % ov_channels::CHANNEL_CAPACITY);
-                }
                 while let Some(m) = rx1.try_recv() {
                     if m.request_id() == Some(rid) {
                         // as_response = (rid, (ns, got))——上一版把 rid 当
@@ -1641,7 +1575,6 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                         got_ns = Some(v);
                     }
                 }
-                cache::publish_recv(ch1);
             }
             match got_ns {
                 Some((ns, got)) if ns > 0 => println!(
@@ -1661,28 +1594,25 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
                     if a4 {
                         a4_detected += 1;
                     }
-                    cache::refresh_before_send(ch0);
                     let (r4, w4) = cache::ring_indices(ch0);
                     println!(
-                        "  D={:>8.1}µs → RP 超时：{}。AP 缓存视角 ({r2},{w2})→({r3},{w3})（w 已发布），RP 200ms 视角 r={r}/w={w}，失效回读 r={r4}/w={w4}",
+                        "  D={:>8.1}µs → RP 超时：{}。AP 视角 ({r2},{w2})→({r3},{w3})，RP 200ms 视角 r={r}/w={w}，重读 r={r4}/w={w4}",
                         d_ns as f64 / 1e3,
-                        if a4 { "A4 确认——发布未达 RP" } else { "非 A4——RP 已见 w 推进，另查" },
+                        if a4 { "发布未达 RP——A4 复发或 PMA 退化" } else { "RP 已见 w 推进，另查" },
                     );
                 }
-                // 2s 硬超时（连 RP 的超时响应都未达）：①/③ 的发布之一
-                // 疑似丢失。无 RP 视角可交叉，以失效回读代行——SRAM w
-                // 落后缓存 w ⇒ 至少一笔发布未落地。
+                // 2s 硬超时（连 RP 的超时响应都未达）：发布或响应链疑似
+                // 异常，以重读代行交叉。
                 None => {
-                    cache::refresh_before_send(ch0);
                     let (r4, w4) = cache::ring_indices(ch0);
                     let a4 = w4 < w3;
                     if a4 {
                         a4_detected += 1;
                     }
                     println!(
-                        "  D={:>8.1}µs → 2s 硬超时（RP 超时响应也未达）：{}。AP 缓存视角 ({r2},{w2})→({r3},{w3})，失效回读 r={r4}/w={w4}",
+                        "  D={:>8.1}µs → 2s 硬超时（RP 超时响应也未达）：{}。AP 视角 ({r2},{w2})→({r3},{w3})，重读 r={r4}/w={w4}",
                         d_ns as f64 / 1e3,
-                        if a4 { "A4 特征——SRAM w 落后已发布值" } else { "发布已落地，响应链另查" },
+                        if a4 { "A4 特征——发布未落地（PMA 退化时复现）" } else { "发布已落地，响应链另查" },
                     );
                 }
             }
@@ -2401,7 +2331,6 @@ fn main() {
     let shm = rt.shm();
     let timeout = std::time::Duration::from_secs(5);
     let start = std::time::Instant::now();
-    let mut ticks: u32 = 0;
     while !shm.is_valid() {
         if start.elapsed() > timeout {
             panic!(
@@ -2411,15 +2340,8 @@ fn main() {
                  (3) /dev/rt_shm 未 probe（dmesg）"
             );
         }
-        // 用户态映射实际 cacheable（X100 PBMT 不生效）：裸轮询会一直命中
-        // 陈旧行。每 100ms 经一次 NOTIFY ioctl 强制内核 clean+invalidate
-        // 全窗刷新视图；门铃本身无害（RP 至多空醒一轮弹性自旋）。
-        // 注意用 notify_full（arg=0）：user-cbo 构建的 notify 跳过整窗
-        // flush，无法承担这里的视图刷新职责。
-        if ticks % 10 == 0 {
-            let _ = rt.notify_full();
-        }
-        ticks += 1;
+        // （原"每 100ms 经 NOTIFY 整窗强刷视图"已撤——窗口 PMA 物理非缓存，
+        // 裸轮询即 SRAM 真值，无需任何刷新。）
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     println!("[setup] shm valid");
@@ -2435,12 +2357,7 @@ fn main() {
         if stale > 0 {
             println!("[setup] 清理上轮残留消息 {stale} 条");
         }
-        // 消费发布：read 索引推进对 RP 可见（其回包满判定读它）。
-        // mmap 时内核已整窗作废，读取无需再刷新；只有写需要发布。
-        {
-            let ch1 = unsafe { shm.channel_unchecked(CH1) } as *const _ as usize;
-            ov_rpc::cache::publish_recv(ch1);
-        }
+        // （原消费发布已撤——非缓存窗口 read 推进直达 SRAM。）
     }
 
     if std::env::var("BENCH_NO_RT").is_ok() {
