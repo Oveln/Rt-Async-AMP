@@ -28,7 +28,8 @@
 //!   cbo.inval——本系统"非缓存访问 SRAM"的代价下界锚点。
 //!
 //! 运行：板上 wget 本 bin 后直接运行；每上电至少跑 3 遍（进程重启即重新
-//! mmap，内核整窗作废，状态干净）。
+//! mmap，内核整窗作废，状态干净）。现亦用作 PMA 固件（opensbi-k3
+//! feat/pma-audio-io）的验收/回归检测：非缓存生效与否即固件配置是否在岗。
 
 use std::ffi::c_void;
 use std::hint::black_box;
@@ -269,9 +270,9 @@ fn main() {
         ns_c / ns_a
     );
     if write_direct && read_nc {
-        println!("[pbmt] 结论: 用户态 PBMT=NC 兑现——推翻 08-16 内核探针结论，非缓存方案零固件改动成立");
+        println!("[pbmt] 结论: 用户态映射非缓存生效（机制 = PMA 固件翻转 entry 或 PBMT 兑现；对照启动日志 K3 PMA 行归因）");
     } else if !write_direct && read_frozen {
-        println!("[pbmt] 结论: 用户态映射读写走缓存——X100 忽略 PBMT 在用户态路径实锤（与 08-16 内核探针一致）");
+        println!("[pbmt] 结论: 用户态映射读写走缓存——PBMT 与 PMA 均未生效（固件未带 PMA 补丁，或硅忽略；对照启动日志有无 K3 PMA 行）");
     } else {
         println!("[pbmt] 结论: 部分兑现/混合，按上方原始数据人工判读（阶段A/A'/C/D 各自独立成立）");
     }
