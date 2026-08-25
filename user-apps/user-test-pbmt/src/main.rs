@@ -62,14 +62,18 @@ fn line_inval(addr: usize) {
     }
 }
 
+/// 读 scratch 单元（`off` 相对 SCRATCH_OFF）。**必须**经此助手访问单元——
+/// 首版曾在调用点漏加 SCRATCH_OFF，误读写 ch0 槽区（窗口 0x600 一带），
+/// 全部观测归零报废。
 #[inline]
-fn rd64(base: *mut c_void, off: usize) -> u64 {
-    unsafe { ((base as usize + off) as *const u64).read_volatile() }
+fn rd_cell(shm: *mut c_void, off: usize) -> u64 {
+    unsafe { ((shm as usize + SCRATCH_OFF + off) as *const u64).read_volatile() }
 }
 
+/// 写 scratch 单元（`off` 相对 SCRATCH_OFF）。
 #[inline]
-fn wr64(base: *mut c_void, off: usize, v: u64) {
-    unsafe { ((base as usize + off) as *mut u64).write_volatile(v) }
+fn wr_cell(shm: *mut c_void, off: usize, v: u64) {
+    unsafe { ((shm as usize + SCRATCH_OFF + off) as *mut u64).write_volatile(v) }
 }
 
 /// N 次同址 volatile 读，3 轮取最小，返回 ns/读。`inval` = 每读先作废该行
@@ -143,10 +147,10 @@ fn main() {
     let nonce = unsafe { libc::getpid() } as u64;
     let req_val = REQ_PREFIX | nonce;
     let ta = Instant::now();
-    wr64(shm, FLAG_OFF, req_val);
+    wr_cell(shm, FLAG_OFF, req_val);
     std::thread::sleep(Duration::from_secs(1));
-    let ack_magic = rd64(shm, ACK_OFF);
-    let ack_echo = rd64(shm, ACK_OFF + 8);
+    let ack_magic = rd_cell(shm, ACK_OFF);
+    let ack_echo = rd_cell(shm, ACK_OFF + 8);
     let write_direct = ack_magic == ACK_MAGIC && ack_echo == req_val;
     println!(
         "[pbmt] 阶段A 写路径: nonce={:#x} ack={:#x} echo={:#x} ({}ms) → {}",
@@ -167,8 +171,8 @@ fn main() {
     std::thread::sleep(Duration::from_secs(3));
     #[cfg(target_arch = "riscv64")]
     line_inval(shm as usize + SCRATCH_OFF + ACK_OFF);
-    let ack2_magic = rd64(shm, ACK_OFF);
-    let ack2_echo = rd64(shm, ACK_OFF + 8);
+    let ack2_magic = rd_cell(shm, ACK_OFF);
+    let ack2_echo = rd_cell(shm, ACK_OFF + 8);
     println!(
         "[pbmt] 阶段A' 迟到回执: ack={:#x} echo={:#x} → {}",
         ack2_magic,
@@ -185,8 +189,8 @@ fn main() {
     );
 
     // ── 阶段B：RP 活性锚点 ──────────────────────────────────────────
-    let seq0 = rd64(shm, CNT_OFF);
-    let ts0 = rd64(shm, CNT_OFF + 8);
+    let seq0 = rd_cell(shm, CNT_OFF);
+    let ts0 = rd_cell(shm, CNT_OFF + 8);
     println!("[pbmt] 阶段B RP活性: seq0={} ts0={}", seq0, ts0);
     if seq0 == 0 {
         println!("[pbmt] ⚠ 计数器为 0——pbmt_probe 固件未运行或未过门控，实验无效");
@@ -201,7 +205,7 @@ fn main() {
     let mut plateau_since = tc;
     while tc.elapsed() < Duration::from_secs(3) {
         std::thread::sleep(Duration::from_millis(1));
-        let s = rd64(shm, CNT_OFF);
+        let s = rd_cell(shm, CNT_OFF);
         if s != last {
             changes += 1;
             max_plateau_ms = max_plateau_ms.max(plateau_since.elapsed().as_millis());
