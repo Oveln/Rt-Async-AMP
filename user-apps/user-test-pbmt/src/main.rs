@@ -20,9 +20,9 @@
 //! - 阶段C 读新鲜度：3s 内每 1ms 裸读 cnt.seq。非缓存读每次直达 SRAM，
 //!   seq 平滑前进（RP 以 ~100µs 步长推进）；缓存读（PMA 退化时）行驻留
 //!   L1/L2、陈旧行对全 hart 一致（线程迁移救不了），首读后冻结。
-//! - 阶段D 时延佐证：同址重读两回路 ns/读（3 轮取最小）——(a) DDR 匿名
-//!   页校准循环自身开销（L1 命中量级）；(b) 窗口行读。b/a ≈ 1× 即缓存
-//!   命中（PMA 未生效），数十倍即非缓存直达。
+//! - 阶段D 时延佐证：读两回路（DDR 对照/窗口）+ 写三回路（DDR 对照/
+//!   窗口同址/窗口跨行流写——消息拷贝的真实形态）。窗口读 b/a ≈ 1× 即
+//!   缓存命中（PMA 未生效），数十倍即非缓存直达。
 //!
 //! 运行：板上 wget 本 bin 后直接运行；每上电至少跑 3 遍（进程重启即重新
 //! mmap，状态干净）。现用作 PMA 固件（opensbi-k3 feat/pma-audio-io）的
@@ -54,6 +54,29 @@ fn rd_cell(shm: *mut c_void, off: usize) -> u64 {
 #[inline]
 fn wr_cell(shm: *mut c_void, off: usize, v: u64) {
     unsafe { ((shm as usize + SCRATCH_OFF + off) as *mut u64).write_volatile(v) }
+}
+
+/// N 次写，3 轮取最小，返回 ns/写。`stride`=0 同址（存储缓冲流水上限）；
+/// >0 则在 (i%8)*stride 共 8 行上轮转——顺序流写形态（消息拷贝的真实
+/// 写法；尾区 0x18E00..0x19000 恰容纳 8 行）。递增值防合并优化。
+fn wr_loop(addr: usize, n: u64, stride: usize) -> f64 {
+    let mut best = f64::INFINITY;
+    for _ in 0..3 {
+        let mut v: u64 = 0;
+        let t = Instant::now();
+        for i in 0..n {
+            v = v.wrapping_add(1);
+            let a = if stride == 0 {
+                addr
+            } else {
+                addr + (i as usize % 8) * stride
+            };
+            unsafe { (a as *mut u64).write_volatile(v) };
+        }
+        black_box(v);
+        best = best.min(t.elapsed().as_nanos() as f64 / n as f64);
+    }
+    best
 }
 
 /// N 次同址 volatile 读，3 轮取最小，返回 ns/读。异或累积 + black_box
@@ -223,9 +246,14 @@ fn main() {
     let lat_addr = shm as usize + SCRATCH_OFF + LAT_OFF;
     let ns_a = lat_loop(ddr as usize, 1_000_000);
     let ns_b = lat_loop(lat_addr, 1_000_000);
+    // 写代价：非缓存写无行事务概念，每笔字写独立往返——同址（存储缓冲
+    // 流水上限）与跨行流写（消息拷贝的真实形态）分开量；DDR 写为对照。
+    let ns_wa = wr_loop(ddr as usize, 1_000_000, 0);
+    let ns_wb = wr_loop(lat_addr, 100_000, 0);
+    let ns_wc = wr_loop(lat_addr, 100_000, 64);
     println!(
-        "[pbmt] 阶段D 时延(ns/读,3轮最小): DDR对照 a={:.2} 窗口读 b={:.2}",
-        ns_a, ns_b
+        "[pbmt] 阶段D 时延(ns/次,3轮最小): 读 DDR a={:.2} 窗口 b={:.2} | 写 DDR c={:.2} 窗口同址 d={:.2} 窗口跨行 e={:.2}",
+        ns_a, ns_b, ns_wa, ns_wb, ns_wc
     );
 
     // ── 汇总判定 ────────────────────────────────────────────────────
