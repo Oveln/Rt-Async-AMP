@@ -18,3 +18,14 @@
 	# 后续 K3 跨核 SPSC 优化；主仓经根 Cargo.toml [patch.crates-io] 以
 	# path 引用（子仓路径同时是 patch 源与 workspace member）。
 	branch = feat/rt-async-amp
+[submodule "opensbi-k3"]
+	path = opensbi-k3
+	url = https://github.com/spacemit-com/opensbi.git
+	# K3 板上固件源 = 官方仓 tag k3-br-v1.0.0（yocto 配方 opensbi-k3_1.4.bb
+	# 同款钉点）。开发分支 feat/pma-audio-io 基于该 tag：k3_defconfig 开
+	# CONFIG_ENABLE_LOGGING（banner）+ fw_base.S audio buffer PMA 改 IO
+	# （AMP 共享窗物理非缓存，X100 硅忽略 Svpbmt 故 PMA 是唯一途径）。
+	# 注意：分支目前仅存在于本机（spacemit 官方仓不可 push）——gitlink
+	# commit 885d9574 无法从官方仓 fetch；推到自己 fork 后应把 url 改指
+	# fork（同 tgoskits 模式）。
+	branch = feat/pma-audio-io
