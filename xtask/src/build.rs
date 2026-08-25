@@ -121,6 +121,19 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         artifact: Artifact::Elf,
         features: &["bench"],
     },
+    // PBMT 用户态兑现性实验的 RP 侧伴随固件（与 user-test-pbmt 配对，
+    // 不跑 intercom 协议，无需 probe feature）。
+    RtAsyncBin {
+        name: "pbmt_probe",
+        target_name: "k3-pbmt-probe",
+        platform: "k3",
+        out: "rt-async-k3-pbmt-probe.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: K3_CS_TARGET,
+        artifact: Artifact::Elf,
+        features: &[],
+    },
 ];
 
 /// K3 专属 target 标记（RtAsyncBin.target 用）：解析为仓库内
@@ -421,6 +434,11 @@ pub fn user_test_sched(root: &Path, _cfg: &Config) {
 /// default；2026-08-21 起普通整窗 ioctl 变体已删）。
 pub fn user_test_bench(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-bench", "user-test-bench", &[]);
+}
+
+/// PBMT 用户态兑现性实验的 AP 侧（与 RP 固件 pbmt_probe 配对）。
+pub fn user_test_pbmt(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/user-test-pbmt", "user-test-pbmt", &[]);
 }
 
 fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {

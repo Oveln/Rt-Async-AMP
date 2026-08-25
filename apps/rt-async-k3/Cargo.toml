@@ -61,6 +61,11 @@ name = "shm_ping"
 name = "rtbench"
 required-features = ["bench"]
 
+# PBMT 用户态兑现性实验的 RP 侧伴随固件（无需 probe/bench feature——
+# 不跑 intercom 协议，只碰 ov-shm scratch）。
+[[bin]]
+name = "pbmt_probe"
+
 [profile.dev]
 panic = "abort"
 

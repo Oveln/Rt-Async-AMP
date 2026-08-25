@@ -13,6 +13,7 @@ members = [
     "user-apps/user-test-rpc",
     "user-apps/user-test-sched",
     "user-apps/user-test-bench",
+    "user-apps/user-test-pbmt",
     "xtask",
 ]
 resolver = "3"

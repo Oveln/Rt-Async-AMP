@@ -1162,6 +1162,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "user-test-pbmt"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rtshm-abi",
+]
+
+[[package]]
 name = "user-test-rpc"
 version = "0.1.0"
 dependencies = [

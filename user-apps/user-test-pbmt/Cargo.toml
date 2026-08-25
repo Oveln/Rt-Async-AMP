@@ -1,0 +1,11 @@
+[package]
+name = "user-test-pbmt"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# 仅取 K3_SHM_SIZE（mmap 长度，真源设备树）；不引 ov-channels/ov-rpc——
+# 本实验不碰协议区，cbo 单行作废就地内联（见 main.rs line_inval）。
+rtshm-abi = { path = "../rtshm-abi" }
+libc = "0.2"
