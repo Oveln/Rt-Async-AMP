@@ -7,17 +7,8 @@ publish = false
 [dependencies]
 rtshm-abi = { path = "../rtshm-abi" }
 ov-channels = { workspace = true, features = ["std", "flags"] }
-# 仅用 NOTIFY_FLAG 等协议常量（method_id 标志位约定，单一真相源）；
-# cache 模块按行维护共享窗缓存（user-cbo 默认启用）
+# 仅用 NOTIFY_FLAG 等协议常量（method_id 标志位约定，单一真相源）
 ov-rpc = { path = "../../modules/ov-rpc" }
 serde = { workspace = true }
 postcard = { workspace = true }
 libc = "0.2"
-
-[features]
-# U 态 Zicbom 按行缓存维护（发送/接收零整窗 flush，D2 路径零 syscall）。
-# 2026-08-21 起为唯一形态（用户决策：本项目只用 cbo，普通整窗 ioctl 变体
-# 已删——A/B 对照实验结束并胜出，实测见 README 表）。仅 K3：需内核
-# senvcfg 放行（somehal enable_user_cbo，随 zicbom feature 编译）。
-default = ["user-cbo"]
-user-cbo = ["ov-rpc/user-cbo"]

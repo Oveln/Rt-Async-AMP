@@ -103,9 +103,9 @@ fn main() {
                 timeout
             );
         }
-        // 用户态映射实际 cacheable（X100 PBMT 不生效）：RP 后到的 init /
-        // 自愈对裸轮询不可见，每 100ms 经 NOTIFY ioctl 的内核 CBO 同步点
-        // 刷新缓存视图（门铃无害，RP 至多空醒一轮）。
+        // （原"每 100ms 经 NOTIFY 内核 CBO 同步点刷新视图"已随 PMA 非缓存
+        // 窗口撤除——裸轮询即 SRAM 真值；这里保留门铃节奏仅为让 RP 至多
+        // 空醒一轮的自愈路径，无缓存语义。）
         if ticks % 10 == 0 {
             let _ = rt.notify();
         }
