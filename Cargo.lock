@@ -746,6 +746,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "robot-ctl"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ov-channels",
+ "ov-rpc",
+ "portable-atomic",
+ "postcard",
+ "rtshm-abi",
+ "serde",
+]
+
+[[package]]
 name = "rstest"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
