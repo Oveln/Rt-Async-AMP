@@ -54,6 +54,11 @@ use ov_rpc::{define_service, HandledKind, ProcessResult, RpcServer};
 define_service! {
     /// rt-async 侧的 RPC 服务。MEMBENCH/LITMUS 为延迟归因工作测量探针，
     /// 经 `probe` feature 门控（见 Cargo.toml 注释）——正常开发不编译。
+    ///
+    /// 7-17 为机器人控制（AKA-00 底盘 + 机械臂，协议实现在 [`crate::robot`]）：
+    /// - 7-9 raw UART 诊断（bring-up / 排针回环实验用）
+    /// - 10-13 底盘语义（SET_SPEED/STOP 单向 / GET 同步快照 / INIT 异步完成）
+    /// - 14-17 机械臂语义（SET_ANGLE/TORQUE 单向 / GRAB/RELEASE 异步完成）
     RtAsyncRpc {
         ECHO:  0 => call echo(val: u32) -> u32;
         ADD:   1 => call add(a: i32, b: i32) -> i32;
@@ -64,6 +69,20 @@ define_service! {
         MEMBENCH: 5 => call membench(op: u32, arg: u32) -> (u64, u64);
         #[cfg(feature = "probe")]
         LITMUS: 6 => send litmus(op: u32, arg: u32);
+        // ── 机器人：UART raw 诊断（bring-up 期专用，勿与协议任务并发）──
+        UART_WRITE:  7 => call uart_write(port: u8, len: u8, data: [u8; 32]) -> u32;
+        UART_READ:   8 => call uart_read(port: u8, max: u8) -> (u32, [u8; 32]);
+        UART_STATUS: 9 => call uart_status(nonce: u32) -> (u32, u32, u32, u32, u32);
+        // ── 机器人：底盘（tt_pid / ESP32-C3 PID 电机控制器）──
+        CHASSIS_SET_SPEED: 10 => send chassis_set_speed(left: i16, right: i16);
+        CHASSIS_STOP:     11 => send chassis_stop(brake: u8);
+        CHASSIS_GET:      12 => call chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64);
+        CHASSIS_INIT:     13 => acall chassis_init(ppr: u16, pwm_freq: u16);
+        // ── 机器人：机械臂（zp10s 众灵舵机控制器，纯写 ASCII）──
+        ARM_SET_ANGLE: 14 => send arm_set_angle(servo: u8, angle: u16);
+        ARM_TORQUE:    15 => send arm_torque(release: u8);
+        ARM_GRAB:      16 => acall arm_grab(nonce: u32);
+        ARM_RELEASE:   17 => acall arm_release(nonce: u32);
     }
 }
 
@@ -131,6 +150,83 @@ impl RtAsyncRpc {
     #[cfg(feature = "probe")]
     fn litmus(op: u32, arg: u32) {
         run_litmus(op, arg)
+    }
+
+    // ── 机器人：UART raw 诊断（实现在 [`crate::robot`] 的协议任务之外，
+    //    直接访问 pxa_uart 端口；bring-up 期与协议任务无并发约定）─────────
+
+    /// 原始写（无 \\n 翻译）。返回写入字节数；端口未 probe 返回 u32::MAX。
+    fn uart_write(port: u8, len: u8, data: [u8; 32]) -> u32 {
+        match chip_k3_rt24::pxa_uart::port(port as usize) {
+            Some(u) => {
+                let n = (len as usize).min(32);
+                u.write_raw(&data[..n]);
+                n as u32
+            }
+            None => u32::MAX,
+        }
+    }
+
+    /// 原始读：非阻塞取走 RX FIFO 当前全部字节（最多 max，封顶 32）。
+    /// 返回 (实际字节数, 数据)；端口未 probe 返回 (u32::MAX, _)。
+    /// （32 上限来自 serde 稳定版对 `[u8; N]` 仅实现 N≤32。）
+    fn uart_read(port: u8, max: u8) -> (u32, [u8; 32]) {
+        let mut buf = [0u8; 32];
+        let Some(u) = chip_k3_rt24::pxa_uart::port(port as usize) else {
+            return (u32::MAX, buf);
+        };
+        let lim = (max as usize).min(32);
+        let mut n = 0usize;
+        while n < lim {
+            match u.read_raw() {
+                Some(b) => {
+                    buf[n] = b;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        (n as u32, buf)
+    }
+
+    /// 系统状态：(nonce, 端口 probe 掩码 bit0..2=slot0..2, 底盘已初始化,
+    /// 底盘遥测失败计数, 臂命令队列丢弃数)。
+    fn uart_status(nonce: u32) -> (u32, u32, u32, u32, u32) {
+        let mut mask = 0u32;
+        for i in 0..chip_k3_rt24::pxa_uart::PORT_COUNT {
+            if chip_k3_rt24::pxa_uart::port(i).is_some() {
+                mask |= 1 << i;
+            }
+        }
+        let (_, inited, _, _, _, _, err, _) = crate::robot::chassis_get(0);
+        (nonce, mask, inited, err, crate::robot::arm_dropped())
+    }
+
+    // ── 机器人：语义转发（协议/任务在 [`crate::robot`]）──────────────────
+
+    fn chassis_set_speed(left: i16, right: i16) {
+        crate::robot::chassis_set_speed(left, right);
+    }
+    fn chassis_stop(brake: u8) {
+        crate::robot::chassis_stop(brake);
+    }
+    fn chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64) {
+        crate::robot::chassis_get(nonce)
+    }
+    fn chassis_init(rid: u64, ppr: u16, pwm_freq: u16) {
+        crate::robot::chassis_init(rid, ppr, pwm_freq);
+    }
+    fn arm_set_angle(servo: u8, angle: u16) {
+        crate::robot::arm_set_angle(servo, angle);
+    }
+    fn arm_torque(release: u8) {
+        crate::robot::arm_torque(release);
+    }
+    fn arm_grab(rid: u64, nonce: u32) {
+        crate::robot::arm_grab(rid, nonce);
+    }
+    fn arm_release(rid: u64, nonce: u32) {
+        crate::robot::arm_release(rid, nonce);
     }
 }
 

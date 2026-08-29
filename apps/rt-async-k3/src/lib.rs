@@ -14,4 +14,5 @@
 pub use chip_k3_rt24 as _;
 
 pub mod intercom;
+pub mod robot;
 pub mod watchdog;

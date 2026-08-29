@@ -66,6 +66,10 @@ required-features = ["bench"]
 [[bin]]
 name = "pbmt_probe"
 
+# 机器人控制固件（AKA-00 底盘 + 机械臂）：intercom 服务 + robot 协议任务。
+[[bin]]
+name = "robot_ctrl"
+
 [profile.dev]
 panic = "abort"
 

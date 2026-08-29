@@ -138,6 +138,42 @@ macro_rules! __dispatch {
         Ok(ov_channels::Message::response(rid, &result).ok())
     }};
 
+    // ── acall (async request-response：handler 转交后台任务，稍后补响应) ──
+    //
+    // 与 call 的区别：handler 收到 rid 作为首参、返回 ()，宏返回 Ok(None)
+    //（服务端不发响应不发 IPI）——由后台任务完成处理后自行构造
+    // `Message::response(rid, result)` 经 CH1 + notify IPI 补发（异步完成
+    // 路径）。客户端按普通 call 声明同 id（等待语义不变，recv_for 按 rid
+    // 匹配稍后到达的响应）。
+
+    // 0 args
+    ($msg:ident, $name:ident :: $method:ident, acall, (), ()) => {{
+        let (rid, _, _): ($crate::RequestId, $crate::MethodId, ()) = $msg.as_request()
+            .ok_or($crate::DeserializeFailed)?;
+        $name::$method(rid);
+        Ok(None)
+    }};
+
+    // 1 arg
+    ($msg:ident, $name:ident :: $method:ident, acall, ($a:ty), ($an:ident)) => {{
+        let (rid, _, $an): ($crate::RequestId, $crate::MethodId, $a) = $msg.as_request()
+            .ok_or($crate::DeserializeFailed)?;
+        $name::$method(rid, $an);
+        Ok(None)
+    }};
+
+    // 2 args
+    (
+        $msg:ident, $name:ident :: $method:ident, acall,
+        ($a:ty, $b:ty),
+        ($an:ident, $bn:ident)
+    ) => {{
+        let (rid, _, ($an, $bn)): ($crate::RequestId, $crate::MethodId, ($a, $b)) =
+            $msg.as_request().ok_or($crate::DeserializeFailed)?;
+        $name::$method(rid, $an, $bn);
+        Ok(None)
+    }};
+
     // ── send / urgent (one-way, no response) ──
 
     // 0 args
