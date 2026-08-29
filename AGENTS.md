@@ -25,6 +25,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 │   └── rt-async-app/          ←   QEMU virt 固件
 ├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
 │   ├── user-test-{ipc,mbox,rpc,sched,bench,pbmt}/ ← AMP 测试程序（bench=延迟基准，pbmt=PMA 非缓存判窗）
+│   └── robot-ctl/             ←   机器人控制入口（CLI + serve JSON 行，配 robot.py；RP 侧 k3-robot-ctrl）
 │   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
@@ -65,6 +66,8 @@ cargo xtask run                     # 启动 QEMU 双核 AMP（默认 qemu-plic�
 cargo xtask build k3-com260         # K3 环境聚合：opensbi.itb + bins + esos.itb + starryos.uimg
 cargo xtask build k3-opensbi        # 单独构建 K3 OpenSBI（opensbi.itb = PMA 非缓存 + banner）
 cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
+cargo xtask build k3-robot-ctrl     # 机器人固件（AKA-00 底盘+臂协议，P1 任务 + acall 异步完成）
+cargo xtask build robot-ctl         # AP 用户态机器人控制（配 RP k3-robot-ctrl，见 README 机器人小节）
 ```
 
 > **K3 共享窗一致性 = PMA 非缓存（硬依赖）**：X100 硅忽略 Svpbmt PTE 位，

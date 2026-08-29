@@ -286,6 +286,83 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
   （或换硬件 spinlock）。
 
+#### 机器人控制（robot-ctl + k3-robot-ctrl）
+
+AP 用户态控制 AKA-00 小车（底盘 ESP32-C3 + ZP10S 机械臂）。**协议在 RP 侧**
+（`apps/rt-async-k3/src/robot.rs`：tt_pid 二进制帧 + zp10s ASCII，两个 P1
+协议任务），AP 侧只发语义 RPC——`robot-ctl`（CLI + serve JSON 行协议，
+`user-apps/robot-ctl/robot.py` 供 Python 经 Popen 管道调用，接口对齐
+AKA-00 的 `MotorPairProtocol`/`ServoProtocol`）。INIT/GRAB/RELEASE 经 ov-rpc
+`acall` 异步完成（handler 转交任务、完成后补响应，AP `recv_for` 无感闭环）。
+
+**接线（2026-08-27 载板原理图 `k3-com260_kit_v02` 定案；08-29 机械臂分离
+软串口，双通道）**：com260 40 针排针上唯一完整可用的 R.UART 是 **R_UART0 @
+GPIO_122/123 → pin29(TX)/pin32(RX)**（网络名 GPIO01/GPIO07 = MMC2_DAT3/DAT2，
+经 1.8V→3.3V 电平转换；与 M.2 WiFi SDIO 共网，不插 WiFi 卡即独占；**这就是
+RP console 所在引脚**）。底盘走 R_UART0；机械臂 ZP10S 走**软串口 TX**（
+`chip-k3-rt24::soft_uart`：R.GPIO[30] = GPIO_113 m2 → **pin40**（网络
+I2S0_SDOUT，经载板电平转换出 3.3V），位时序由 AON_TIMER1 counter1 比较中断
+逐位重建，115200-8N1，任务异步发送——帧内 mask mailbox 中断源，IPC 延迟
+毛刺 ≤1.39ms/指令）：
+
+```text
+40pin pin29 (TX) ──── ESP32-C3 RX（底盘，AA 55 二进制帧；console log 共线，
+                      ESP32 按 AA55 帧头重同步，ASCII 不构成帧头）
+40pin pin32 (RX) ──── ESP32-C3 TX（遥测应答，单向干净）
+40pin pin40      ──── ZP10S RX（机械臂软串口 TX，独立线，log 不可达）
+```
+
+⚠️ 排针上其它看似可用的信号**均不是 R.UART**：「UART1」（pin8/10/11/36）=
+SEC UART1 pad（安全域；但其 m2 = R.CAN3 TX/RX + R.GPIO[35]，作 CAN/GPIO
+可用）；「R-SPI0」组（pin13/18/20/22/37/39）= GPIO_62/63/61/60 的 m2 =
+**R.SSP0**（RT24 硬件 SPI，完整）；「SPI0_MISO/SCK」（pin21/23）= GPIO_105/
+106 m2 = **R.I2C1**（pin12/35 = R.PWM8/9，pin38/40 = R.GPIO[31]/[30]）。
+备选双串口（M.2 槽保持空、经插座脚引出，免焊 SODIMM）：**R.UART4**
+（TX=GPIO_80→PCIeA_WAKEn（多槽共线）、RX=GPIO_81→PCIeA_CLKREQn @M.2 A 槽；
+m2，GPIO4 bank 原生 3.3V 免转换）。R.UART2 证伪（GPIO_58 网络
+USB0_VBUS_DET 不在排针、GPIO_57→M.2 E-key BT_EN）；R.UART3 不可用
+（GPIO_89 模组未引出，GPIO_88 接 EFM8 电源 MCU SHUTDOWN_REQ，mux 会触关机
+时序）。
+
+**板验首验项（软串口）**：① PLIC 中断号 9 = int_src[9] `timer_2_irq` =
+AON_TIMER1 counter#1（手册 7.2 信号名 1 起始的映射假设，不响则按 8/10
+改 `soft_uart.rs` 的 `TIMER_IRQ` 常量）；② R_GPIO PLR/PDR/PSR/PCR = +0/+4/
++8/+0xC（手册 16.8，R.GPIO[30] 落 port0 无端口间距歧义）；③ pin40 波形
+（接 USB 串口 RX 验 `#001P1500T1000!` 字节完整后再生效 ZP10S）。
+
+```bash
+# RP 固件（换打包 bin）：
+cargo xtask build k3-robot-ctrl
+ELF_SRC=build/k3-com260/rt-async-k3-robot-ctrl.elf bash scripts/flash/k3-pack-itb.sh
+# AP 程序（wget 部署同上，robot.py 一并拉取）：
+cargo xtask build robot-ctl
+
+# 板上调试（单发 CLI）：
+/tmp/robot-ctl status                       # 端口 probe 掩码 / 底盘状态
+/tmp/robot-ctl uwrite 0 AA55...             # raw 写（回环实验：pin29↔pin32 短接）
+/tmp/robot-ctl uread 0                      # raw 读
+/tmp/robot-ctl init                         # 底盘 INIT+CONFIG（等 ACK）
+/tmp/robot-ctl drive 30 30 && sleep 2 && /tmp/robot-ctl brake
+/tmp/robot-ctl get                          # RPM / 编码器快照
+/tmp/robot-ctl arm 2 120                    # 单舵机
+/tmp/robot-ctl grab                         # 抓取全序列（~4.5s）
+
+# Python（serve 模式，接口对齐 AKA-00）：
+python3 - <<'PY'
+from robot import Robot
+r = Robot("/tmp/robot-ctl")
+r.init(); r.set_speed(30, 30)
+print(r.get_encoder()); r.brake()
+r.set_angle(2, 120); r.grab(); r.release()
+PY
+```
+
+RP 方法 id 表（`intercom.rs`）：7-9 raw UART 诊断 / 10-13 底盘
+（SET_SPEED、STOP、GET 快照、INIT acall）/ 14-17 机械臂（SET_ANGLE、
+TORQUE、GRAB/RELEASE acall）。`acall` 为 ov-rpc 宏新增 kind：服务端
+handler 收 rid 转交后台任务即返回，任务完成后 `Message::response(rid)`
+经 CH1+门铃补发。
+
 **缓存一致性（PMA 非缓存，2026-08-26 定案）**：共享窗经 OpenSBI 固件
 （`opensbi-k3` 子仓 `feat/pma-audio-io`，见上文刷写小节）把覆盖窗口的 PMA
 entry 翻为 IO，AP 侧内核与用户态的读写物理直达 SRAM——**无任何 CBO 缓存
