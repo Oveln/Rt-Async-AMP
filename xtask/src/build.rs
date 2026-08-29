@@ -517,6 +517,12 @@ pub fn robot_ctl(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/robot-ctl", "robot-ctl", &[]);
 }
 
+/// rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：ping/stat 延迟诊断、
+/// 机器人语义、probe 测量面；与 K3 固件 k3-robot-ctrl 配对最全）。
+pub fn rtsh(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/rtsh", "rtsh", &[]);
+}
+
 fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {
     let target = "riscv64gc-unknown-linux-musl";
     let mut args: Vec<String> = ["build", "--target", target, "--release"]

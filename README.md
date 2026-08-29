@@ -215,6 +215,32 @@ python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
 #   chmod +x /tmp/user-test-ipc && /tmp/user-test-ipc
 ```
 
+#### rt-async 交互式 shell（rtsh）
+
+把 `/dev/rt_shm` 当设备打开（open + mmap + ioctl 门铃）、在共享窗上经
+ov-rpc 与 RP 固件交互式对话的 REPL——`rtsh` 无参进入（空行重复上一条，
+quit/Ctrl-D 退出），`rtsh <cmd> [args..]` 单发即退。命令面：
+
+- **通用 RPC**：`echo` / `add` / `delay`、`ping [N]`（RTT 分位数 + D1-D4
+  发现路径分布，单次含 RP 侧 isr→sched / sched→seen 分段）、`stat`
+  插桩计数器表（bench `s0` 的交互版）；
+- **机器人语义**：同 robot-ctl 的全部 CLI op（status/init/drive/stop/
+  brake/get/arm/torque/grab/release/uwrite/uread）；
+- **probe 测量面**：`membench OP [ARG]`、`peek ADDR`（只读寄存器 1000
+  连读单价）、`litmus`——仅 probe 固件实现，普通固件上超时报错。
+
+配 K3 `k3-robot-ctrl` 固件时全部可用；QEMU `rt-async-app` 固件仅注册
+echo/add/delay，其余命令超时。
+
+```bash
+cargo xtask build rtsh        # 产物 build/rtsh（wget 部署同上）
+# 板上：
+/tmp/rtsh                     # REPL
+rtsh> ping 20                 # RTT min/avg/p50/p95/p99/max + 路径分布
+rtsh> stat                    # 插桩计数器 dump
+rtsh> peek 0xc088c04c         # 只读寄存器探测（probe 固件）
+```
+
 #### IPC 延迟基准（user-test-bench）
 
 路径分离的 IPC 延迟/正确性基准，与 RP 固件 intercom 内置插桩（`PING`/`STATS`
@@ -337,7 +363,7 @@ ELF_SRC=build/k3-com260/rt-async-k3-robot-ctrl.elf bash scripts/flash/k3-pack-it
 # AP 程序（wget 部署同上，robot.py 一并拉取）：
 cargo xtask build robot-ctl
 
-# 板上调试（单发 CLI）：
+# 板上调试（单发 CLI；交互式全命令面可用 /tmp/rtsh，见 user-apps 小节）：
 /tmp/robot-ctl status                       # 端口 probe 掩码 / 底盘状态
 /tmp/robot-ctl uwrite 0 AA55...             # raw 写（回环实验：pin29↔pin32 短接）
 /tmp/robot-ctl uread 0                      # raw 读

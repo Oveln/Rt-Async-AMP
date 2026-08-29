@@ -104,6 +104,7 @@ fn main() {
                     build::user_test_sched(&root, &cfg);
                     build::user_test_bench(&root, &cfg);
                     build::robot_ctl(&root, &cfg);
+                    build::rtsh(&root, &cfg);
                     eprintln!("Build complete. Run 'cargo xtask run' to start QEMU.");
                 }
                 "opensbi" => {
@@ -121,6 +122,7 @@ fn main() {
                 "user-test-bench" => build::user_test_bench(&root, &cfg),
                 "user-test-pbmt" => build::user_test_pbmt(&root, &cfg),
                 "robot-ctl" => build::robot_ctl(&root, &cfg),
+                "rtsh" => build::rtsh(&root, &cfg),
                 // K3 板上 OpenSBI（opensbi-k3 子仓，PMA IO + banner 补丁）→ opensbi.itb。
                 "k3-opensbi" => {
                     let k3_env = env_profile::default_for_platform(&envs, "k3");

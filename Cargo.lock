@@ -828,6 +828,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtsh"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "ov-channels",
+ "ov-rpc",
+ "portable-atomic",
+ "postcard",
+ "rtshm-abi",
+ "serde",
+]
+
+[[package]]
 name = "rtshm-abi"
 version = "0.1.0"
 
