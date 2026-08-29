@@ -35,6 +35,7 @@ pub mod pinctrl_k3;
 pub mod plic_k3;
 pub mod pxa_uart;
 pub mod reset_stub;
+pub mod soft_uart;
 pub mod timer_k3;
 
 use extern_trait::extern_trait;
@@ -62,6 +63,10 @@ static K3_DRIVERS: &[&dyn Driver] = &[
     &clint_k3::TIMER,
     &clint_k3::MSIP,
     &plic_k3::PLIC,
+    // 软串口 TX（机械臂 ZP10S 独立通道）：probe 配 R.GPIO 输出 + AON
+    // TIMER1 c1 + PLIC（priority=2）。排在 PLIC 后：DTS 中本节点位于
+    // intc@e0000000 之后（DFS 先序 → probe 时 intctl() 已就绪）。
+    &soft_uart::INSTANCE,
 ];
 
 #[extern_trait]

@@ -96,6 +96,23 @@
 	// R_UART0（PXA 派生）。时钟链（ruart_14 上游 gate + UART0 末端 gate）
 	// 由 CCU driver 经 clocks 属性在 probe 前自动配置；pinmux 由
 	// pinctrl-single driver 在 probe 前据 pinctrl-0 自动应用。
+	//
+	// ⚠️ 本节点必须始终排在其他 serial 节点之前（DFS 先序 → 首个 probe
+	// 占 slot 0 → console 派生取 SERIALS 首项 = 本口）。
+	//
+	// ── 机器人控制也走本口（共口方案，2026-08-27 原理图定案）────────────
+	// 载板（k3-com260_kit_v02 原理图）40 针排针上唯一完整可用的 R.UART
+	// 就是本口：GPIO_122/123 经 1.8V→3.3V 电平转换到 40pin pin29(TX)/
+	// pin32(RX)（网络名 GPIO01/GPIO07 = MMC2_DAT3/DAT2，与 M.2 WiFi SDIO
+	// 共网——不插 WiFi 卡即独占）。底盘/机械臂与 console log 共线：
+	// ESP32 按 AA 55 帧头重同步、ZP10S 只认 '#' 头，log 文本两者皆忽略；
+	// RX 方向（pin32）只接 ESP32 遥测，单向干净。
+	// 备选双口（槽空时经 M.2 插座脚引出，无需焊 SODIMM）：R.UART4
+	// （TX=GPIO_80→PCIeA_WAKEn 多槽共线、RX=GPIO_81→PCIeA_CLKREQn
+	// @M.2 A 槽；m3，GPIO4 bank 驱动 M.2 3.3V 信号故原生 3.3V）/ R.UART2
+	// （RX=40pin pin19 现成，TX=GPIO_57→M.2 E-key BT_EN 焊线；1.8V 需转换）。R.UART3 双双证伪：GPIO_89 模组未引出、
+	// GPIO_88 接 EFM8 电源 MCU SHUTDOWN_REQ（mux 会触关机时序，禁用）；
+	// 排针「UART1」组（pin8/10）是 SEC UART1（安全域，RT24 不可用）。
 	serial@c0881000 {
 		compatible = "spacemit,pxa-uart0";
 		reg = <0x0 0xc0881000 0x0 0x100>;
@@ -120,6 +137,24 @@
 	intc@e0000000 {
 		compatible = "riscv,plic0";
 		reg = <0x0 0xe0000000 0x0 0x4000000>;
+	};
+
+	// ── 软串口 TX（机械臂 ZP10S 独立通道，2026-08-29）─────────────────
+	// 输出线 GPIO_113 mux m2 = R.GPIO[30]（40pin pin40，网络 I2S0_SDOUT，
+	// 经载板 U2405 电平转换出 3.3V；线径直连 ZP10S 控制板 RX）。位时序由
+	// AON_TIMER1 counter1（0xc0889000，PLIC int_src[9]）比较中断重建，
+	// 参数在 soft_uart.rs 内为常量——本节点只为 pinctrl 应用与 probe 生命周期。
+	rgpio30_pin_cfg: rgpio30-pin-cfg {
+		pinctrl-single,pins = <
+			K3_PADCONF(GPIO_113, (MUX_MODE2 | EDGE_NONE | PULL_UP | PAD_DS8))  /* rgpio30 = soft uart tx */
+		>;
+	};
+
+	softuart@c0889400 {
+		compatible = "spacemit,k3-soft-uart";
+		reg = <0x0 0xc0889400 0x0 0x100>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&rgpio30_pin_cfg>;
 	};
 
 	// 跨核共享内存（与 AP 侧 rt-async-amp/reserved rt_shm 对齐：RCPU SRAM 起始
