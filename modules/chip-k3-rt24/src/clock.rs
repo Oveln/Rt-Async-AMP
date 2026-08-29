@@ -95,6 +95,8 @@ fn ruart14_regs() -> &'static Ruart14Reg {
 /// 时钟 ID 常量（来自 its/k3-clock.h，经 DTS clocks = <&ccu K3_CLK_xxx> 引用）。
 mod clk_id {
     pub const RUART0: u32 = 0;
+    pub const RUART1: u32 = 1;
+    pub const RUART3: u32 = 3;
     pub const RI2C0: u32 = 10;
     pub const RI2C1: u32 = 11;
     pub const RI2C2: u32 = 12;
@@ -118,6 +120,10 @@ struct ClkEntry {
 /// 时钟 ID → 寄存器描述查表。
 static CLK_TABLE: &[(u32, ClkEntry)] = &[
     (clk_id::RUART0, ClkEntry { base: RCPU_UARTCTRL, offset: 0x00, sel: 0 }),
+    // R_UART1/3：机器人机械臂/底盘串口（RCPU_UARTCTRL 末端 CLK_RST，
+    // UART0~5 依次 +0x04 步进，见手册 17.4.2；上游 ruart_14 gate 共享）。
+    (clk_id::RUART1, ClkEntry { base: RCPU_UARTCTRL, offset: 0x04, sel: 0 }),
+    (clk_id::RUART3, ClkEntry { base: RCPU_UARTCTRL, offset: 0x0c, sel: 0 }),
     (clk_id::RI2C0, ClkEntry { base: RCPU_I2CCTRL, offset: 0x00, sel: 0 }),
     (clk_id::RI2C1, ClkEntry { base: RCPU_I2CCTRL, offset: 0x04, sel: 0 }),
     (clk_id::RI2C2, ClkEntry { base: RCPU_I2CCTRL, offset: 0x08, sel: 0 }),
