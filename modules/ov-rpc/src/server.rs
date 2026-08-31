@@ -196,6 +196,11 @@ impl RpcServer {
         // 43.6µs 中 fence 理论仅 ~10µs，段内拆分定位其余归属。偏移与
         // ov-rpc cache.rs 编译期断言同源：magic@0 / read@0x100 /
         // write@0x108 / slots@0x110。
+        //
+        // **单块不变量（硬约束）**：本展开恒按 1 块推进 read——请求通道
+        // 只允许单块消息（ov-channels 0.3.0 块层设计约束，见其 block
+        // 模块文档"多块消息仅用于大响应/大块数据下行"）。若未来请求
+        // 需要多块，此处必须改为块感知扫描，否则续块会成为孤儿碎片。
         #[cfg(feature = "stamps")]
         let msg = {
             use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
