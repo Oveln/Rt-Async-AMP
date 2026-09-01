@@ -6,8 +6,12 @@
 //!
 //! 配对固件与命令面：
 //! - K3 `k3-robot-ctrl`：全部命令可用（通用 + 机器人语义 + probe 测量面）；
-//! - QEMU `rt-async-app`：仅 echo / add / delay（服务只注册这三个方法，
-//!   其余命令服务端按未知 method 丢弃、无响应，由本侧看门狗超时报错）。
+//! - QEMU `rt-async-app`：仅 echo / add / delay（固件只注册这三个方法，
+//!   其余命令按名字解析失败、立即报错）。
+//!
+//! 方法 id 不做编译期镜像：启动时 INIT 服务发现一次（打印方法表），命令
+//! 按方法名从描述符解析 mid——固件侧重编号无需重编 rtsh。参数/返回类型
+//! 仍编译在各命令调用点（描述符不携带类型信息，新增/改签名需同步）。
 //!
 //! 用法：
 //! - 交互 REPL：`rtsh`，提示符 `rtsh> `；空行重复上一条，quit / Ctrl-D 退出。
@@ -18,7 +22,6 @@ use std::io::{self, Write};
 use std::os::unix::io::IntoRawFd;
 
 use ov_channels::{ChannelId, SharedMemory};
-use ov_rpc::define_service_client;
 
 #[allow(dead_code)]
 const RT_SHM_IOC_NOTIFY: libc::c_ulong = rtshm_abi::IOC_NOTIFY as libc::c_ulong;
@@ -35,30 +38,9 @@ const T_SLOW: u32 = 10;
 /// 抓取全序列超时（秒，~4.5s 动作 + 帧时间）。
 const T_GRAB: u32 = 15;
 
-// 与 RP 固件 intercom.rs 的 method id 镜像（acall 在客户端按 call 声明；
-// MEMBENCH/LITMUS 仅 probe 固件实现，普通固件上这两条命令超时）。
-define_service_client! {
-    RtAsyncRpc {
-        ECHO:  0 => call echo(val: u32) -> u32;
-        ADD:   1 => call add(a: i32, b: i32) -> i32;
-        DELAY: 2 => send delay(us: u32);
-        PING:  3 => call ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64);
-        STATS: 4 => call stat(idx: u32) -> u64;
-        MEMBENCH: 5 => call membench(op: u32, arg: u32) -> (u64, u64);
-        LITMUS:   6 => send litmus(op: u32, arg: u32);
-        UART_WRITE:  7 => call uart_write(port: u8, len: u8, data: [u8; 32]) -> u32;
-        UART_READ:   8 => call uart_read(port: u8, max: u8) -> (u32, [u8; 32]);
-        UART_STATUS: 9 => call uart_status(nonce: u32) -> (u32, u32, u32, u32, u32);
-        CHASSIS_SET_SPEED: 10 => send chassis_set_speed(left: i16, right: i16);
-        CHASSIS_STOP:     11 => send chassis_stop(brake: u8);
-        CHASSIS_GET:      12 => call chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64);
-        CHASSIS_INIT:     13 => call chassis_init(ppr: u16, pwm_freq: u16) -> u32;
-        ARM_SET_ANGLE: 14 => send arm_set_angle(servo: u8, angle: u16);
-        ARM_TORQUE:    15 => send arm_torque(release: u8);
-        ARM_GRAB:      16 => call arm_grab(nonce: u32) -> u32;
-        ARM_RELEASE:   17 => call arm_release(nonce: u32) -> u32;
-    }
-}
+// 方法名与 RP 固件 intercom.rs define_service! 的常量名对齐（ECHO/ADD/
+// …/ARM_RELEASE）；mid 运行时经服务发现按名字解析（见 Shell::discover），
+// 编号无需镜像。acall 在客户端按 call 发起（响应由完成方补发）。
 
 // ============================================================================
 // /dev/rt_shm 封装（与 robot-ctl 同构：open + mmap + ioctl + 就绪等待/排空）
@@ -161,9 +143,18 @@ impl Drop for RtShm {
 
 extern "C" fn on_sigalrm(_sig: libc::c_int) {}
 
+/// 发现表条目：(mid, flags, 名称)——flags 见 ov_rpc::descriptor。
+struct Discovered {
+    mid: u64,
+    flags: u8,
+    name: String,
+}
+
 struct Shell {
     rt: RtShm,
-    client: RtAsyncRpc,
+    client: ov_rpc::RpcClient,
+    /// 服务发现结果（启动时 INIT 一次；`services` 命令可刷新）。
+    table: Vec<Discovered>,
 }
 
 impl Shell {
@@ -176,12 +167,92 @@ impl Shell {
             return Err("shared window not ready (RP firmware down?)".into());
         }
         rt.drain_ch1();
-        let client = RtAsyncRpc::new(rt.shm_addr());
-        Ok(Self { rt, client })
+        let client = ov_rpc::RpcClient::new(rt.shm_addr());
+        Ok(Self { rt, client, table: Vec::new() })
     }
 
     fn notify(&self) -> io::Result<()> {
         self.rt.notify()
+    }
+
+    /// 服务发现：INIT（method 0）→ 描述符解析 → 刷新方法表。
+    ///
+    /// 旧固件（无 INIT 拦截）下收到 poison 响应（描述符解不开）或版本门
+    /// 直接拒绝发送——均为明确报错而非挂死。
+    fn discover(&mut self) -> Result<(), String> {
+        let rid = self
+            .client
+            .discover(|| self.rt.notify().map_err(|e| e.to_string()).unwrap_or(()))
+            .map_err(|e| format!("INIT 发送失败: {e:?}"))?;
+
+        unsafe { libc::alarm(T_CALL) };
+        let raw = (|| -> Result<Vec<u8>, String> {
+            let mut spins: u32 = 0;
+            loop {
+                self.rt.await_ipi().map_err(|e| format!("await: {e}"))?;
+                self.client.poll_responses();
+                match self.client.recv_raw_for(rid) {
+                    Some(bytes) => return Ok(bytes.to_vec()),
+                    None => {
+                        // 空唤醒（他源门铃/杂散）：有限次重等后放弃。
+                        spins += 1;
+                        if spins > 64 {
+                            return Err("no response (spins exhausted)".into());
+                        }
+                    }
+                }
+            }
+        })();
+        unsafe { libc::alarm(0) };
+        let raw = raw?;
+
+        let d = ov_rpc::descriptor::parse(&raw)
+            .ok_or_else(|| "描述符解析失败（旧固件无服务发现？）".to_string())?;
+        self.table = d
+            .methods()
+            .map(|m| Discovered { mid: m.mid, flags: m.flags, name: m.name.to_string() })
+            .collect();
+        Ok(())
+    }
+
+    /// 方法表渲染（启动横幅与 `services` 命令共用）。
+    fn services_text(&self) -> String {
+        let mut lines = vec![format!(
+            "可用 RPC 方法：{} 个（mid 0 = INIT 服务发现）",
+            self.table.len()
+        )];
+        lines.push("  mid  形态    名称".into());
+        for m in &self.table {
+            let kind = ov_rpc::descriptor::MethodDesc { mid: m.mid, flags: m.flags, name: &m.name }
+                .kind_name();
+            lines.push(format!("  {:>3}  {:<6}  {}", m.mid, kind, m.name));
+        }
+        lines.join("\n")
+    }
+
+    /// 按方法名解析 mid（发现表查找；未注册 → Err 快速失败）。
+    fn mid(&self, name: &str) -> Result<u64, String> {
+        self.table
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| m.mid)
+            .ok_or_else(|| format!("固件未提供方法 {name}（services 查看方法表）"))
+    }
+
+    /// 双向调用（call：服务端回 IPI）。
+    fn call<A: serde::Serialize>(&mut self, name: &str, args: &A) -> Result<ov_rpc::RequestId, String> {
+        let mid = self.mid(name)?;
+        self.client
+            .call(mid, args, || self.notify().expect("NOTIFY failed"))
+            .map_err(|e| format!("send: {e:?}"))
+    }
+
+    /// 单向下发（send：不期待响应）。
+    fn send<A: serde::Serialize>(&mut self, name: &str, args: &A) -> Result<(), String> {
+        let mid = self.mid(name)?;
+        self.client
+            .send(mid, args, || self.notify().expect("NOTIFY failed"))
+            .map_err(|e| format!("send: {e:?}"))
     }
 
     /// 阻塞等响应并按 rid 取回（SIGALRM 超时 → Err）。
@@ -272,12 +343,11 @@ fn now_ns() -> i64 {
 // STATS 计数器（镜像 intercom::stat_idx，双端对齐义务，同 user-test-bench）
 // ============================================================================
 
-const STAT_NAMES: [&str; 24] = [
+const STAT_NAMES: [&str; 20] = [
     "msgs", "d1", "d2", "d3", "d4", "redundant_irq", "resp_fail", "heals",
     "win_last_ns", "win_min_ns", "win_max_ns", "windows",
     "svc_last_ns", "svc_min_ns", "svc_max_ns", "t_now", "freq_hz",
     "lit_viol", "lit_rounds", "lit_state",
-    "t_ch_enter", "t_recv_done", "t_handle_done", "t_resp_done",
 ];
 
 /// 计数器值格式化：ns 型附 µs 换算；min 初值 u64::MAX = 尚无样本。
@@ -290,10 +360,7 @@ fn fmt_stat(idx: u32, v: u64) -> String {
 }
 
 fn stat_query(sh: &mut Shell, idx: u32) -> Result<u64, String> {
-    let rid = sh
-        .client
-        .stat(idx, || sh.notify().expect("NOTIFY failed"))
-        .map_err(|e| format!("send: {e:?}"))?;
+    let rid = sh.call("STATS", &(idx,))?;
     sh.wait_reply::<u64>(rid, T_CALL)
 }
 
@@ -315,13 +382,9 @@ fn cmd_ping(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
     let mut single: Option<(u64, u8, u64, u64, u64, u64)> = None;
 
     for seq in 0..n as u64 {
-        let notify = || sh.notify().expect("NOTIFY failed");
         let t0 = now_ns();
-        let rid = sh
-            .client
-            .ping(seq, notify)
-            .map_err(|e| format!("send: {e:?}"))?;
-        let r = sh.wait_reply::<(u64, u8, u64, u64, u64, u64, u64, u64, u64, u64)>(rid, T_CALL)?;
+        let rid = sh.call("PING", &(seq,))?;
+        let r = sh.wait_reply::<(u64, u8, u64, u64, u64, u64)>(rid, T_CALL)?;
         let t1 = now_ns();
         rtts.push((t1 - t0) as f64 / 1e3);
         paths[(r.1 as usize).min(4)] += 1;
@@ -370,9 +433,9 @@ fn cmd_stat(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
     if let Some(a) = toks.get(1) {
         let idx: u32 = a
             .parse()
-            .map_err(|_| format!("bad idx（0-23）: {a}"))?;
+            .map_err(|_| format!("bad idx（0-19）: {a}"))?;
         if idx as usize >= STAT_NAMES.len() {
-            return Err(format!("idx 越界（0-23）: {idx}"));
+            return Err(format!("idx 越界（0-19）: {idx}"));
         }
         let v = stat_query(sh, idx)?;
         return Ok(format!("{idx:2} {} = {}", STAT_NAMES[idx as usize], fmt_stat(idx, v)));
@@ -382,13 +445,20 @@ fn cmd_stat(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         let v = stat_query(sh, idx)?;
         lines.push(format!("{idx:2} {:<14} {}", STAT_NAMES[idx as usize], fmt_stat(idx, v)));
     }
-    lines.push("（17-23 为 probe 固件扩展列：`stat <idx>` 单查）".into());
+    lines.push("（17-19 为 probe 固件扩展列：`stat <idx>` 单查）".into());
     Ok(lines.join("\n"))
+}
+
+/// `services`：重新服务发现并列出方法表（启动时已自动执行一次）。
+fn cmd_services(sh: &mut Shell, _toks: &[&str]) -> Result<String, String> {
+    sh.discover()?;
+    Ok(sh.services_text())
 }
 
 fn help_text() -> String {
     [
         "通用 RPC（K3 / QEMU 固件均有）",
+        "  services               重新服务发现并列出方法表（启动时已自动一次）",
         "  echo N                 回显",
         "  add A B                整数加",
         "  delay US               RP 侧精确延时 µs（单向，无响应）",
@@ -400,7 +470,7 @@ fn help_text() -> String {
         "  drive L R | stop | brake | get    双轮速度 ±100 / 滑行停 / 刹车 / 遥测快照",
         "  arm S A | torque [0/1] | grab | release    舵机角度 / 力矩 / 抓取 / 张开",
         "  uwrite PORT HEX | uread PORT [MAX]         raw UART 读写（bring-up）",
-        "probe 测量面（仅 probe 固件，普通固件上超时）",
+        "probe 测量面（仅 probe 固件，普通固件上未注册即报错）",
         "  membench OP [ARG]      RP 侧微基准（op 表见 intercom.rs membench_op）",
         "  peek ADDR              只读寄存器 1000 连读单价（PEEK_T；勿指向 FIFO 类寄存器）",
         "  litmus OP [ARG]        顺序性实验触发（结果经 stat 17-19 轮询）",
@@ -418,35 +488,35 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
     let Some(cmd) = toks.first().copied() else {
         return Ok(String::new());
     };
-    let notify = || sh.notify().expect("NOTIFY failed");
     match cmd {
         "help" | "?" => Ok(help_text()),
 
         // ── 通用 ──
         "echo" => {
             let v: u32 = need(toks, 1, "N")?;
-            let rid = sh.client.echo(v, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("ECHO", &(v,))?;
             let r: u32 = sh.wait_reply(rid, T_CALL)?;
             Ok(format!("echo: {r}"))
         }
         "add" => {
             let a: i32 = need(toks, 1, "A")?;
             let b: i32 = need(toks, 2, "B")?;
-            let rid = sh.client.add(a, b, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("ADD", &(a, b))?;
             let r: i32 = sh.wait_reply(rid, T_CALL)?;
             Ok(format!("add: {a} + {b} = {r}"))
         }
         "delay" => {
             let us: u32 = need(toks, 1, "US")?;
-            sh.client.delay(us, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("DELAY", &(us,))?;
             Ok(format!("delay: {us} µs 已下发（单向，无响应）"))
         }
         "ping" => cmd_ping(sh, toks),
         "stat" => cmd_stat(sh, toks),
+        "services" | "disc" => cmd_services(sh, toks),
 
         // ── 机器人（K3 k3-robot-ctrl；输出语义同 robot-ctl）──
         "status" => {
-            let rid = sh.client.uart_status(1, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("UART_STATUS", &(1u32,))?;
             let v = sh.wait_reply::<(u32, u32, u32, u32, u32)>(rid, T_CALL)?;
             Ok(format!(
                 "status: ports={:#04x} chassis_inited={} chassis_err={} arm_dropped={}",
@@ -456,7 +526,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "init" => {
             let ppr: u16 = opt(toks, 1, 4680u16)?;
             let pwm: u16 = opt(toks, 2, 20000u16)?;
-            let rid = sh.client.chassis_init(ppr, pwm, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("CHASSIS_INIT", &(ppr, pwm))?;
             let r: u32 = sh.wait_reply(rid, T_SLOW)?;
             if r == u32::MAX {
                 Err("busy（已有 init 在途）".into())
@@ -467,19 +537,19 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "drive" | "set_speed" => {
             let l: i16 = need(toks, 1, "L")?;
             let r: i16 = need(toks, 2, "R")?;
-            sh.client.chassis_set_speed(l, r, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("CHASSIS_SET_SPEED", &(l, r))?;
             Ok(format!("drive: left={l} right={r}"))
         }
         "stop" => {
-            sh.client.chassis_stop(1, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("CHASSIS_STOP", &(1u8,))?;
             Ok("stop: 已下发".into())
         }
         "brake" => {
-            sh.client.chassis_stop(2, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("CHASSIS_STOP", &(2u8,))?;
             Ok("brake: 已下发".into())
         }
         "get" => {
-            let rid = sh.client.chassis_get(1, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("CHASSIS_GET", &(1u32,))?;
             let v = sh
                 .wait_reply::<(u32, u32, i32, i32, i32, i32, u32, u64)>(rid, T_CALL)?;
             Ok(format!(
@@ -490,16 +560,16 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "arm" | "set_angle" => {
             let s: u8 = need(toks, 1, "SERVO")?;
             let a: u16 = need(toks, 2, "ANGLE")?;
-            sh.client.arm_set_angle(s, a, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("ARM_SET_ANGLE", &(s, a))?;
             Ok(format!("arm: servo={s} angle={a}"))
         }
         "torque" => {
             let rel: u8 = opt(toks, 1, 1u8)?;
-            sh.client.arm_torque(rel, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("ARM_TORQUE", &(rel,))?;
             Ok(format!("torque: release={rel}"))
         }
         "grab" => {
-            let rid = sh.client.arm_grab(1, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("ARM_GRAB", &(1u32,))?;
             let r: u32 = sh.wait_reply(rid, T_GRAB)?;
             if r == u32::MAX {
                 Err("arm queue full".into())
@@ -508,7 +578,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
             }
         }
         "release" => {
-            let rid = sh.client.arm_release(1, notify).map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("ARM_RELEASE", &(1u32,))?;
             let r: u32 = sh.wait_reply(rid, T_SLOW)?;
             if r == u32::MAX {
                 Err("arm queue full".into())
@@ -526,10 +596,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
             }
             let mut data = [0u8; 32];
             data[..bytes.len()].copy_from_slice(&bytes);
-            let rid = sh
-                .client
-                .uart_write(port, bytes.len() as u8, data, notify)
-                .map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("UART_WRITE", &(port, bytes.len() as u8, data))?;
             let n: u32 = sh.wait_reply(rid, T_CALL)?;
             if n == u32::MAX {
                 Err("port not probed".into())
@@ -540,10 +607,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "uread" => {
             let port: u8 = need(toks, 1, "PORT")?;
             let max: u8 = opt(toks, 2, 32u8)?;
-            let rid = sh
-                .client
-                .uart_read(port, max, notify)
-                .map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("UART_READ", &(port, max))?;
             match sh.wait_reply::<(u32, [u8; 32])>(rid, T_CALL)? {
                 (u32::MAX, _) => Err("port not probed".into()),
                 (n, data) => {
@@ -558,10 +622,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "membench" => {
             let op: u32 = need(toks, 1, "OP")?;
             let arg: u32 = opt(toks, 2, 0u32)?;
-            let rid = sh
-                .client
-                .membench(op, arg, notify)
-                .map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("MEMBENCH", &(op, arg))?;
             let (ns, ck) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW)?;
             Ok(format!("membench: op={op} arg={arg} → ns={ns} ck=0x{ck:x}（{ck}）"))
         }
@@ -573,10 +634,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
                 return Err("地址须 4 字节对齐（misaligned load 会 fault）".into());
             }
             // PEEK_T = op 16（1000 次连续只读，返回 (ns, 末次值)）。
-            let rid = sh
-                .client
-                .membench(16, addr, notify)
-                .map_err(|e| format!("send: {e:?}"))?;
+            let rid = sh.call("MEMBENCH", &(16u32, addr))?;
             let (ns, v) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW)?;
             Ok(format!(
                 "peek: {addr:#010x} → {:#010x}（1000 连读 {ns} ns，均 {:.1} ns/笔）\n      仅限只读寄存器：读 FIFO/msg 类寄存器会消费数据",
@@ -586,7 +644,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "litmus" => {
             let op: u32 = need(toks, 1, "OP")?;
             let arg: u32 = opt(toks, 2, 0u32)?;
-            sh.client.litmus(op, arg, notify).map_err(|e| format!("send: {e:?}"))?;
+            sh.send("LITMUS", &(op, arg))?;
             Ok("litmus: 已下发（结果经 stat 17-19 轮询）".into())
         }
 
@@ -600,6 +658,12 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
 
 fn repl(mut sh: Shell) {
     println!("rtsh: /dev/rt_shm 就绪（help 查看命令，quit / Ctrl-D 退出）");
+    // 启动自动服务发现一次：打印可用方法表，命令按名字解析 mid。
+    // 失败不退出（help/quit/services 仍可用）——根因会在错误里自述。
+    match sh.discover() {
+        Ok(()) => println!("{}", sh.services_text()),
+        Err(e) => println!("warning: 服务发现失败：{e}"),
+    }
     let stdin = io::stdin();
     let mut last: Vec<String> = Vec::new();
     loop {
@@ -665,6 +729,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // 单发也先发现一次（方法名解析需要；失败仅告警，命令自身会报错）。
+    if let Err(e) = sh.discover() {
+        eprintln!("warning: 服务发现失败：{e}");
+    }
     match exec(&mut sh, &toks) {
         Ok(s) => {
             if !s.is_empty() {
