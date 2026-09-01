@@ -14,18 +14,21 @@ members = [
     "user-apps/user-test-sched",
     "user-apps/user-test-bench",
     "user-apps/user-test-pbmt",
+    "user-apps/robot-ctl",
+    "user-apps/rtsh",
     "xtask",
 ]
 resolver = "3"
 
 [patch.crates-io]
-# ov-channels vendor 补丁：窗口原子 portable_atomic → core（K3 专属
-# atomic-cas:false target 下 CS 回退会丢跨核 fence 语义，详见
-# modules/ov-channels/src/lib.rs 头注）。上游修复后可移除。
+# ov-channels vendor 补丁：feat/block-msg 分支（基于 feat/rt-async-amp）
+# ——窗口原子 core 化（K3 专属 atomic-cas:false target）+ 0.3.0 块层
+# （多块消息/CONT 续传位/字节流成帧）。详见
+# modules/ov-channels/src/lib.rs 头注。
 ov-channels = { path = "modules/ov-channels" }
 
 [workspace.dependencies]
-ov-channels = { version = "0.2.0", default-features = false, features = ["critical-section", "flags"] }
+ov-channels = { version = "0.3.0", default-features = false, features = ["flags"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 postcard = { version = "1.1", default-features = false }
 

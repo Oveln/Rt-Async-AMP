@@ -1,6 +1,6 @@
 [package]
 name = "ov-rpc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["oveln"]
 description = "Type-safe RPC framework built on ov-channels for AMP systems"
@@ -18,10 +18,6 @@ portable-atomic = { version = "1", default-features = false }
 [features]
 default = []
 logging = ["dep:log"]
-# 服务端 dispatch 分解戳（延迟插桩：ch_enter/recv_done/handle_done/
-# resp_done 四截 + app 时钟钩子，见 server::stamp）。K3 固件启用，
-# 每消息开销 <0.5µs；关闭零开销。
-stamps = []
 
 [dev-dependencies]
 ov-channels = { workspace = true, features = ["std", "flags"] }

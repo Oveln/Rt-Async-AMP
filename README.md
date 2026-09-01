@@ -215,6 +215,35 @@ python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
 #   chmod +x /tmp/user-test-ipc && /tmp/user-test-ipc
 ```
 
+#### rt-async 交互式 shell（rtsh）
+
+把 `/dev/rt_shm` 当设备打开（open + mmap + ioctl 门铃）、在共享窗上经
+ov-rpc 与 RP 固件交互式对话的 REPL——`rtsh` 无参进入（空行重复上一条，
+quit/Ctrl-D 退出），`rtsh <cmd> [args..]` 单发即退。**启动时自动服务发现
+一次**并打印固件方法表（mid/形态/名称），命令按方法名解析 mid——固件
+侧重编号无需重编 rtsh（参数/返回类型仍编译在各命令内）。命令面：
+
+- **通用 RPC**：`services`（重新服务发现并列方法表，启动时已自动一次）、
+  `echo` / `add` / `delay`、`ping [N]`（RTT 分位数 + D1-D4
+  发现路径分布，单次含 RP 侧 isr→sched / sched→seen 分段）、`stat`
+  插桩计数器表（bench `s0` 的交互版）；
+- **机器人语义**：同 robot-ctl 的全部 CLI op（status/init/drive/stop/
+  brake/get/arm/torque/grab/release/uwrite/uread）；
+- **probe 测量面**：`membench OP [ARG]`、`peek ADDR`（只读寄存器 1000
+  连读单价）、`litmus`——仅 probe 固件实现。
+
+配 K3 `k3-robot-ctrl` 固件时全部可用；QEMU `rt-async-app` 固件仅注册
+echo/add/delay，其余命令按名字解析失败、立即报错（不再挂到超时）。
+
+```bash
+cargo xtask build rtsh        # 产物 build/rtsh（wget 部署同上）
+# 板上：
+/tmp/rtsh                     # REPL
+rtsh> ping 20                 # RTT min/avg/p50/p95/p99/max + 路径分布
+rtsh> stat                    # 插桩计数器 dump
+rtsh> peek 0xc088c04c         # 只读寄存器探测（probe 固件）
+```
+
 #### IPC 延迟基准（user-test-bench）
 
 路径分离的 IPC 延迟/正确性基准，与 RP 固件 intercom 内置插桩（`PING`/`STATS`
@@ -253,8 +282,8 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
 /tmp/user-test-bench lit                # 跨核免 fence 顺序性实验（LITMUS）
 ```
 
-> 固件侧探针（MEMBENCH/LITMUS/STATS 扩展列/dispatch 分解戳）由 app feature
-> `probe` 门控，**默认关闭**（正常开发视角 intercom 只含生产服务）；xtask
+> 固件侧探针（MEMBENCH/LITMUS/STATS 扩展列）由 app feature `probe` 门控，
+> **默认关闭**（正常开发视角 intercom 只含生产服务）；xtask
 > 构建的 K3 板上产物恒带上（RTASYNC_BINS 表条目 `features = ["probe"]`），
 > dd/lit/mb 场景直接可用。裸 `cargo build -p rt-async-k3` 得到无探针固件。
 > 同理，RP 侧微架构基准 bin `rtbench`（fence/原子/桥单价）由 feature `bench`
@@ -269,13 +298,12 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   mtime 的 MMIO 读。检验「无缓存 SRAM ~3.3µs/笔、256B 取读 ~105µs、
   dsched 69.8µs = ISR MMIO 舞步」等归因假设，直接决定优化方向
   （物理下限 vs 别名/瘦身）。
-- `dd`：每轮 D1 门铃唤醒，用 PING 回传的 RP mtime 8 戳（含 t_drain 与
-  dispatch 分解 t_ch_enter/t_recv_done——ov-rpc feature `stamps`）×
-  内核双戳（NOTIFY 门铃 MMIO 写前 / mailbox IRQ 入口，经 ioctl
-  `RD_KTS` 读出）做交叉分解。dseen 三段分解：弹性前缀（set_busy+urgent
-  探测）/ try_recv 取包 / dispatch+postcard 反序列化；svc 尾段（handler
-  与响应 try_send）经 STATS 20-23 锁存读出。钟差无关恒等式给出可作绝对
-  结论的量：`S = X+RP尾+Y`、`AP 回程`、闭环残差自检；`X+o` 只看抖动。
+- `dd`：每轮 D1 门铃唤醒，用 PING 回传的 RP mtime 戳（t_isr/t_drain/
+  t_sched/t_seen）× 内核双戳（NOTIFY 门铃 MMIO 写前 / mailbox IRQ 入口，
+  经 ioctl `RD_KTS` 读出）做交叉分解；svc 探针（handler 服务时长）经
+  STATS 锁存读出。钟差无关恒等式给出可作绝对结论的量：`S = X+RP尾+Y`、
+  `AP 回程`、闭环残差自检；`X+o` 只看抖动。（原 dseen 三段细分随
+  ov-rpc stamps 插桩删除——战役收官，需要时从 git 历史恢复。）
   **前提：starryos.uimg 含内核双戳（RD_KTS ioctl）——需重刷 uimg。**
 - `lit`：跨核免 fence 顺序性实验（迁移前测量，2026-08-17）——L1 消费侧
   （AP 顺序发布、RP 按读模式矩阵轮询：纯读/fence 读/邻址读）、L2 生产侧
@@ -285,6 +313,83 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   邻址读已证无逐出效果）；L2 正序 PASS ⇒ RP 免 fence 写落地保序、
   notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
   （或换硬件 spinlock）。
+
+#### 机器人控制（robot-ctl + k3-robot-ctrl）
+
+AP 用户态控制 AKA-00 小车（底盘 ESP32-C3 + ZP10S 机械臂）。**协议在 RP 侧**
+（`apps/rt-async-k3/src/robot.rs`：tt_pid 二进制帧 + zp10s ASCII，两个 P1
+协议任务），AP 侧只发语义 RPC——`robot-ctl`（CLI + serve JSON 行协议，
+`user-apps/robot-ctl/robot.py` 供 Python 经 Popen 管道调用，接口对齐
+AKA-00 的 `MotorPairProtocol`/`ServoProtocol`）。INIT/GRAB/RELEASE 经 ov-rpc
+`acall` 异步完成（handler 转交任务、完成后补响应，AP `recv_for` 无感闭环）。
+
+**接线（2026-08-27 载板原理图 `k3-com260_kit_v02` 定案；08-29 机械臂分离
+软串口，双通道）**：com260 40 针排针上唯一完整可用的 R.UART 是 **R_UART0 @
+GPIO_122/123 → pin29(TX)/pin32(RX)**（网络名 GPIO01/GPIO07 = MMC2_DAT3/DAT2，
+经 1.8V→3.3V 电平转换；与 M.2 WiFi SDIO 共网，不插 WiFi 卡即独占；**这就是
+RP console 所在引脚**）。底盘走 R_UART0；机械臂 ZP10S 走**软串口 TX**（
+`chip-k3-rt24::soft_uart`：R.GPIO[30] = GPIO_113 m2 → **pin40**（网络
+I2S0_SDOUT，经载板电平转换出 3.3V），位时序由 AON_TIMER1 counter1 比较中断
+逐位重建，115200-8N1，任务异步发送——帧内 mask mailbox 中断源，IPC 延迟
+毛刺 ≤1.39ms/指令）：
+
+```text
+40pin pin29 (TX) ──── ESP32-C3 RX（底盘，AA 55 二进制帧；console log 共线，
+                      ESP32 按 AA55 帧头重同步，ASCII 不构成帧头）
+40pin pin32 (RX) ──── ESP32-C3 TX（遥测应答，单向干净）
+40pin pin40      ──── ZP10S RX（机械臂软串口 TX，独立线，log 不可达）
+```
+
+⚠️ 排针上其它看似可用的信号**均不是 R.UART**：「UART1」（pin8/10/11/36）=
+SEC UART1 pad（安全域；但其 m2 = R.CAN3 TX/RX + R.GPIO[35]，作 CAN/GPIO
+可用）；「R-SPI0」组（pin13/18/20/22/37/39）= GPIO_62/63/61/60 的 m2 =
+**R.SSP0**（RT24 硬件 SPI，完整）；「SPI0_MISO/SCK」（pin21/23）= GPIO_105/
+106 m2 = **R.I2C1**（pin12/35 = R.PWM8/9，pin38/40 = R.GPIO[31]/[30]）。
+备选双串口（M.2 槽保持空、经插座脚引出，免焊 SODIMM）：**R.UART4**
+（TX=GPIO_80→PCIeA_WAKEn（多槽共线）、RX=GPIO_81→PCIeA_CLKREQn @M.2 A 槽；
+m2，GPIO4 bank 原生 3.3V 免转换）。R.UART2 证伪（GPIO_58 网络
+USB0_VBUS_DET 不在排针、GPIO_57→M.2 E-key BT_EN）；R.UART3 不可用
+（GPIO_89 模组未引出，GPIO_88 接 EFM8 电源 MCU SHUTDOWN_REQ，mux 会触关机
+时序）。
+
+**板验首验项（软串口）**：① PLIC 中断号 9 = int_src[9] `timer_2_irq` =
+AON_TIMER1 counter#1（手册 7.2 信号名 1 起始的映射假设，不响则按 8/10
+改 `soft_uart.rs` 的 `TIMER_IRQ` 常量）；② R_GPIO PLR/PDR/PSR/PCR = +0/+4/
++8/+0xC（手册 16.8，R.GPIO[30] 落 port0 无端口间距歧义）；③ pin40 波形
+（接 USB 串口 RX 验 `#001P1500T1000!` 字节完整后再生效 ZP10S）。
+
+```bash
+# RP 固件（换打包 bin）：
+cargo xtask build k3-robot-ctrl
+ELF_SRC=build/k3-com260/rt-async-k3-robot-ctrl.elf bash scripts/flash/k3-pack-itb.sh
+# AP 程序（wget 部署同上，robot.py 一并拉取）：
+cargo xtask build robot-ctl
+
+# 板上调试（单发 CLI；交互式全命令面可用 /tmp/rtsh，见 user-apps 小节）：
+/tmp/robot-ctl status                       # 端口 probe 掩码 / 底盘状态
+/tmp/robot-ctl uwrite 0 AA55...             # raw 写（回环实验：pin29↔pin32 短接）
+/tmp/robot-ctl uread 0                      # raw 读
+/tmp/robot-ctl init                         # 底盘 INIT+CONFIG（等 ACK）
+/tmp/robot-ctl drive 30 30 && sleep 2 && /tmp/robot-ctl brake
+/tmp/robot-ctl get                          # RPM / 编码器快照
+/tmp/robot-ctl arm 2 120                    # 单舵机
+/tmp/robot-ctl grab                         # 抓取全序列（~4.5s）
+
+# Python（serve 模式，接口对齐 AKA-00）：
+python3 - <<'PY'
+from robot import Robot
+r = Robot("/tmp/robot-ctl")
+r.init(); r.set_speed(30, 30)
+print(r.get_encoder()); r.brake()
+r.set_angle(2, 120); r.grab(); r.release()
+PY
+```
+
+RP 方法 id 表（`intercom.rs`）：7-9 raw UART 诊断 / 10-13 底盘
+（SET_SPEED、STOP、GET 快照、INIT acall）/ 14-17 机械臂（SET_ANGLE、
+TORQUE、GRAB/RELEASE acall）。`acall` 为 ov-rpc 宏新增 kind：服务端
+handler 收 rid 转交后台任务即返回，任务完成后 `Message::response(rid)`
+经 CH1+门铃补发。
 
 **缓存一致性（PMA 非缓存，2026-08-26 定案）**：共享窗经 OpenSBI 固件
 （`opensbi-k3` 子仓 `feat/pma-audio-io`，见上文刷写小节）把覆盖窗口的 PMA

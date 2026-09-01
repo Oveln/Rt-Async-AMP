@@ -180,7 +180,7 @@ fn main() {
         // 恰好赶在首次就绪检查前落好（poll1-luck），赶不上即永久挂死。
         // （板上实锤：缺标志时 AWAIT 时过时挂；RP 侧 ADD 正常处理、数据
         // 正常落 ch1，AP 侧 mailbox IRQ 却不增——门铃根本没发。）
-        let method = 1u64 | ov_rpc::NOTIFY_FLAG; // 1 = RtAsyncRpc::ADD
+        let method = 2u64 | ov_rpc::NOTIFY_FLAG; // 2 = RtAsyncRpc::ADD
         let req = Message::request(rid, method, &(a, b)).expect("request serialize failed");
         println!("[test_ipc] sending ADD request({}, {}) via ch0...", a, b);
         tx.try_send(&req).expect("ch0 send failed");

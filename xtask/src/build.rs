@@ -134,6 +134,19 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         artifact: Artifact::Elf,
         features: &[],
     },
+    // 机器人控制固件（AKA-00 底盘 + 机械臂）：intercom 服务 + robot 协议
+    // 任务（P1），与 user-apps/robot-ctl 配对。
+    RtAsyncBin {
+        name: "robot_ctrl",
+        target_name: "k3-robot-ctrl",
+        platform: "k3",
+        out: "rt-async-k3-robot-ctrl.elf",
+        app_dir: "apps/rt-async-k3",
+        package: "rt-async-k3",
+        target: K3_CS_TARGET,
+        artifact: Artifact::Elf,
+        features: &["probe"],
+    },
 ];
 
 /// K3 专属 target 标记（RtAsyncBin.target 用）：解析为仓库内
@@ -496,6 +509,18 @@ pub fn user_test_bench(root: &Path, _cfg: &Config) {
 /// PBMT 用户态兑现性实验的 AP 侧（与 RP 固件 pbmt_probe 配对）。
 pub fn user_test_pbmt(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-pbmt", "user-test-pbmt", &[]);
+}
+
+/// 机器人控制 AP 侧入口（CLI + serve JSON 行协议，配 robot.py 供 Python
+/// 调用；与 RP 固件 k3-robot-ctrl 配对）。
+pub fn robot_ctl(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/robot-ctl", "robot-ctl", &[]);
+}
+
+/// rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：ping/stat 延迟诊断、
+/// 机器人语义、probe 测量面；与 K3 固件 k3-robot-ctrl 配对最全）。
+pub fn rtsh(root: &Path, _cfg: &Config) {
+    build_user_app(root, "user-apps/rtsh", "rtsh", &[]);
 }
 
 fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {

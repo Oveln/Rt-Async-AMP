@@ -39,11 +39,13 @@ cs-atomics = [
     "platform/cs-atomics",
     "portable-atomic/critical-section",
 ]
-# 延迟归因工作测量面（MEMBENCH / LITMUS 服务、STATS 扩展列、dispatch
-# 分解戳）。默认关闭：正常开发视角 intercom 只含生产服务（ECHO/ADD/
-# DELAY/PING/STATS 基础列）。xtask 的 k3 平台 bins 构建自动带上——
-# 板上固件恒有探针（dd/lit/mb 场景依赖），源码默认干净。
-probe = ["ov-rpc/stamps"]
+# 延迟归因工作测量面（MEMBENCH / LITMUS 服务、STATS 扩展列）。默认
+# 关闭：正常开发视角 intercom 只含生产服务（ECHO/ADD/DELAY/PING/STATS
+# 基础列）。xtask 的 k3 平台 bins 构建自动带上——板上固件恒有探针
+# （mb/lit 场景依赖），源码默认干净。（原 ov-rpc dispatch 分解戳已随
+# stamps feature 删除——延迟归因战役 08-23 收官， recv 路径回归单一
+# 实现；需要时从 git 历史恢复。）
+probe = []
 # RP 侧微架构基准 bin（fence/原子/桥单价，rtbench.rs）——纯测量件，
 # 默认不编译（required-features 门控），经 xtask `k3-rtbench` 单独构建。
 bench = []
@@ -65,6 +67,10 @@ required-features = ["bench"]
 # 不跑 intercom 协议，只碰 ov-shm scratch）。
 [[bin]]
 name = "pbmt_probe"
+
+# 机器人控制固件（AKA-00 底盘 + 机械臂）：intercom 服务 + robot 协议任务。
+[[bin]]
+name = "robot_ctrl"
 
 [profile.dev]
 panic = "abort"

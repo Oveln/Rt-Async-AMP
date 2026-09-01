@@ -23,10 +23,11 @@ use ov_rpc::{define_service, RpcServer};
 
 define_service! {
     /// rt-async 侧的 RPC 服务
+    /// method id 0 保留给 INIT 服务发现（ov-rpc 拦截），方法表从 1 起编号。
     RtAsyncRpc {
-        ECHO:  0 => call echo(val: u32) -> u32;
-        ADD:   1 => call add(a: i32, b: i32) -> i32;
-        DELAY: 2 => send delay(us: u32);
+        ECHO:  1 => call echo(val: u32) -> u32;
+        ADD:   2 => call add(a: i32, b: i32) -> i32;
+        DELAY: 3 => send delay(us: u32);
     }
 }
 

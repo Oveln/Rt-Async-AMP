@@ -53,30 +53,59 @@ macro_rules! define_service {
                 #[allow(non_upper_case_globals)]
                 pub const $const_name: $crate::MethodId = $mid;
             )*
+
+            /// 服务描述符（compact 格式，编译期从本方法表 const 生成——
+            /// 单一真相源，见 `ov_rpc::descriptor`）。
+            pub const DESCRIPTOR: &'static [u8] = &$crate::descriptor::encode::<{
+                $crate::descriptor::encoded_len(
+                    &[$($(#[cfg($fcfg)])? $mid,)*],
+                    &[$($(#[cfg($fcfg)])? $crate::__kind_flags!($kind),)*],
+                    &[$($(#[cfg($fcfg)])? stringify!($const_name),)*],
+                )
+            }>(
+                &[$($(#[cfg($fcfg)])? $mid,)*],
+                &[$($(#[cfg($fcfg)])? $crate::__kind_flags!($kind),)*],
+                &[$($(#[cfg($fcfg)])? stringify!($const_name),)*],
+            );
         }
 
         impl $crate::RpcHandler for $name {
+            fn descriptor() -> &'static [u8] {
+                Self::DESCRIPTOR
+            }
+
             fn handle(
                 method: $crate::MethodId,
                 msg: ov_channels::Message,
-            ) -> Result<Option<ov_channels::Message>, $crate::DeserializeFailed> {
+                out: &mut $crate::Response,
+            ) -> Result<$crate::Reply, $crate::RpcError> {
                 match method {
                     $(
                         $(#[cfg($fcfg)])?
                         $mid => {
                             $crate::__dispatch!(
-                                msg, $name :: $method,
+                                out, msg, $name :: $method,
                                 $kind,
                                 ($($aty),*) $(-> $ret)?,
                                 ($($arg),*)
                             )
                         }
                     )*
-                    _ => Ok(None),
+                    _ => Ok($crate::Reply::Silent),
                 }
             }
         }
     };
+}
+
+/// 内部宏：方法 kind → 描述符 flags 位
+#[macro_export]
+#[doc(hidden)]
+macro_rules! __kind_flags {
+    (call) => { 0 };
+    (send) => { $crate::descriptor::FLAG_ONE_WAY };
+    (urgent) => { $crate::descriptor::FLAG_ONE_WAY | $crate::descriptor::FLAG_URGENT };
+    (acall) => { $crate::descriptor::FLAG_ACALL };
 }
 
 /// 内部宏：生成反序列化 + 调用 + 序列化代码
@@ -86,111 +115,153 @@ macro_rules! __dispatch {
     // ── call (request-response) ──
 
     // 0 args
-    ($msg:ident, $name:ident :: $method:ident, call, () -> $ret:ty, ()) => {{
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, call, () -> $ret:ty, ()) => {{
         let (rid, _, _): ($crate::RequestId, $crate::MethodId, ()) = $msg.as_request()
-            .ok_or($crate::DeserializeFailed)?;
+            .ok_or($crate::RpcError::DeserializeFailed)?;
         let result: $ret = $name::$method();
-        Ok(ov_channels::Message::response(rid, &result).ok())
+        $out.write(rid, &result)?;
+        Ok($crate::Reply::Written)
     }};
 
     // 1 arg
-    ($msg:ident, $name:ident :: $method:ident, call, ($a:ty) -> $ret:ty, ($an:ident)) => {{
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, call, ($a:ty) -> $ret:ty, ($an:ident)) => {{
         let (rid, _, $an): ($crate::RequestId, $crate::MethodId, $a) = $msg.as_request()
-            .ok_or($crate::DeserializeFailed)?;
+            .ok_or($crate::RpcError::DeserializeFailed)?;
         let result: $ret = $name::$method($an);
-        Ok(ov_channels::Message::response(rid, &result).ok())
+        $out.write(rid, &result)?;
+        Ok($crate::Reply::Written)
     }};
 
     // 2 args
     (
-        $msg:ident, $name:ident :: $method:ident, call,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, call,
         ($a:ty, $b:ty) -> $ret:ty,
         ($an:ident, $bn:ident)
     ) => {{
         let (rid, _, ($an, $bn)): ($crate::RequestId, $crate::MethodId, ($a, $b)) =
-            $msg.as_request().ok_or($crate::DeserializeFailed)?;
+            $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         let result: $ret = $name::$method($an, $bn);
-        Ok(ov_channels::Message::response(rid, &result).ok())
+        $out.write(rid, &result)?;
+        Ok($crate::Reply::Written)
     }};
 
     // 3 args
     (
-        $msg:ident, $name:ident :: $method:ident, call,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, call,
         ($a:ty, $b:ty, $c:ty) -> $ret:ty,
         ($an:ident, $bn:ident, $cn:ident)
     ) => {{
         let (rid, _, ($an, $bn, $cn)): ($crate::RequestId, $crate::MethodId, ($a, $b, $c)) =
-            $msg.as_request().ok_or($crate::DeserializeFailed)?;
+            $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         let result: $ret = $name::$method($an, $bn, $cn);
-        Ok(ov_channels::Message::response(rid, &result).ok())
+        $out.write(rid, &result)?;
+        Ok($crate::Reply::Written)
     }};
 
     // 4 args
     (
-        $msg:ident, $name:ident :: $method:ident, call,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, call,
         ($a:ty, $b:ty, $c:ty, $d:ty) -> $ret:ty,
         ($an:ident, $bn:ident, $cn:ident, $dn:ident)
     ) => {{
         let (rid, _, ($an, $bn, $cn, $dn)): (
             $crate::RequestId, $crate::MethodId, ($a, $b, $c, $d),
-        ) = $msg.as_request().ok_or($crate::DeserializeFailed)?;
+        ) = $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         let result: $ret = $name::$method($an, $bn, $cn, $dn);
-        Ok(ov_channels::Message::response(rid, &result).ok())
+        $out.write(rid, &result)?;
+        Ok($crate::Reply::Written)
+    }};
+
+    // ── acall (async request-response：handler 转交后台任务，稍后补响应) ──
+    //
+    // 与 call 的区别：handler 收到 rid 作为首参、返回 ()，宏返回
+    // Reply::Deferred（服务端不发即时响应不发 IPI，也**不**走 poison）
+    // ——由后台任务完成处理后自行构造
+    // `Message::response(rid, result)` 经 CH1 + notify IPI 补发（异步完成
+    // 路径）。客户端按普通 call 声明同 id（等待语义不变，recv_for 按 rid
+    // 匹配稍后到达的响应）。
+
+    // 0 args
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, acall, (), ()) => {{
+        let (rid, _, _): ($crate::RequestId, $crate::MethodId, ()) = $msg.as_request()
+            .ok_or($crate::RpcError::DeserializeFailed)?;
+        $name::$method(rid);
+        Ok($crate::Reply::Deferred)
+    }};
+
+    // 1 arg
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, acall, ($a:ty), ($an:ident)) => {{
+        let (rid, _, $an): ($crate::RequestId, $crate::MethodId, $a) = $msg.as_request()
+            .ok_or($crate::RpcError::DeserializeFailed)?;
+        $name::$method(rid, $an);
+        Ok($crate::Reply::Deferred)
+    }};
+
+    // 2 args
+    (
+        $out:ident, $msg:ident, $name:ident :: $method:ident, acall,
+        ($a:ty, $b:ty),
+        ($an:ident, $bn:ident)
+    ) => {{
+        let (rid, _, ($an, $bn)): ($crate::RequestId, $crate::MethodId, ($a, $b)) =
+            $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
+        $name::$method(rid, $an, $bn);
+        Ok($crate::Reply::Deferred)
     }};
 
     // ── send / urgent (one-way, no response) ──
 
     // 0 args
-    ($msg:ident, $name:ident :: $method:ident, $kind:ident, (), ()) => {{
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, $kind:ident, (), ()) => {{
         let (_, _, _): ($crate::RequestId, $crate::MethodId, ()) = $msg.as_request()
-            .ok_or($crate::DeserializeFailed)?;
+            .ok_or($crate::RpcError::DeserializeFailed)?;
         $name::$method();
-        Ok(None)
+        Ok($crate::Reply::Silent)
     }};
 
     // 1 arg
-    ($msg:ident, $name:ident :: $method:ident, $kind:ident, ($a:ty), ($an:ident)) => {{
+    ($out:ident, $msg:ident, $name:ident :: $method:ident, $kind:ident, ($a:ty), ($an:ident)) => {{
         let (_, _, $an): ($crate::RequestId, $crate::MethodId, $a) = $msg.as_request()
-            .ok_or($crate::DeserializeFailed)?;
+            .ok_or($crate::RpcError::DeserializeFailed)?;
         $name::$method($an);
-        Ok(None)
+        Ok($crate::Reply::Silent)
     }};
 
     // 2 args
     (
-        $msg:ident, $name:ident :: $method:ident, $kind:ident,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, $kind:ident,
         ($a:ty, $b:ty),
         ($an:ident, $bn:ident)
     ) => {{
         let (_, _, ($an, $bn)): ($crate::RequestId, $crate::MethodId, ($a, $b)) =
-            $msg.as_request().ok_or($crate::DeserializeFailed)?;
+            $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         $name::$method($an, $bn);
-        Ok(None)
+        Ok($crate::Reply::Silent)
     }};
 
     // 3 args
     (
-        $msg:ident, $name:ident :: $method:ident, $kind:ident,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, $kind:ident,
         ($a:ty, $b:ty, $c:ty),
         ($an:ident, $bn:ident, $cn:ident)
     ) => {{
         let (_, _, ($an, $bn, $cn)): ($crate::RequestId, $crate::MethodId, ($a, $b, $c)) =
-            $msg.as_request().ok_or($crate::DeserializeFailed)?;
+            $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         $name::$method($an, $bn, $cn);
-        Ok(None)
+        Ok($crate::Reply::Silent)
     }};
 
     // 4 args
     (
-        $msg:ident, $name:ident :: $method:ident, $kind:ident,
+        $out:ident, $msg:ident, $name:ident :: $method:ident, $kind:ident,
         ($a:ty, $b:ty, $c:ty, $d:ty),
         ($an:ident, $bn:ident, $cn:ident, $dn:ident)
     ) => {{
         let (_, _, ($an, $bn, $cn, $dn)): (
             $crate::RequestId, $crate::MethodId, ($a, $b, $c, $d),
-        ) = $msg.as_request().ok_or($crate::DeserializeFailed)?;
+        ) = $msg.as_request().ok_or($crate::RpcError::DeserializeFailed)?;
         $name::$method($an, $bn, $cn, $dn);
-        Ok(None)
+        Ok($crate::Reply::Silent)
     }};
 }
 

@@ -54,16 +54,38 @@ use ov_rpc::{define_service, HandledKind, ProcessResult, RpcServer};
 define_service! {
     /// rt-async 侧的 RPC 服务。MEMBENCH/LITMUS 为延迟归因工作测量探针，
     /// 经 `probe` feature 门控（见 Cargo.toml 注释）——正常开发不编译。
+    ///
+    /// 8-18 为机器人控制（AKA-00 底盘 + 机械臂，协议实现在 [`crate::robot`]）：
+    /// - 8-10 raw UART 诊断（bring-up / 排针回环实验用）
+    /// - 11-14 底盘语义（SET_SPEED/STOP 单向 / GET 同步快照 / INIT 异步完成）
+    /// - 15-18 机械臂语义（SET_ANGLE/TORQUE 单向 / GRAB/RELEASE 异步完成）
+    ///
+    /// method id 0 保留给 INIT 服务发现（ov-rpc 拦截，见其 METHOD_INIT），
+    /// 方法表从 1 起编号。
     RtAsyncRpc {
-        ECHO:  0 => call echo(val: u32) -> u32;
-        ADD:   1 => call add(a: i32, b: i32) -> i32;
-        DELAY: 2 => send delay(us: u32);
-        PING:  3 => call ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64);
-        STATS: 4 => call stat(idx: u32) -> u64;
+        ECHO:  1 => call echo(val: u32) -> u32;
+        ADD:   2 => call add(a: i32, b: i32) -> i32;
+        DELAY: 3 => send delay(us: u32);
+        PING:  4 => call ping(val: u64) -> (u64, u8, u64, u64, u64, u64);
+        STATS: 5 => call stat(idx: u32) -> u64;
         #[cfg(feature = "probe")]
-        MEMBENCH: 5 => call membench(op: u32, arg: u32) -> (u64, u64);
+        MEMBENCH: 6 => call membench(op: u32, arg: u32) -> (u64, u64);
         #[cfg(feature = "probe")]
-        LITMUS: 6 => send litmus(op: u32, arg: u32);
+        LITMUS: 7 => send litmus(op: u32, arg: u32);
+        // ── 机器人：UART raw 诊断（bring-up 期专用，勿与协议任务并发）──
+        UART_WRITE:  8 => call uart_write(port: u8, len: u8, data: [u8; 32]) -> u32;
+        UART_READ:   9 => call uart_read(port: u8, max: u8) -> (u32, [u8; 32]);
+        UART_STATUS: 10 => call uart_status(nonce: u32) -> (u32, u32, u32, u32, u32);
+        // ── 机器人：底盘（tt_pid / ESP32-C3 PID 电机控制器）──
+        CHASSIS_SET_SPEED: 11 => send chassis_set_speed(left: i16, right: i16);
+        CHASSIS_STOP:     12 => send chassis_stop(brake: u8);
+        CHASSIS_GET:      13 => call chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64);
+        CHASSIS_INIT:     14 => acall chassis_init(ppr: u16, pwm_freq: u16);
+        // ── 机器人：机械臂（zp10s 众灵舵机控制器，纯写 ASCII）──
+        ARM_SET_ANGLE: 15 => send arm_set_angle(servo: u8, angle: u16);
+        ARM_TORQUE:    16 => send arm_torque(release: u8);
+        ARM_GRAB:      17 => acall arm_grab(nonce: u32);
+        ARM_RELEASE:   18 => acall arm_release(nonce: u32);
     }
 }
 
@@ -100,7 +122,7 @@ impl RtAsyncRpc {
     ///
     /// 多消息在途时（批处理）t_isr/t_drain 会被后续中断覆盖，仅单请求
     /// 在途的测量场景保证精确。
-    fn ping(val: u64) -> (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64) {
+    fn ping(val: u64) -> (u64, u8, u64, u64, u64, u64) {
         // ①′：clint 直连（同 Slot 内同一 TIMER 实例，纯省 3µs 查找开销）。
         use platform::Timer as _;
         let t_seen = chip_k3_rt24::clint_k3::TIMER.now();
@@ -111,10 +133,6 @@ impl RtAsyncRpc {
             chip_k3_rt24::mailbox::LAST_ISR_DONE_TS.load(Ordering::Relaxed),
             T_SCHED.load(Ordering::Relaxed),
             t_seen,
-            stamp0(ov_rpc::stamp_idx::CH_ENTER),
-            stamp0(ov_rpc::stamp_idx::RECV_DONE),
-            stamp0(ov_rpc::stamp_idx::IDX_DONE),
-            stamp0(ov_rpc::stamp_idx::SERDE_DONE),
         )
     }
     /// 按索引查询插桩计数器（索引表见 [`stat_idx`]）。
@@ -132,17 +150,83 @@ impl RtAsyncRpc {
     fn litmus(op: u32, arg: u32) {
         run_litmus(op, arg)
     }
-}
 
-/// dispatch 分解戳读取：probe 开启转发 ov_rpc::stamp，关闭时恒 0
-/// （PING 元组 ABI 固定 8 元，无 stamps 构建下尾两位截断为 0）。
-#[cfg(not(feature = "probe"))]
-fn stamp0(_idx: usize) -> u64 {
-    0
-}
-#[cfg(feature = "probe")]
-fn stamp0(idx: usize) -> u64 {
-    ov_rpc::stamp::get(idx)
+    // ── 机器人：UART raw 诊断（实现在 [`crate::robot`] 的协议任务之外，
+    //    直接访问 pxa_uart 端口；bring-up 期与协议任务无并发约定）─────────
+
+    /// 原始写（无 \\n 翻译）。返回写入字节数；端口未 probe 返回 u32::MAX。
+    fn uart_write(port: u8, len: u8, data: [u8; 32]) -> u32 {
+        match chip_k3_rt24::pxa_uart::port(port as usize) {
+            Some(u) => {
+                let n = (len as usize).min(32);
+                u.write_raw(&data[..n]);
+                n as u32
+            }
+            None => u32::MAX,
+        }
+    }
+
+    /// 原始读：非阻塞取走 RX FIFO 当前全部字节（最多 max，封顶 32）。
+    /// 返回 (实际字节数, 数据)；端口未 probe 返回 (u32::MAX, _)。
+    /// （32 上限来自 serde 稳定版对 `[u8; N]` 仅实现 N≤32。）
+    fn uart_read(port: u8, max: u8) -> (u32, [u8; 32]) {
+        let mut buf = [0u8; 32];
+        let Some(u) = chip_k3_rt24::pxa_uart::port(port as usize) else {
+            return (u32::MAX, buf);
+        };
+        let lim = (max as usize).min(32);
+        let mut n = 0usize;
+        while n < lim {
+            match u.read_raw() {
+                Some(b) => {
+                    buf[n] = b;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        (n as u32, buf)
+    }
+
+    /// 系统状态：(nonce, 端口 probe 掩码 bit0..2=slot0..2, 底盘已初始化,
+    /// 底盘遥测失败计数, 臂命令队列丢弃数)。
+    fn uart_status(nonce: u32) -> (u32, u32, u32, u32, u32) {
+        let mut mask = 0u32;
+        for i in 0..chip_k3_rt24::pxa_uart::PORT_COUNT {
+            if chip_k3_rt24::pxa_uart::port(i).is_some() {
+                mask |= 1 << i;
+            }
+        }
+        let (_, inited, _, _, _, _, err, _) = crate::robot::chassis_get(0);
+        (nonce, mask, inited, err, crate::robot::arm_dropped())
+    }
+
+    // ── 机器人：语义转发（协议/任务在 [`crate::robot`]）──────────────────
+
+    fn chassis_set_speed(left: i16, right: i16) {
+        crate::robot::chassis_set_speed(left, right);
+    }
+    fn chassis_stop(brake: u8) {
+        crate::robot::chassis_stop(brake);
+    }
+    fn chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64) {
+        crate::robot::chassis_get(nonce)
+    }
+    fn chassis_init(rid: u64, ppr: u16, pwm_freq: u16) {
+        crate::robot::chassis_init(rid, ppr, pwm_freq);
+    }
+    fn arm_set_angle(servo: u8, angle: u16) {
+        crate::robot::arm_set_angle(servo, angle);
+    }
+    fn arm_torque(release: u8) {
+        crate::robot::arm_torque(release);
+    }
+    fn arm_grab(rid: u64, nonce: u32) {
+        crate::robot::arm_grab(rid, nonce);
+    }
+    fn arm_release(rid: u64, nonce: u32) {
+        crate::robot::arm_release(rid, nonce);
+    }
 }
 
 // ============================================================================
@@ -207,22 +291,10 @@ pub mod stat_idx {
     /// LITMUS：RP 侧状态（0=空闲 1=运行 2=完成 3=超时）
     #[cfg(feature = "probe")]
     pub const LIT_STATE: u32 = 19;
-    /// dispatch 分解戳：process_channel 入口（转发 ov_rpc::stamp）
+    /// 计数器总数（probe 开 20 / 关 17）
     #[cfg(feature = "probe")]
-    pub const T_CH_ENTER: u32 = 20;
-    /// dispatch 分解戳：try_recv 完成
-    #[cfg(feature = "probe")]
-    pub const T_RECV_DONE: u32 = 21;
-    /// dispatch 分解戳：handler 完成
-    #[cfg(feature = "probe")]
-    pub const T_HANDLE_DONE: u32 = 22;
-    /// dispatch 分解戳：响应写入完成
-    #[cfg(feature = "probe")]
-    pub const T_RESP_DONE: u32 = 23;
-    /// 计数器总数（probe 开 24 / 关 17）
-    #[cfg(feature = "probe")]
-    pub const COUNT: u32 = 24;
-    /// 计数器总数（probe 开 24 / 关 17）
+    pub const COUNT: u32 = 20;
+    /// 计数器总数（probe 开 20 / 关 17）
     #[cfg(not(feature = "probe"))]
     pub const COUNT: u32 = 17;
 }
@@ -242,13 +314,13 @@ mod stats {
     const MAX_INIT: AtomicU64 = AtomicU64::new(u64::MAX);
 
     // WIN_MIN/SVC_MIN 初值 u64::MAX 表示"尚无样本"（bench 侧判 MAX 显示 N/A）。
-    // probe 扩展列（17-23）恒 ZERO 初值。
+    // probe 扩展列（17-19）恒 ZERO 初值。
     #[rustfmt::skip]
     #[cfg(feature = "probe")]
     static C: [AtomicU64; stat_idx::COUNT as usize] = [
         ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ZERO,
         ZERO, MAX_INIT, ZERO, ZERO, ZERO, MAX_INIT, ZERO, ZERO, ZERO,
-        ZERO, ZERO, ZERO, ZERO, ZERO, ZERO, ZERO,
+        ZERO, ZERO, ZERO,
     ];
     #[rustfmt::skip]
     #[cfg(not(feature = "probe"))]
@@ -292,11 +364,6 @@ mod stats {
         if i == stat_idx::FREQ_HZ {
             use platform::Timer as _;
             return chip_k3_rt24::clint_k3::TIMER.freq_hz() as u64;
-        }
-        // dispatch 分解戳转发（feature "stamps"，未启用时恒 0）。
-        #[cfg(feature = "probe")]
-        if (stat_idx::T_CH_ENTER..=stat_idx::T_RESP_DONE).contains(&i) {
-            return ov_rpc::stamp::get((i - stat_idx::T_CH_ENTER) as usize);
         }
         C[i as usize].load(Ordering::Relaxed)
     }
@@ -429,19 +496,20 @@ pub mod membench_op {
     pub const DISPATCH_N: u32 = 30;
     /// 间隔版 mtime 读：N 轮 {t0=now(); 忙等 ~20µs; t1=now()}，返回 Σ 轮内
     /// now() 计时。测"间隔 20µs 的单笔 mtime MMIO 读"单价（RD_MTIME 的
-    /// 106ns 是背靠背热循环价；真实路径的 stamp mark 每条消息 4-6 次、
-    /// 间隔 µs~百 ms——若冷读 µs 级，mark 链即是隐藏税）
+    /// 106ns 是背靠背热循环价；stamps 时代真实路径每条消息 4-6 次间隔读
+    /// ——若冷读 µs 级即是隐藏税。stamps 已删，本探针保留作通用冷读价尺）
     pub const NOW_GAPPED: u32 = 31;
     /// rdcycle CSR 间隔读对照（NOW_GAPPED 的 CPU 本地版）：t0/t1 用
     /// `csrr cycle`，忙等固定圈数（~20µs @614MHz 假设）。返回每轮 cycle
     /// 差（ck=圈数）。NOW_GAPPED 实测间隔 mtime 读 ~24µs/笔（跨域同步器
-    /// 重锁，2026-08-21 定案 dslot/drest 超额真凶）——若 rdcycle 无此税，
-    /// stamp 时钟源迁 rdcycle 可每消息省 ~40-60µs 且消除测量假象
+    /// 重锁，2026-08-21 定案 dslot/drest 超额真凶；该结论随 stamps 删除
+    /// 转为历史，探针保留作冷读对照）
     /// mcycle CSR 间隔读对照（NOW_GAPPED 的 CPU 本地版）：t0/t1 用
     /// mcycle，忙等固定圈数 12000。返回每轮 cycle 差（ck=圈数）。
     /// NOW_GAPPED 实测间隔 mtime 读 ~24µs/笔（跨域同步器重锁，
     /// 2026-08-21 定案 dslot/drest 超额真凶）——mcycle 是否同税由本组探针
-    /// （GAPPED/HOT/CAL）三面定案，决定 stamp 时钟源迁移方案
+    /// （GAPPED/HOT/CAL）三面定案（原 stamp 时钟源迁移问题，已随 stamps
+    /// 删除作古）
     pub const CYCLE_GAPPED: u32 = 32;
     /// mcycle 热连读 ×1000 单价（返回首尾差 cycle 数，ck=1000）。
     /// 判别"仅冷读慢"vs"读本身慢"
@@ -741,7 +809,7 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             // PING 真实形状的本地构解双向（无窗口访问）——dserde 本地成本。
             let req_args = (0xA5A5_u64,);
             for k in 0..n(200) {
-                let msg = Message::request(k as u64, 3, &req_args).expect("req serialize");
+                let msg = Message::request(k as u64, 4, &req_args).expect("req serialize");
                 let m = msg.method_id().unwrap_or(0);
                 let (rid, _mid, a): (u64, u64, (u64,)) =
                     msg.as_request().expect("req deserialize");
@@ -846,13 +914,17 @@ fn run_membench(op: u32, arg: u32) -> (u64, u64) {
             }
         }
         M::DISPATCH_N => {
-            // op 上下文完整 dispatch（PING 形状：args (u64,)，response 10 元）
-            let msg = Message::request(0x5A5A, 3, &(7u64,)).expect("req serialize");
+            // op 上下文完整 dispatch（PING 形状：args (u64,)，response 6 元）。
+            // 响应经出参 out 写入（0.2.1 零成本路径：无 memset/按值搬移），
+            // 循环内复用同一缓冲——单价即新路径真实执行价。
+            let msg = Message::request(0x5A5A, 4, &(7u64,)).expect("req serialize");
+            let mut out = ov_rpc::Response::empty();
             for k in 0..n(200) {
-                match <RtAsyncRpc as ov_rpc::RpcHandler>::handle(3, msg) {
-                    Ok(Some(r)) => {
-                        let (_rid, _v): (u64, (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64)) =
-                            r.as_response().expect("resp shape");
+                match <RtAsyncRpc as ov_rpc::RpcHandler>::handle(4, msg, &mut out) {
+                    Ok(ov_rpc::Reply::Written) => {
+                        // 客户端视角解码（rid 之外的 postcard 载荷）
+                        let _v: (u64, u8, u64, u64, u64, u64) =
+                            postcard::from_bytes(&out.bytes()[8..]).expect("resp shape");
                     }
                     _ => {
                         ck = ck.wrapping_add(k as u64);
@@ -1554,19 +1626,9 @@ const ELASTIC_SPIN_LIMIT: u32 = 100000;
 // 公共 API
 // ============================================================================
 
-/// 装配 dispatch 分解戳时钟（clint mtime 直连——Slot 路径 ~3µs/次）。
-/// 见 ov-rpc feature "stamps"（经 `probe` 传递）。
-#[cfg(feature = "probe")]
-fn install_stamp_clock() {
-    use platform::Timer as _;
-    ov_rpc::stamp::set_clock(|| chip_k3_rt24::clint_k3::TIMER.now());
-}
-
 /// 初始化共享内存（boot 期职责已迁至 AP 内核 rt_shm 驱动 probe 期，
 /// 见 [`wait_ready`]；本函数现仅服务于 magic 自愈看门狗与旧内核回退）。
 pub fn init() {
-    #[cfg(feature = "probe")]
-    install_stamp_clock();
     let base = ov_shm::shm::base();
     unsafe {
         let shm = SharedMemory::<3>::at(base);
@@ -1606,8 +1668,6 @@ pub async fn wait_ready(poll_ms: u64, fallback_ms: u64) {
             // 关键：此路径不经过本地 init()，必须在此发布基址——
             // server()/process_elastic 依赖 SHM_BASE，漏存则它们始终读到
             // 哨兵值（has_pending 恒 false，RPC 静默失联）。
-            #[cfg(feature = "probe")]
-            install_stamp_clock();
             SHM_BASE.store(base, Ordering::Release);
             log::info!("[InterCom] AP-side init detected, service online");
             return;
