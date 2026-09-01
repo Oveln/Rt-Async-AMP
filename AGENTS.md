@@ -26,7 +26,7 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
 │   ├── user-test-{ipc,mbox,rpc,sched,bench,pbmt}/ ← AMP 测试程序（bench=延迟基准，pbmt=PMA 非缓存判窗）
 │   ├── robot-ctl/             ←   机器人控制入口（CLI + serve JSON 行，配 robot.py；RP 侧 k3-robot-ctrl）
-│   ├── rtsh/                  ←   rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：ping/stat/机器人/probe）
+│   ├── rtsh/                  ←   rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：启动自动服务发现+按名解析 mid/ping/stat/机器人/probe）
 │   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）

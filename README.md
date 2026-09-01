@@ -219,18 +219,21 @@ python3 -m http.server -d build 8000   # Host：在 build/ 目录起 HTTP 服务
 
 把 `/dev/rt_shm` 当设备打开（open + mmap + ioctl 门铃）、在共享窗上经
 ov-rpc 与 RP 固件交互式对话的 REPL——`rtsh` 无参进入（空行重复上一条，
-quit/Ctrl-D 退出），`rtsh <cmd> [args..]` 单发即退。命令面：
+quit/Ctrl-D 退出），`rtsh <cmd> [args..]` 单发即退。**启动时自动服务发现
+一次**并打印固件方法表（mid/形态/名称），命令按方法名解析 mid——固件
+侧重编号无需重编 rtsh（参数/返回类型仍编译在各命令内）。命令面：
 
-- **通用 RPC**：`echo` / `add` / `delay`、`ping [N]`（RTT 分位数 + D1-D4
+- **通用 RPC**：`services`（重新服务发现并列方法表，启动时已自动一次）、
+  `echo` / `add` / `delay`、`ping [N]`（RTT 分位数 + D1-D4
   发现路径分布，单次含 RP 侧 isr→sched / sched→seen 分段）、`stat`
   插桩计数器表（bench `s0` 的交互版）；
 - **机器人语义**：同 robot-ctl 的全部 CLI op（status/init/drive/stop/
   brake/get/arm/torque/grab/release/uwrite/uread）；
 - **probe 测量面**：`membench OP [ARG]`、`peek ADDR`（只读寄存器 1000
-  连读单价）、`litmus`——仅 probe 固件实现，普通固件上超时报错。
+  连读单价）、`litmus`——仅 probe 固件实现。
 
 配 K3 `k3-robot-ctrl` 固件时全部可用；QEMU `rt-async-app` 固件仅注册
-echo/add/delay，其余命令超时。
+echo/add/delay，其余命令按名字解析失败、立即报错（不再挂到超时）。
 
 ```bash
 cargo xtask build rtsh        # 产物 build/rtsh（wget 部署同上）
@@ -279,8 +282,8 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
 /tmp/user-test-bench lit                # 跨核免 fence 顺序性实验（LITMUS）
 ```
 
-> 固件侧探针（MEMBENCH/LITMUS/STATS 扩展列/dispatch 分解戳）由 app feature
-> `probe` 门控，**默认关闭**（正常开发视角 intercom 只含生产服务）；xtask
+> 固件侧探针（MEMBENCH/LITMUS/STATS 扩展列）由 app feature `probe` 门控，
+> **默认关闭**（正常开发视角 intercom 只含生产服务）；xtask
 > 构建的 K3 板上产物恒带上（RTASYNC_BINS 表条目 `features = ["probe"]`），
 > dd/lit/mb 场景直接可用。裸 `cargo build -p rt-async-k3` 得到无探针固件。
 > 同理，RP 侧微架构基准 bin `rtbench`（fence/原子/桥单价）由 feature `bench`
@@ -295,13 +298,12 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   mtime 的 MMIO 读。检验「无缓存 SRAM ~3.3µs/笔、256B 取读 ~105µs、
   dsched 69.8µs = ISR MMIO 舞步」等归因假设，直接决定优化方向
   （物理下限 vs 别名/瘦身）。
-- `dd`：每轮 D1 门铃唤醒，用 PING 回传的 RP mtime 8 戳（含 t_drain 与
-  dispatch 分解 t_ch_enter/t_recv_done——ov-rpc feature `stamps`）×
-  内核双戳（NOTIFY 门铃 MMIO 写前 / mailbox IRQ 入口，经 ioctl
-  `RD_KTS` 读出）做交叉分解。dseen 三段分解：弹性前缀（set_busy+urgent
-  探测）/ try_recv 取包 / dispatch+postcard 反序列化；svc 尾段（handler
-  与响应 try_send）经 STATS 20-23 锁存读出。钟差无关恒等式给出可作绝对
-  结论的量：`S = X+RP尾+Y`、`AP 回程`、闭环残差自检；`X+o` 只看抖动。
+- `dd`：每轮 D1 门铃唤醒，用 PING 回传的 RP mtime 戳（t_isr/t_drain/
+  t_sched/t_seen）× 内核双戳（NOTIFY 门铃 MMIO 写前 / mailbox IRQ 入口，
+  经 ioctl `RD_KTS` 读出）做交叉分解；svc 探针（handler 服务时长）经
+  STATS 锁存读出。钟差无关恒等式给出可作绝对结论的量：`S = X+RP尾+Y`、
+  `AP 回程`、闭环残差自检；`X+o` 只看抖动。（原 dseen 三段细分随
+  ov-rpc stamps 插桩删除——战役收官，需要时从 git 历史恢复。）
   **前提：starryos.uimg 含内核双戳（RD_KTS ioctl）——需重刷 uimg。**
 - `lit`：跨核免 fence 顺序性实验（迁移前测量，2026-08-17）——L1 消费侧
   （AP 顺序发布、RP 按读模式矩阵轮询：纯读/fence 读/邻址读）、L2 生产侧
