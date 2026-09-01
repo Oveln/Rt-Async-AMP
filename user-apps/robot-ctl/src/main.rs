@@ -53,17 +53,17 @@ const SHM_SIZE: usize = rtshm_abi::K3_SHM_SIZE;
 // 与 RP 固件 intercom.rs 的 method id 镜像（acall 在客户端按 call 声明）。
 define_service_client! {
     RtAsyncRpc {
-        UART_WRITE:  7 => call uart_write(port: u8, len: u8, data: [u8; 32]) -> u32;
-        UART_READ:   8 => call uart_read(port: u8, max: u8) -> (u32, [u8; 32]);
-        UART_STATUS: 9 => call uart_status(nonce: u32) -> (u32, u32, u32, u32, u32);
-        CHASSIS_SET_SPEED: 10 => send chassis_set_speed(left: i16, right: i16);
-        CHASSIS_STOP:     11 => send chassis_stop(brake: u8);
-        CHASSIS_GET:      12 => call chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64);
-        CHASSIS_INIT:     13 => call chassis_init(ppr: u16, pwm_freq: u16) -> u32;
-        ARM_SET_ANGLE: 14 => send arm_set_angle(servo: u8, angle: u16);
-        ARM_TORQUE:    15 => send arm_torque(release: u8);
-        ARM_GRAB:      16 => call arm_grab(nonce: u32) -> u32;
-        ARM_RELEASE:   17 => call arm_release(nonce: u32) -> u32;
+        UART_WRITE:  8 => call uart_write(port: u8, len: u8, data: [u8; 32]) -> u32;
+        UART_READ:   9 => call uart_read(port: u8, max: u8) -> (u32, [u8; 32]);
+        UART_STATUS: 10 => call uart_status(nonce: u32) -> (u32, u32, u32, u32, u32);
+        CHASSIS_SET_SPEED: 11 => send chassis_set_speed(left: i16, right: i16);
+        CHASSIS_STOP:     12 => send chassis_stop(brake: u8);
+        CHASSIS_GET:      13 => call chassis_get(nonce: u32) -> (u32, u32, i32, i32, i32, i32, u32, u64);
+        CHASSIS_INIT:     14 => call chassis_init(ppr: u16, pwm_freq: u16) -> u32;
+        ARM_SET_ANGLE: 15 => send arm_set_angle(servo: u8, angle: u16);
+        ARM_TORQUE:    16 => send arm_torque(release: u8);
+        ARM_GRAB:      17 => call arm_grab(nonce: u32) -> u32;
+        ARM_RELEASE:   18 => call arm_release(nonce: u32) -> u32;
     }
 }
 

@@ -1,8 +1,9 @@
 //! RPC 服务端
 
+use core::fmt;
 use core::sync::atomic::Ordering;
 
-use ov_channels::{ChannelId, Message, SharedMemory};
+use ov_channels::{ChannelId, Message, MsgType, PAYLOAD_SIZE, SharedMemory};
 
 use crate::{MethodId, strip_flags, is_one_way, wants_notify};
 
@@ -14,80 +15,6 @@ use crate::{MethodId, strip_flags, is_one_way, wants_notify};
 /// cfg 掉，经 CS 回退；标准 target 上别名 core 原生，行为不变。
 pub static RESP_SEND_FAILS: portable_atomic::AtomicU64 = portable_atomic::AtomicU64::new(0);
 
-// ── 延迟插桩（feature "stamps"）─────────────────────────────────────────
-//
-// 把 `process_channel` 内部分解为四段（dispatch 分解戳，dseen/svc 残余
-// 归因用，2026-08-17 延迟归因工作）：入口 / try_recv 完成 / handler 完成 /
-// 响应写入完成。时钟由 app 注入（ov-rpc 平台无关，不直接依赖任何定时器；
-// K3 app 装配 clint mtime，见 intercom::init/wait_ready 的 set_clock）。
-// 每戳 = fn 指针 Relaxed 载入（纯 ld）+ mtime MMIO 读 + Relaxed store，
-// 实测 <0.5µs/条；feature 关闭时零开销。
-
-/// 延迟插桩：dispatch 分解戳与 app 时钟钩子（feature `stamps`）。
-#[cfg(feature = "stamps")]
-pub mod stamp {
-    use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-    /// app 注入的时钟（返回任意单调 tick；0 = 未装配，now() 返回 0）。
-    static CLOCK: AtomicUsize = AtomicUsize::new(0);
-
-    /// 戳存储：[ch_enter, recv_done, handle_done, resp_done,
-    /// idx_done, serde_done]（后两槽为 L0 归因细分戳，2026-08-20）。
-    static T: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
-
-    /// 装配时钟（app init 期调用一次；单核串行，Relaxed 足够）。
-    pub fn set_clock(f: fn() -> u64) {
-        CLOCK.store(f as usize, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn mark(i: usize) {
-        let p = CLOCK.load(Ordering::Relaxed);
-        if p == 0 {
-            return;
-        }
-        // SAFETY: p 来自 set_clock 存入的合法 fn 指针。
-        let f: fn() -> u64 = unsafe { core::mem::transmute(p) };
-        T[i].store(f(), Ordering::Relaxed);
-    }
-
-    /// 读第 i 戳（STATS 转发用）。
-    pub fn get(i: usize) -> u64 {
-        if i < 6 {
-            T[i].load(Ordering::Relaxed)
-        } else {
-            0
-        }
-    }
-}
-
-#[cfg(feature = "stamps")]
-use stamp::mark;
-
-#[cfg(not(feature = "stamps"))]
-#[inline]
-fn mark(_i: usize) {}
-
-/// 戳索引（STATS 语义对齐用，双端镜像义务见 intercom::stat_idx）。
-pub mod stamp_idx {
-    /// process_channel 入口。
-    pub const CH_ENTER: usize = 0;
-    /// try_recv 完成（消息已取出）。
-    pub const RECV_DONE: usize = 1;
-    /// handler 完成（响应已构造）。
-    pub const HANDLE_DONE: usize = 2;
-    /// 响应写入完成。
-    pub const RESP_DONE: usize = 3;
-    /// try_recv 双索引 Acquire 完成（L0 细分：magic+read+write 三笔之后、
-    /// 槽读之前）。drx 拆为 [CH_ENTER→IDX_DONE]（索引 Acquire）与
-    /// [IDX_DONE→RECV_DONE]（槽读+Release）。
-    pub const IDX_DONE: usize = 4;
-    /// method_id/flags 剥离完成（L0 细分：dserde 拆为 [RECV_DONE→
-    /// SERDE_DONE]（字段读）与 [SERDE_DONE→t_seen]（dispatch 宏+postcard
-    /// 反序列化+进 handler））。
-    pub const SERDE_DONE: usize = 5;
-}
-
 /// 通道布局约定。
 pub mod channel {
     use ov_channels::ChannelId;
@@ -96,11 +23,207 @@ pub mod channel {
     pub const URGENT: ChannelId = ChannelId::new(2);
 }
 
-/// 反序列化失败时返回的错误指示符。
+/// handler 处理错误。
 ///
-/// 由 [`define_service!`](crate::define_service) 宏在 payload 无法解码时产生。
-/// 服务端据此发送错误响应，防止客户端在两方调用上永久阻塞。
-pub struct DeserializeFailed;
+/// 由 [`define_service!`](crate::define_service) 宏产生。两种情况下服务端
+/// 都会向双向调用回 poison 响应（Response kind + 原 rid + 不可解码载荷），
+/// 客户端得到
+/// `RecvError::DeserializeFailed` 而非挂死等超时。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcError {
+    /// 方法已匹配但请求参数反序列化失败。
+    DeserializeFailed,
+    /// 响应序列化超过单条消息上限（见 [`RESPONSE_DATA_MAX`]）——服务定义
+    /// 的返回类型过大，属配置错误。
+    ResponseTooLarge,
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DeserializeFailed => write!(f, "request deserialization failed"),
+            Self::ResponseTooLarge => write!(f, "response exceeds message size limit"),
+        }
+    }
+}
+
+/// 响应结果区上限（字节）：rid(8B) 之外的 postcard 结果载荷。
+///
+/// 总预算 = ov-channels 字节流单消息上限
+/// ([`MAX_STREAM_LEN`](ov_channels::stream::MAX_STREAM_LEN) = 2036B) − rid 8B。
+pub const RESPONSE_DATA_MAX: usize = ov_channels::stream::MAX_STREAM_LEN - 8;
+
+/// RPC 响应暂存缓冲（服务端侧，`rid(8B LE) ++ postcard(T)` 线格式）。
+///
+/// **零成本写路径**（K3 板 2026-09-01 回归教训）：no_std 禁动态分配，
+/// 大响应暂存只能内联定长——若用普通 `[u8; 2036]` 数组，构造时语言
+/// 语义强制全量清零（每条响应 memset ~2KB），且按值返回经 `Reply`
+/// 枚举跨函数搬移两次 ~2KB；在无缓存 SRAM（写单价为读的 5 倍）上
+/// 合计 ~170µs/条。故本类型：
+/// - 内部 `core::mem::MaybeUninit` + `len` 追踪——**写多少初始化多少**，
+///   `empty()` 是零成本构造（仅栈预留，无 memset）；
+/// - 由调用方持有（`process_channel` 栈上 / acall 完成方局部），
+///   `handle` 经**出参**写入、返回无字段的 [`Reply`]（寄存器返回），
+///   消灭按值搬移；
+/// - `send_response` 对 ≤255B 载荷走 [`ov_channels::Sender::try_send_raw`]
+///   前缀直写（响应字节在环槽里恰好写一次，尾部陈旧无害——postcard
+///   自定界，接收端解码自停，见 `ov_channels` 环层 try_send_raw 的
+///   线格式容差说明）。
+///
+/// 大响应（255B < len ≤ 2036B）走 [`ov_channels::stream`] 帧多块原子发布。
+#[derive(Clone)]
+pub struct Response {
+    buf: core::mem::MaybeUninit<[u8; ov_channels::stream::MAX_STREAM_LEN]>,
+    len: usize,
+}
+
+impl Response {
+    /// 空缓冲（零成本：不触碰内存，仅 len 置零）。
+    #[inline]
+    pub const fn empty() -> Self {
+        Self {
+            buf: core::mem::MaybeUninit::uninit(),
+            len: 0,
+        }
+    }
+
+    /// 序列化写入：`rid ++ postcard(result)`。
+    ///
+    /// 只写实际使用的字节；postcard 结果超预算（> [`RESPONSE_DATA_MAX`]）
+    /// 返回 [`RpcError::ResponseTooLarge`] 且本缓冲保持空（len 不更新）。
+    pub fn write<T: serde::Serialize>(&mut self, rid: u64, result: &T) -> Result<(), RpcError> {
+        // SAFETY（MaybeUninit 不变量）：[..8] 由本行写 rid 立即初始化；
+        // [8..] 交给 postcard 作目标写多少初始化多少；len 只在成功后
+        // 更新为 8+used——`bytes()` 只暴露 [..len]，未初始化字节永不被读。
+        // from_raw_parts_mut 只对目标区建 &mut [u8]（u8 无无效位模式），
+        // 不经 &mut [u8; 2036] 引用整块未初始化内存。
+        let dst: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.buf.as_mut_ptr() as *mut u8,
+                ov_channels::stream::MAX_STREAM_LEN,
+            )
+        };
+        dst[..8].copy_from_slice(&rid.to_le_bytes());
+        match postcard::to_slice(result, &mut dst[8..]) {
+            Ok(used) => {
+                self.len = 8 + used.len();
+                Ok(())
+            }
+            // 本路径 postcard 只会因目标缓冲不足失败（SerializeBufferOverflow）
+            Err(_) => Err(RpcError::ResponseTooLarge),
+        }
+    }
+
+    /// 原始字节写入（**不**经 postcard）——已知自有线格式的载荷（如
+    /// INIT 服务发现描述符）。超预算同 [`Self::write`]。
+    pub fn write_raw(&mut self, rid: u64, bytes: &[u8]) -> Result<(), RpcError> {
+        if bytes.len() > RESPONSE_DATA_MAX {
+            return Err(RpcError::ResponseTooLarge);
+        }
+        // SAFETY：同 write——[..8+bytes.len()] 本函数内全部写入；
+        // from_raw_parts_mut 不对未初始化区建数组引用。
+        let dst: &mut [u8] = unsafe {
+            core::slice::from_raw_parts_mut(
+                self.buf.as_mut_ptr() as *mut u8,
+                ov_channels::stream::MAX_STREAM_LEN,
+            )
+        };
+        dst[..8].copy_from_slice(&rid.to_le_bytes());
+        dst[8..8 + bytes.len()].copy_from_slice(bytes);
+        self.len = 8 + bytes.len();
+        Ok(())
+    }
+
+    /// 完整载荷视图：`rid ++ postcard(T)`（即已初始化的 `[..len]`）。
+    pub fn bytes(&self) -> &[u8] {
+        // SAFETY：write/write_raw 的不变量——[..len] 已初始化；
+        // from_raw_parts 只对 [..len] 建切片引用，未初始化区不触碰。
+        unsafe { core::slice::from_raw_parts(self.buf.as_ptr() as *const u8, self.len) }
+    }
+
+    /// 本响应对应的请求 ID（缓冲为空时返回 `None`）。
+    pub fn rid(&self) -> Option<u64> {
+        let b = self.bytes();
+        (b.len() >= 8).then(|| u64::from_le_bytes(b[..8].try_into().unwrap()))
+    }
+
+    /// 载荷长度（含 8B rid）。
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// 恒为 `false`（写入即含 rid，最小 8B）；为 clippy len/is_empty 配对保留。
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl fmt::Debug for Response {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // 不 dump 载荷：MaybeUninit 内只有 [..len] 可读，Debug 面板用
+        // len/rid 足够定位。
+        f.debug_struct("Response")
+            .field("len", &self.len)
+            .field("rid", &self.rid())
+            .finish()
+    }
+}
+
+/// [`RpcHandler::handle`] 的返回值（**无字段**——寄存器返回，零搬移）。
+///
+/// 三态区分是 poison 响应语义的前提：服务端对"方法未注册"要回 poison
+/// （防客户端挂死），但**不能**把 acall 的"稍后补发"误判成未注册——
+/// 否则客户端会在等待异步完成时先收到 poison。响应载荷经出参 `out`
+/// 写入（见 [`Response`] 文档），本枚举只表达流程分支。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// 无即时响应：one-way 完成（客户端不期待响应）或方法未注册（服务端
+    /// 按请求的 one_way 位区分二者——未注册的双向调用回 poison）。
+    Silent,
+    /// 已受理（acall）：响应由完成方稍后经 CH1 + 自行门铃补发。服务端
+    /// 不发任何即时响应，流程上等价 Quiet。
+    Deferred,
+    /// 响应已写入 `out`（单块/多块由 [`send_response`] 按长度决定）。
+    Written,
+}
+
+/// 按长度选择线格式发送一条响应。
+///
+/// - `len ≤ 255` → [`Sender::try_send_raw`](ov_channels::Sender::try_send_raw)
+///   前缀直写（kind + 实际字节进环槽，尾部陈旧——postcard 自定界，见
+///   `ov_channels::RingBuffer::try_send_raw` 的线格式容差说明）；
+/// - 否则 → 字节流帧多块原子发布（>255B 恒 ≥2 块，客户端按
+///   "Single=裸格式 / Multi=流帧"的约定无损区分）。
+///
+/// 发送失败（环满/通道无效）原样上抛，由调用方计数（如
+/// [`RESP_SEND_FAILS`]）或降级处理。
+pub fn send_response(
+    tx: &ov_channels::Sender<'_>,
+    resp: &Response,
+) -> Result<(), ov_channels::SendError> {
+    let kind = MsgType::Response as u8;
+    if resp.len <= PAYLOAD_SIZE {
+        tx.try_send_raw(kind, resp.bytes())
+    } else {
+        tx.try_send_stream(kind, resp.bytes())
+    }
+}
+
+/// 错误指示响应（poison）：Response kind + 原请求 rid + 不可解码载荷。
+///
+/// 载荷在 rid 之后填 `0xFF`——连续 `0xFF` 是非法 postcard varint，任何
+/// `T` 的 `from_bytes` 必然失败，客户端按 rid 命中后得到
+/// `RecvError::DeserializeFailed`。三个发送点：方法未注册 / 参数反序列化
+/// 失败 / 响应超长，把"客户端挂死等超时"变成"立即且可归因的失败"
+/// （版本错配下调用漂移 op 的快失败面）。
+fn poison_response(rid: u64) -> Message {
+    let mut p = [0u8; PAYLOAD_SIZE];
+    p[..8].copy_from_slice(&rid.to_le_bytes());
+    p[8..].fill(0xFF);
+    Message::raw(MsgType::Response as u8, p)
+}
 
 /// RPC 请求处理 trait。
 ///
@@ -108,11 +231,24 @@ pub struct DeserializeFailed;
 pub trait RpcHandler {
     /// 处理一个 RPC 请求。
     ///
-    /// `method` 已去除协议 flag，是实际的 method ID。
-    /// - 返回 `Ok(Some(response))` — 序列化结果，写回响应通道
-    /// - 返回 `Ok(None)` — 方法未知或单向调用已完成（无响应）
-    /// - 返回 `Err(DeserializeFailed)` — method 已匹配但 payload 反序列化失败
-    fn handle(method: MethodId, msg: Message) -> Result<Option<Message>, DeserializeFailed>;
+    /// `method` 已去除协议 flag，是实际的 method ID。响应经**出参**
+    /// `out` 写入（零搬移，见 [`Response`] 文档）：
+    /// - `Ok(Reply::Written)` — `out` 已填好，服务端写回响应通道
+    /// - `Ok(Reply::Silent)` — 方法未注册，或单向调用已完成（无响应）
+    /// - `Ok(Reply::Deferred)` — acall 已受理，响应稍后由完成方补发
+    /// - `Err(RpcError)` — 参数反序列化失败或响应超长（服务端回 poison）
+    fn handle(method: MethodId, msg: Message, out: &mut Response) -> Result<Reply, RpcError>;
+
+    /// 服务描述符字节（[`descriptor`](crate::descriptor) 紧凑格式），
+    /// 由 [`define_service!`](crate::define_service) const 生成。
+    ///
+    /// method 0（[`crate::METHOD_INIT`]）的 INIT 请求在进 `handle` 之前
+    /// 就被服务端用本描述符应答。默认实现是**合法的空描述符**
+    /// （proto + desc_len=1 + count=0，手写 impl 可不覆盖——INIT 会
+    /// 得到 0 方法的表，调用方据此识别"服务端不提供发现"）。
+    fn descriptor() -> &'static [u8] {
+        &[crate::descriptor::PROTOCOL_VERSION, 1, 0]
+    }
 }
 
 /// 处理结果的附带信息。
@@ -128,6 +264,9 @@ pub enum HandledKind {
 
 /// [`RpcServer::process_one`] / [`RpcServer::process_urgent`] 的返回结果。
 #[derive(Debug)]
+// NotRpc(Message) 内联 256B 为有意设计（no_std 无 alloc）；每消息至多
+// 构造一次、随回调即弃。
+#[allow(clippy::large_enum_variant)]
 pub enum ProcessResult {
     /// Channel 中无待处理消息
     NoMessage,
@@ -180,121 +319,104 @@ impl RpcServer {
     }
 
     fn process_channel<H: RpcHandler>(&self, ch: ChannelId) -> ProcessResult {
-        mark(stamp_idx::CH_ENTER);
         let shm = self.shm();
         let Ok(rx) = shm.receiver(ch) else {
             return ProcessResult::NoMessage;
         };
-        // stamps 构建走下方手写展开，rx 仅保留给非 stamps 路径使用
-        #[cfg(feature = "stamps")]
-        let _ = &rx;
-
-        // stamps 构建：手写展开 Channel::try_recv（语义与 ov-channels
-        // channel.rs/ring.rs 逐笔对齐，**含 P3 内存序**——见 ov-channels
-        // b45bc0a：magic/自产 read Relaxed、对端 write Acquire），在
-        // 索引载入后插 IDX_DONE 细分戳——L0 归因（2026-08-20）：drx
-        // 43.6µs 中 fence 理论仅 ~10µs，段内拆分定位其余归属。偏移与
-        // ov-rpc cache.rs 编译期断言同源：magic@0 / read@0x100 /
-        // write@0x108 / slots@0x110。
-        //
-        // **单块不变量（硬约束）**：本展开恒按 1 块推进 read——请求通道
-        // 只允许单块消息（ov-channels 0.3.0 块层设计约束，见其 block
-        // 模块文档"多块消息仅用于大响应/大块数据下行"）。若未来请求
-        // 需要多块，此处必须改为块感知扫描，否则续块会成为孤儿碎片。
-        #[cfg(feature = "stamps")]
-        let msg = {
-            use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
-            // SAFETY: ch 句柄来自 shm.receiver 的同一 channel_unchecked；
-            // 各偏移落在 Channel 布局内（cache.rs 断言对账），原子重解释
-            // 只读 magic/索引、Release 推进 read——与 ring.try_recv 同序。
-            unsafe {
-                let base = shm.channel_unchecked(ch) as *const ov_channels::Channel as usize;
-                let magic = &*(base as *const AtomicU16);
-                // P3：magic 运行期不变量 → Relaxed（免一笔 Acquire）
-                if magic.load(Ordering::Relaxed) != ov_channels::MAGIC {
-                    None
-                } else {
-                    let rb = (base + 0x100) as *const AtomicUsize;
-                    // P3：read 自产索引（消费者唯一写者）→ Relaxed；
-                    // write 对端（生产者 Release 发布）保持 Acquire。
-                    let read = (*rb).load(Ordering::Relaxed);
-                    let _write = (*rb.add(1)).load(Ordering::Acquire);
-                    mark(stamp_idx::IDX_DONE);
-                    if read == _write {
-                        None
-                    } else {
-                        // 槽区偏移 = Channel 内 RB(0x100) + RingBuffer 内
-                        // buffer 对齐偏移（ov_channels::RB_SLOTS_OFF=0x100，
-                        // Message align(256)——布局真相源见该常量注释）。
-                        let slot = (base + 0x100 + ov_channels::RB_SLOTS_OFF
-                            + read * core::mem::size_of::<ov_channels::Message>())
-                            as *const ov_channels::Message;
-                        let m = slot.read_volatile();
-                        (*rb).store(
-                            (read + 1) % ov_channels::CHANNEL_CAPACITY,
-                            Ordering::Release,
-                        );
-                        Some(m)
-                    }
-                }
-            }
-        };
-        #[cfg(not(feature = "stamps"))]
         let msg = rx.try_recv();
         let Some(msg) = msg else {
             return ProcessResult::NoMessage;
         };
-        mark(stamp_idx::RECV_DONE);
 
         let Some(raw_method) = msg.method_id() else {
             return ProcessResult::NotRpc(msg);
         };
-        mark(stamp_idx::SERDE_DONE);
+
+        // Request kind 且 payload ≥ 16B（method_id 已验）⇒ rid 必在；
+        // unwrap_or(0) 仅防御畸形消息。rid 须在 handle 消费 msg 前取出
+        // （poison 响应要按它寻址）。
+        let rid = msg.request_id().unwrap_or(0);
 
         let one_way = is_one_way(raw_method);
         let notify = wants_notify(raw_method);
         let method = strip_flags(raw_method);
 
-        let resp = match H::handle(method, msg) {
-            Ok(Some(resp)) => {
-                mark(stamp_idx::HANDLE_DONE);
-                resp
+        // 服务发现：method 0 保留（METHOD_INIT）——描述符经大响应通路
+        // 回发，不进 handler。旧固件（无拦截、未重编号）下 INIT 落到
+        // handler 的未知方法 → poison → 客户端快失败识别"无服务发现"。
+        let mut resp = Response::empty();
+        if method == crate::METHOD_INIT {
+            match resp.write_raw(rid, H::descriptor()) {
+                Ok(()) => {
+                    if !one_way
+                        && let Ok(tx) = shm.sender(self.resp_ch)
+                        && send_response(&tx, &resp).is_err()
+                    {
+                        RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return ProcessResult::Handled(if notify {
+                        HandledKind::Notify
+                    } else {
+                        HandledKind::Quiet
+                    });
+                }
+                // 描述符超预算（服务表配置错误）：按响应超长走 poison
+                Err(_) => {
+                    if !one_way
+                        && let Ok(tx) = shm.sender(self.resp_ch)
+                        && tx.try_send(&poison_response(rid)).is_err()
+                    {
+                        RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return ProcessResult::Unhandled(method);
+                }
             }
-            Ok(None) => {
-                // One-way handlers return Ok(None) by design.
-                // If this was a one-way call, report it as handled.
-                // Otherwise the method ID was unknown.
+        }
+
+        match H::handle(method, msg, &mut resp) {
+            Ok(Reply::Written) => {}
+            Ok(Reply::Deferred) => {
+                // acall 已受理：无即时响应，完成方自行补发 + 门铃。
+                // 等价 Quiet（计已处理，不回 IPI）——绝不能走 poison。
+                return ProcessResult::Handled(HandledKind::Quiet);
+            }
+            Ok(Reply::Silent) => {
                 if one_way {
                     return ProcessResult::Handled(HandledKind::OneWay);
                 }
-                return ProcessResult::Unhandled(method);
-            }
-            Err(_) => {
-                // Method matched but payload deserialization failed.
-                #[cfg(feature = "logging")]
-                log::warn!("[RpcServer] deserialization failed for method {}", method);
-                if !one_way {
-                    // Send an error response so the client doesn't hang forever.
-                    if let Ok(tx) = shm.sender(self.resp_ch) {
-                        if tx.try_send(&Message::notification(0)).is_err() {
-                            RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
-                            #[cfg(feature = "logging")]
-                            log::warn!("[RpcServer] failed to send error response for method {}", method);
-                        }
-                    }
+                // 方法未注册（版本错配/漂移 op）：poison 响应防客户端挂死
+                if let Ok(tx) = shm.sender(self.resp_ch)
+                    && tx.try_send(&poison_response(rid)).is_err()
+                {
+                    RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
                 }
                 return ProcessResult::Unhandled(method);
             }
-        };
+            Err(e) => {
+                // 参数反序列化失败或响应超长
+                #[cfg(feature = "logging")]
+                log::warn!("[RpcServer] {} for method {}", e, method);
+                #[cfg(not(feature = "logging"))]
+                let _ = &e;
+                if !one_way
+                    && let Ok(tx) = shm.sender(self.resp_ch)
+                    && tx.try_send(&poison_response(rid)).is_err()
+                {
+                    RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "logging")]
+                    log::warn!("[RpcServer] failed to send error response for method {}", method);
+                }
+                return ProcessResult::Unhandled(method);
+            }
+        }
 
         if !one_way {
             if let Ok(tx) = shm.sender(self.resp_ch) {
-                if tx.try_send(&resp).is_err() {
+                if send_response(&tx, &resp).is_err() {
                     RESP_SEND_FAILS.fetch_add(1, Ordering::Relaxed);
                     #[cfg(feature = "logging")]
                     log::warn!("[RpcServer] failed to send response for method {}", method);
                 }
-                mark(stamp_idx::RESP_DONE);
             } else {
                 #[cfg(feature = "logging")]
                 log::warn!("[RpcServer] failed to acquire response channel for method {}", method);

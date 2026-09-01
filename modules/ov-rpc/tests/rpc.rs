@@ -11,13 +11,13 @@ use ov_rpc::{
 
 define_service! {
     pub CalcService {
-        ECHO:   0 => call echo(val: u32) -> u32;
-        ADD:    1 => call add(a: i32, b: i32) -> i32;
-        PING:   2 => call ping() -> u32;
-        NEGATE: 3 => call negate(val: i32) -> i32;
-        SUM3:   4 => call sum3(a: i32, b: i32, c: i32) -> i32;
-        LOG:    5 => send log(msg: u32);
-        STOP:   6 => urgent stop();
+        ECHO:   1 => call echo(val: u32) -> u32;
+        ADD:    2 => call add(a: i32, b: i32) -> i32;
+        PING:   3 => call ping() -> u32;
+        NEGATE: 4 => call negate(val: i32) -> i32;
+        SUM3:   5 => call sum3(a: i32, b: i32, c: i32) -> i32;
+        LOG:    6 => send log(msg: u32);
+        STOP:   7 => urgent stop();
     }
 }
 
@@ -36,7 +36,7 @@ impl CalcService {
 
 define_service! {
     pub RawService {
-        IDENT: 0 => call ident(val: u64) -> u64;
+        IDENT: 1 => call ident(val: u64) -> u64;
     }
 }
 
@@ -321,7 +321,6 @@ fn test_process_all_with_urgent_first() {
 #[test]
 fn test_process_all_quiet_no_notify() {
     let ctx = TestContext::new();
-    let ctx = ctx;
 
     // call_poll → Quiet, should NOT trigger notify
     ctx.client.call_poll(CalcService::ECHO, &10u32, || {}).unwrap();
@@ -400,12 +399,12 @@ fn test_has_pending_and_urgent() {
     // client 发到 CH0 (req_ch)
     let shm = unsafe { SharedMemory::<3>::at(ctx._shm as *const _ as usize) };
     shm.sender(ChannelId::new(0)).unwrap()
-        .try_send(&Message::request(1, 0, &()).unwrap()).unwrap();
+        .try_send(&Message::request(1, 1, &()).unwrap()).unwrap();
     assert!(ctx.server.has_pending());
     assert!(!ctx.server.has_urgent());
 
     shm.sender(ChannelId::new(2)).unwrap()
-        .try_send(&Message::request(2, 6, &()).unwrap()).unwrap();
+        .try_send(&Message::request(2, 7, &()).unwrap()).unwrap();
     assert!(ctx.server.has_urgent());
 }
 
@@ -415,13 +414,14 @@ fn test_has_pending_and_urgent() {
 
 #[test]
 fn test_method_id_constants() {
-    assert_eq!(CalcService::ECHO, 0);
-    assert_eq!(CalcService::ADD, 1);
-    assert_eq!(CalcService::PING, 2);
-    assert_eq!(CalcService::NEGATE, 3);
-    assert_eq!(CalcService::SUM3, 4);
-    assert_eq!(CalcService::LOG, 5);
-    assert_eq!(CalcService::STOP, 6);
+    // method 0 保留给 INIT 服务发现，方法表从 1 起编号
+    assert_eq!(CalcService::ECHO, 1);
+    assert_eq!(CalcService::ADD, 2);
+    assert_eq!(CalcService::PING, 3);
+    assert_eq!(CalcService::NEGATE, 4);
+    assert_eq!(CalcService::SUM3, 5);
+    assert_eq!(CalcService::LOG, 6);
+    assert_eq!(CalcService::STOP, 7);
 }
 
 // ============================================================================
@@ -452,11 +452,11 @@ use ov_rpc::define_service_client;
 
 define_service_client! {
     TestRpc {
-        ECHO:   0 => call echo(val: u32) -> u32;
-        ADD:    1 => call add(a: i32, b: i32) -> i32;
-        PING:   2 => call ping() -> u32;
-        LOG:    5 => send log(msg: u32);
-        STOP:   6 => urgent stop();
+        ECHO:   1 => call echo(val: u32) -> u32;
+        ADD:    2 => call add(a: i32, b: i32) -> i32;
+        PING:   3 => call ping() -> u32;
+        LOG:    6 => send log(msg: u32);
+        STOP:   7 => urgent stop();
     }
 }
 

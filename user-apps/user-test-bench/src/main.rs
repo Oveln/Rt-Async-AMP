@@ -75,18 +75,17 @@ use ov_channels::{ChannelId, Message, SharedMemory};
 // ── 协议常量（与 RP 侧 apps/rt-async-k3/src/intercom.rs 镜像，双端对齐义务）──
 
 /// RtAsyncRpc::PING
-const M_PING: u64 = 3;
+const M_PING: u64 = 4;
 /// RtAsyncRpc::STATS
-const M_STATS: u64 = 4;
+const M_STATS: u64 = 5;
 /// RtAsyncRpc::MEMBENCH
-const M_MEMBENCH: u64 = 5;
+const M_MEMBENCH: u64 = 6;
 /// RtAsyncRpc::LITMUS（单向 send：结果经 STATS LIT_* 轮询）
-const M_LITMUS: u64 = 6;
+const M_LITMUS: u64 = 7;
 
-/// PING 响应：(val, tag, t_isr, t_drain, t_sched, t_seen, t_ch_enter, t_recv_done)
-/// —— 后两项是 ov-rpc dispatch 分解戳（feature "stamps"）：process_channel
-/// 入口 / try_recv 完成，dseen 的三段分解（弹性前缀/取包/分发反序列化）。
-type PingResp = (u64, u8, u64, u64, u64, u64, u64, u64, u64, u64);
+/// PING 响应：(val, tag, t_isr, t_drain, t_sched, t_seen)。后四位是 RP 侧
+/// mtime 分段时间戳（见固件 intercom::ping 文档；原 stamps 分解戳已删）。
+type PingResp = (u64, u8, u64, u64, u64, u64);
 
 /// MEMBENCH 操作码（镜像 intercom::membench_op，双端对齐义务）。
 #[allow(dead_code)]
@@ -178,20 +177,15 @@ mod stat_idx {
     pub const LIT_VIOL: usize = 17;
     pub const LIT_ROUNDS: usize = 18;
     pub const LIT_STATE: usize = 19;
-    pub const T_CH_ENTER: usize = 20;
-    pub const T_RECV_DONE: usize = 21;
-    pub const T_HANDLE_DONE: usize = 22;
-    pub const T_RESP_DONE: usize = 23;
 }
 
-const STAT_COUNT: usize = 24;
+const STAT_COUNT: usize = 20;
 
 const STAT_NAMES: [&str; STAT_COUNT] = [
     "msgs", "d1", "d2", "d3", "d4", "redundant_irq", "resp_fail", "heals",
     "win_last_ns", "win_min_ns", "win_max_ns", "windows",
     "svc_last_ns", "svc_min_ns", "svc_max_ns", "t_now", "freq_hz",
     "lit_viol", "lit_rounds", "lit_state",
-    "t_ch_enter", "t_recv_done", "t_handle_done", "t_resp_done",
 ];
 
 // K3/QEMU 共享窗大小同值 0x19000（真源设备树，见 rtshm-abi）。
@@ -457,12 +451,6 @@ struct Sample {
     d_disp_ns: u64,
     /// RP 分段：t_seen − t_sched（任务恢复 → handler 入口）
     d_seen_ns: u64,
-    /// RP 分段：t_ch_enter − t_sched（弹性前缀：set_busy+urgent 探测+计时）
-    d_pre_ns: u64,
-    /// RP 分段：t_recv_done − t_ch_enter（try_recv 取包：3 笔原子读+块读+索引写）
-    d_rx_ns: u64,
-    /// RP 分段：t_seen − t_recv_done（dispatch match + postcard 反序列化）
-    d_serde_ns: u64,
     isr_ticks: u64,
     drain_ticks: u64,
     sched_ticks: u64,
@@ -492,7 +480,7 @@ struct Bench {
     probe_kts: bool,
     /// H9 对照模式（env BENCH_SPIN_AWAIT=1）：响应等待跳过 AWAIT syscall，
     /// 纯用户态轮询（零 syscall/零内核原子/零调度）。
-    /// drx/dserde 应声下跌 ⇒ AP 内核路径（syscall 原子 + 调度）与 RP 的
+    /// rtt/dseen 应声下跌 ⇒ AP 内核路径（syscall 原子 + 调度）与 RP 的
     /// fence 在全局 Atomics Wrapper/互连上排队竞争。
     spin_await: bool,
 }
@@ -1046,10 +1034,6 @@ fn run_measured(b: &mut Bench, scen: &str, n: usize, interval_cfg: Option<u64>, 
         let d_sched = t2ns(r.4.saturating_sub(r.2), freq);
         let d_disp = t2ns(r.4.saturating_sub(r.3), freq);
         let d_seen = t2ns(r.5.saturating_sub(r.4), freq);
-        // dispatch 分解（stamps：r.6=t_ch_enter, r.7=t_recv_done）
-        let d_pre = t2ns(r.6.saturating_sub(r.4), freq);
-        let d_rx = t2ns(r.7.saturating_sub(r.6), freq);
-        let d_serde = t2ns(r.5.saturating_sub(r.7), freq);
         samples.push(Sample {
             seq,
             tag: r.1,
@@ -1061,9 +1045,6 @@ fn run_measured(b: &mut Bench, scen: &str, n: usize, interval_cfg: Option<u64>, 
             d_sched_ns: d_sched,
             d_disp_ns: d_disp,
             d_seen_ns: d_seen,
-            d_pre_ns: d_pre,
-            d_rx_ns: d_rx,
-            d_serde_ns: d_serde,
             isr_ticks: r.2,
             drain_ticks: r.3,
             sched_ticks: r.4,
@@ -1414,13 +1395,6 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
     let seen: Vec<u64> = samples.iter().map(|s| s.d_seen_ns).collect();
     println!("\n[RP 分段（全体）]");
     show("t_seen−t_sched（任务恢复→handler）", &calc(&seen));
-    // dispatch 分解（stamps）：弹性前缀 / try_recv 取包 / 分发+反序列化
-    let pre: Vec<u64> = samples.iter().map(|s| s.d_pre_ns).collect();
-    let rx: Vec<u64> = samples.iter().map(|s| s.d_rx_ns).collect();
-    let ser: Vec<u64> = samples.iter().map(|s| s.d_serde_ns).collect();
-    show("  ├ t_ch_enter−t_sched（弹性前缀：busy+urgent 探测+计时）", &calc(&pre));
-    show("  ├ t_recv_done−t_ch_enter（try_recv 取包）", &calc(&rx));
-    show("  └ t_seen−t_recv_done（dispatch match+postcard 反序列化）", &calc(&ser));
     let send: Vec<u64> = samples.iter().map(|s| s.send_ns).collect();
     println!("\n[AP 分段]");
     show("发送段（写+门铃决策）", &calc(&send));
@@ -1456,11 +1430,11 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
 
     // ── CSV ──
     let mut csv = String::from(
-        "seq,tag,sent_ipi,rtt_ns,send_ns,sysc,ddrain_ns,dsched_ns,ddisp_ns,dseen_ns,dpre_ns,drx_ns,dserde_ns,isr,drain,sched,seen\n",
+        "seq,tag,sent_ipi,rtt_ns,send_ns,sysc,ddrain_ns,dsched_ns,ddisp_ns,dseen_ns,isr,drain,sched,seen\n",
     );
     for s in samples {
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             s.seq,
             s.tag,
             s.sent_ipi as u8,
@@ -1471,9 +1445,6 @@ fn summarize(b: &Bench, scen: &str, before: &Snap, after: &Snap, samples: &[Samp
             s.d_sched_ns,
             s.d_disp_ns,
             s.d_seen_ns,
-            s.d_pre_ns,
-            s.d_rx_ns,
-            s.d_serde_ns,
             s.isr_ticks,
             s.drain_ticks,
             s.sched_ticks,
@@ -1884,7 +1855,7 @@ fn run_mb(b: &mut Bench, line_n: u32) {
     }
     // 计时源替换候选三面判读：AP 域 soc-timer 0xd4016000 空闲 counter1
     // （AP 仅用 counter0 做广播、块时钟常开；布局=上游 timer-k1x.c）。
-    // 免冷读税即可承接 step/SVC/stamp 计时（mtime 冷读 24.5µs/笔 的根治）。
+    // 免冷读税即可承接 step/SVC 计时（mtime 冷读 24.5µs/笔 的根治）。
     // 注意表序 clkon/rt_on 在三面前（先开门，首轮实锤两块时钟均常闭）。
     if tmr_clkon_seen {
         let cer = tmr_clkon_ck >> 32;
@@ -2049,21 +2020,6 @@ struct DdRow {
     ddrain_ns: u64,
     ddisp_ns: u64,
     dseen_ns: u64,
-    /// dseen 细分（stamps 探针）：sched→ch_enter / ch_enter→recv_done /
-    /// recv_done→seen。固件无 probe 时 ch_enter==0，分布行自动跳过。
-    dpre_ns: u64,
-    drx_ns: u64,
-    dserde_ns: u64,
-    /// L0 段内细分（2026-08-20）：didx = ch_enter→idx_done（magic+双索引
-    /// Acquire）、dslot = idx_done→recv_done（槽读+Release）、dmth =
-    /// recv_done→serde_done（method_id/flags）、drest = serde_done→seen
-    /// （dispatch 宏+postcard+进 handler）。固件旧 ABI 时 idx_done==0。
-    didx_ns: u64,
-    dslot_ns: u64,
-    dmth_ns: u64,
-    drest_ns: u64,
-    ch_enter: u64,
-    idx_done: u64,
     svc_ns: u64,
     /// t_isr(mtime ns) − kpre(内核 ns)：门铃去程 X + 未知钟差常数 ΔE。
     /// **可为负**（mtime 自上电计、内核时钟自内核启动计，epoch 不同），
@@ -2088,7 +2044,7 @@ struct DdRow {
 ///   handler 出口→RP 门铃写 + 回程门铃，全部真值）；
 /// - ap_ret = R − s_val，其中 R = (t1−t_send_end)−(t_seen−t_isr)；
 /// - 闭合：rtt ≈ send + ddrain + ddisp + dseen + s_val + ap_ret。
-fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, warm_gap: u64) {
+fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize) {
     warmup_paced(b, warmup);
 
     let cal = b.snapshot().unwrap_or_else(die);
@@ -2102,7 +2058,7 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
     };
     let interval = interval_cfg.unwrap_or((w_ns * 2).max(2_000_000_000));
     println!(
-        "[dd] n={n} interval={}ns W={:.1}ms freq={freq} warm_gap={warm_gap}ns（kpre/kirq 探针已开：每轮 +2 ioctl，不计 sysc）",
+        "[dd] n={n} interval={}ns W={:.1}ms freq={freq} （kpre/kirq 探针已开：每轮 +2 ioctl，不计 sysc）",
         interval_cfg.map(|v| format!("{v} (指定)")).unwrap_or_else(|| format!("{interval} (默认 2W)")),
         w_ns as f64 / 1e6,
     );
@@ -2113,17 +2069,8 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
     let mut rows: Vec<DdRow> = Vec::with_capacity(n);
     for seq in 0..n as u64 {
         // 先睡再发：保证 RP 处于目标路径状态（大间隔 = D1 睡眠；小间隔 =
-        // D2 弹性窗内）。warm_gap 模式把睡眠切为 interval−gap + gap 两段，
-        // 每轮总长不变。
-        sleep_until(mono_ns() + interval - warm_gap.min(interval));
-        if warm_gap > 0 {
-            // 预热对照（冷执行税判别实验，2026-08-20）：测量消息前 warm_gap
-            // 发一条丢弃的 warm PING，让 RP 刚走完一遍同代码路径（取指/
-            // 前端缓冲/行状态热）。若 drx 从 ~43.6µs 跌到探针价（~12µs）
-            // ⇒ 32µs 差额为冷执行税（非 fence 单价——H1 已证伪）。
-            let _ = b.ping_round(u64::MAX - seq);
-            sleep_until(mono_ns() + warm_gap);
-        }
+        // D2 弹性窗内）。
+        sleep_until(mono_ns() + interval);
         let (r, out) = b.ping_round(seq).unwrap_or_else(die);
         // SVC 探针：此时读到的 SVC_LAST 即本轮 PING 的服务时长（STATS
         // 自己的 svc 在其 handler 返回后才落账，不覆盖本次读数）。
@@ -2132,16 +2079,6 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
         let ddrain = t2ns(r.3.saturating_sub(r.2), freq);
         let ddisp = t2ns(r.4.saturating_sub(r.3), freq);
         let dseen = t2ns(r.5.saturating_sub(r.4), freq);
-        // dispatch 分解（stamps：r.6=t_ch_enter、r.7=t_recv_done、
-        // r.8=t_idx_done、r.9=t_serde_done——L0 细分：drx 拆索引/槽两段、
-        // dserde 拆字段读/dispatch 两段）
-        let dpre = t2ns(r.6.saturating_sub(r.4), freq);
-        let drx = t2ns(r.7.saturating_sub(r.6), freq);
-        let dserde = t2ns(r.5.saturating_sub(r.7), freq);
-        let didx = t2ns(r.8.saturating_sub(r.6), freq);
-        let dslot = t2ns(r.7.saturating_sub(r.8), freq);
-        let dmth = t2ns(r.9.saturating_sub(r.7), freq);
-        let drest = t2ns(r.5.saturating_sub(r.9), freq);
         let t_isr_ns = t2ns(r.2, freq);
         let t_seen_ns = t2ns(r.5, freq);
         // 带符号跨钟差：X+ΔE 可负（epoch 不同），saturating 会破坏 S 恒等式。
@@ -2160,15 +2097,6 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             ddrain_ns: ddrain,
             ddisp_ns: ddisp,
             dseen_ns: dseen,
-            dpre_ns: dpre,
-            drx_ns: drx,
-            dserde_ns: dserde,
-            didx_ns: didx,
-            dslot_ns: dslot,
-            dmth_ns: dmth,
-            drest_ns: drest,
-            ch_enter: r.6,
-            idx_done: r.8,
             svc_ns,
             x_plus_o,
             s_val,
@@ -2176,7 +2104,7 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             closure: rtt as i64 - sum,
         });
         println!(
-            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>9.1} svc={:>6.1} drx={:>6.1}(idx={:>5.1} slot={:>5.1}) dserde={:>6.1}(mth={:>5.1} rst={:>5.1}) X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
+            "  rd#{seq} tag=D{} ipi={} rtt={:>7.1} send={:>6.1} ddrain={:>6.1} ddisp={:>6.1} dseen={:>9.1} svc={:>6.1} X+o={:>8.1} S={:>7.1} APret={:>7.1} 闭环={:+.1} µs",
             r.1,
             out.sent_ipi as u8,
             rtt as f64 / 1e3,
@@ -2185,12 +2113,6 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
             ddisp as f64 / 1e3,
             dseen as f64 / 1e3,
             svc_ns as f64 / 1e3,
-            drx as f64 / 1e3,
-            didx as f64 / 1e3,
-            dslot as f64 / 1e3,
-            dserde as f64 / 1e3,
-            dmth as f64 / 1e3,
-            drest as f64 / 1e3,
             x_plus_o as f64 / 1e3,
             s_val as f64 / 1e3,
             ap_ret as f64 / 1e3,
@@ -2202,11 +2124,11 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
     // 见 run_measured 同款注释）——待内核侧派生计数器随 ②a-v2 一并上。
 
     // 按 tag 分桶输出。戳有效性（板上实证 2026-08-20）：
-    // - drx/dserde/svc/rtt/send 用本条消息自己的戳，任何发现路径下有效；
-    // - dpre/dseen 依赖 T_SCHED（唤醒入口戳，连续流下 process_elastic 不
-    //   重入故不刷新——D2/D3 样本线性膨胀至数百 ms）；ddrain/ddisp/X+o/S
-    //   依赖唤醒链戳（t_isr/t_drain），非 D1 下是上一周期残值。后五者仅
-    //   D1 桶输出。
+    // - svc/rtt/send 用本条消息自己的戳，任何发现路径下有效；
+    // - dseen 依赖 T_SCHED（唤醒入口戳，连续流下 process_elastic 不重入
+    //   故不刷新——D2/D3 样本线性膨胀至数百 ms）；ddrain/ddisp/X+o/S 依赖
+    //   唤醒链戳（t_isr/t_drain），非 D1 下是上一周期残值。后四者仅 D1
+    //   桶输出。
     let d1: Vec<&DdRow> = rows.iter().filter(|x| x.tag == TAG_D1 && x.sent_ipi).collect();
     let bad = rows.len() - d1.len();
     if bad > 0 {
@@ -2223,34 +2145,17 @@ fn run_dd(b: &mut Bench, n: usize, interval_cfg: Option<u64>, warmup: usize, war
         }
         let col = |f: &dyn Fn(&&DdRow) -> u64| -> Vec<u64> { bucket.iter().map(f).collect() };
         if tag != TAG_D1 {
-            println!("\n[dd 分布（{name} 样本，n={}）——dpre/dseen/ddrain/ddisp/X+o/S 依赖唤醒链戳，非 D1 下语义失效，不输出]", bucket.len());
+            println!("\n[dd 分布（{name} 样本，n={}）——dseen/ddrain/ddisp/X+o/S 依赖唤醒链戳，非 D1 下语义失效，不输出]", bucket.len());
         } else {
             println!("\n[dd 分布（D1 样本，n={}）]", bucket.len());
         }
         show("RTT", &calc(&col(&|x| x.rtt_ns)));
         show("send（AP 用户态发送段）", &calc(&col(&|x| x.send_ns)));
         show("svc（STATS 探针）", &calc(&col(&|x| x.svc_ns)));
-        // dseen 细分（stamps：本条消息自己的戳，全 tag 有效）
-        if bucket.iter().any(|x| x.ch_enter != 0) {
-            show("drx（try_recv：CH_ENTER→RECV_DONE）", &calc(&col(&|x| x.drx_ns)));
-            show("dserde（dispatch 反序列化→handler）", &calc(&col(&|x| x.dserde_ns)));
-        } else {
-            println!("  （固件无 stamps 探针，drx/dserde 细分段跳过——xtask 构建的 K3 产物 probe 恒开）");
-        }
-        // L0 段内细分（2026-08-20 新 ABI）：drx 拆 idx/slot，dserde 拆 mth/rest
-        if bucket.iter().any(|x| x.idx_done != 0) {
-            show("didx（CH_ENTER→IDX_DONE：magic+双索引 Acquire）", &calc(&col(&|x| x.didx_ns)));
-            show("dslot（IDX_DONE→RECV_DONE：槽读+Release）", &calc(&col(&|x| x.dslot_ns)));
-            show("dmth（RECV_DONE→SERDE_DONE：method_id/flags）", &calc(&col(&|x| x.dmth_ns)));
-            show("drest（SERDE_DONE→handler：dispatch 宏+postcard）", &calc(&col(&|x| x.drest_ns)));
-        }
         if tag == TAG_D1 {
             show("t_drain−t_isr（ISR 内 MMIO 舞步）", &calc(&col(&|x| x.ddrain_ns)));
             show("t_sched−t_drain（trap+派发+恢复）", &calc(&col(&|x| x.ddisp_ns)));
             show("t_seen−t_sched（取读+handler）", &calc(&col(&|x| x.dseen_ns)));
-            if d1.iter().any(|x| x.ch_enter != 0) {
-                show("dpre（sched→handler 进入）", &calc(&col(&|x| x.dpre_ns)));
-            }
         }
         // X+o 含未知钟差常数：去 min 归零后看抖动（负值合法，见 DdRow 文档）。
         if tag == TAG_D1 {
@@ -2287,8 +2192,7 @@ fn usage() -> ! {
          \x20 s6  边界流（间隔 W，D1/D2 混合）\n\
          \x20 raw 自由间隔（interval_ns 必填）\n\
          \x20 mb  RP 内存/MMIO 微基准（iterations = 行级次数，默认 2000）\n\
-         \x20 dd  D1/D2 分解交叉测量（轮数默认 30，间隔默认 2W；第 5 参数\n\
-         \x20     warm_gap_ns：测量前发一条丢弃的 warm PING——预热对照实验）\n\
+         \x20 dd  D1/D2 分解交叉测量（轮数默认 30，间隔默认 2W）\n\
          \x20 lit 跨核免 fence 顺序性实验（LITMUS，L1/L2/L3 含对照组）"
     );
     std::process::exit(1);
@@ -2318,8 +2222,6 @@ fn main() {
     let n: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(default_n);
     let interval_cfg: Option<u64> = args.get(3).and_then(|s| s.parse().ok());
     let warmup: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(50);
-    // dd 专用：测量消息前 warm_gap 发一条丢弃的 warm PING（冷执行税对照）
-    let warm_gap: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
     if scen == "raw" && interval_cfg.is_none() {
         eprintln!("raw 场景必须指定 interval_ns");
         usage();
@@ -2388,7 +2290,7 @@ fn main() {
     match scen.as_str() {
         "s0" => run_s0(&mut b, warmup),
         "mb" => run_mb(&mut b, n as u32),
-        "dd" => run_dd(&mut b, n, interval_cfg, warmup, warm_gap),
+        "dd" => run_dd(&mut b, n, interval_cfg, warmup),
         "lit" => run_lit(&mut b),
         _ => run_measured(&mut b, &scen, n, interval_cfg, warmup),
     }

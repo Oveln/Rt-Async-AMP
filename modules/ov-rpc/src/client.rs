@@ -2,9 +2,11 @@
 
 use core::sync::atomic::Ordering;
 
-use ov_channels::{ChannelId, Message, SharedMemory};
+use ov_channels::{
+    ChannelId, Message, MessageBuf, MsgType, PAYLOAD_SIZE, RecvOutcome, SharedMemory, stream,
+};
 
-use crate::{RequestId, NOTIFY_FLAG, ONE_WAY_FLAG};
+use crate::{RequestId, RESPONSE_DATA_MAX, NOTIFY_FLAG, ONE_WAY_FLAG};
 
 /// Errors that can occur when receiving an RPC response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +14,9 @@ pub enum RecvError {
     /// A response was present in the buffer but failed to deserialize.
     ///
     /// The message has been consumed (removed from the buffer); the caller
-    /// cannot retry with a different type.
+    /// cannot retry with a different type. 服务端 poison 响应（方法未注册/
+    /// 参数反序列化失败/响应超长）同样落到这里——按 rid 关联的调用方
+    /// 据此把"等响应挂死"变成快失败。
     DeserializeFailed,
 }
 
@@ -41,16 +45,44 @@ pub mod channel {
     pub const URGENT: ChannelId = ChannelId::new(2);
 }
 
+/// 缓冲的一条响应：rid + 已剥除 rid 的 postcard 结果字节。
+///
+/// 尺寸上限与服务端 [`Response`](crate::Response) 同预算（大响应经
+/// ov-channels 0.3 块层多块到达，poll 时归一化到本结构）。
+#[derive(Clone, Copy)]
+struct RespEntry {
+    rid: RequestId,
+    len: usize,
+    data: [u8; RESPONSE_DATA_MAX],
+}
+
+impl RespEntry {
+    const EMPTY: Self = Self {
+        rid: 0,
+        len: 0,
+        data: [0; RESPONSE_DATA_MAX],
+    };
+
+    /// 按目标类型解码（postcard 容忍尾随零填充）。
+    fn decode<T: serde::de::DeserializeOwned>(&self) -> Option<T> {
+        postcard::from_bytes(&self.data[..self.len]).ok()
+    }
+}
+
 /// RPC 客户端。
 ///
 /// 支持四种调用模式：`call` / `call_poll` / `send` / `urgent`。
+///
+/// 响应通道经 [`Receiver::try_recv_into`](ov_channels::Receiver::try_recv_into)
+/// 接收：单块（≤247B 结果，与 0.2.x 线格式相同）与多块流帧（大响应，
+/// ≤2028B）都归一进内部缓冲。
 pub struct RpcClient {
     shm_addr: usize,
     req_ch: ChannelId,
     resp_ch: ChannelId,
     urgent_ch: ChannelId,
     buf_len: usize,
-    buf: [(RequestId, Message); BUF_CAP],
+    buf: [RespEntry; BUF_CAP],
 }
 
 impl RpcClient {
@@ -72,7 +104,7 @@ impl RpcClient {
             resp_ch,
             urgent_ch,
             buf_len: 0,
-            buf: [(0, Message::empty()); BUF_CAP],
+            buf: [RespEntry::EMPTY; BUF_CAP],
         }
     }
 
@@ -181,6 +213,11 @@ impl RpcClient {
     /// Drain up to `BUF_CAP` response messages from `resp_ch` into the
     /// internal buffer and return the number drained.
     ///
+    /// 经 [`Receiver::try_recv_into`](ov_channels::Receiver::try_recv_into)
+    /// 接收：单块响应（裸格式 `rid ++ postcard(T)`）与多块响应（字节流帧
+    /// `[len][rid ++ postcard(T)]`，服务端 >247B 结果）都归一化。非
+    /// Request/Response kind 的消息（如 notification）照旧取走并丢弃。
+    ///
     /// If more than `BUF_CAP` responses are pending, only the first
     /// `BUF_CAP` are buffered; the rest stay in the channel and will be
     /// available on the next call. No responses are lost — this is
@@ -196,16 +233,47 @@ impl RpcClient {
             return 0;
         };
 
-        // （原 user-cbo 按行刷新/发布已随 PMA 非缓存窗口撤除——索引与槽位
-        // 读写直达 SRAM，try_recv 内部读恒新鲜。）
+        // 重组 scratch：多块响应先重组进 MessageBuf（载荷连接视图）再拷出入队
+        let mut scratch = MessageBuf::new();
         let mut count = 0;
         while self.buf_len < BUF_CAP {
-            let Some(msg) = rx.try_recv() else { break };
-            if let Some(rid) = msg.request_id() {
-                self.buf[self.buf_len] = (rid, msg);
-                self.buf_len += 1;
-                count += 1;
-            }
+            let entry = match rx.try_recv_into(&mut scratch) {
+                Ok(None) => break,
+                // 块链不变量破坏（正确的服务端不可能触发）：终止本轮，
+                // 消息留在环里由下一次 poll 重试——不做静默跳过
+                Err(_) => break,
+                Ok(Some(RecvOutcome::Single(m))) => {
+                    // 历史行为：非 Request/Response kind（无 rid）取走丢弃
+                    let Some(rid) = m.request_id() else {
+                        continue;
+                    };
+                    let mut e = RespEntry::EMPTY;
+                    e.rid = rid;
+                    e.len = PAYLOAD_SIZE - 8;
+                    e.data[..e.len].copy_from_slice(&m.payload_bytes()[8..]);
+                    e
+                }
+                Ok(Some(RecvOutcome::Multi(mm))) => {
+                    // 多块响应：字节流帧，帧内数据 = rid ++ postcard(T)
+                    if mm.kind() != MsgType::Response as u8 {
+                        continue;
+                    }
+                    let Some(bytes) = stream::decode(mm.payload()) else {
+                        continue;
+                    };
+                    if bytes.len() < 8 {
+                        continue;
+                    }
+                    let mut e = RespEntry::EMPTY;
+                    e.rid = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                    e.len = bytes.len() - 8;
+                    e.data[..e.len].copy_from_slice(&bytes[8..]);
+                    e
+                }
+            };
+            self.buf[self.buf_len] = entry;
+            self.buf_len += 1;
+            count += 1;
         }
         count
     }
@@ -217,19 +285,17 @@ impl RpcClient {
     /// Returns `Ok(None)` if the buffer is empty, `Ok(Some(value))` on
     /// successful deserialization, or `Err(RecvError::DeserializeFailed)` if
     /// a response was present but could not be decoded as type `T`.
+    /// 两种结果都会**消费**该条响应——解码失败的条目（含服务端 poison）
+    /// 不留在队首，FIFO 不会因此楔死。
     pub fn recv<T: serde::de::DeserializeOwned>(&mut self) -> Result<Option<T>, RecvError> {
         if self.buf_len == 0 {
             return Ok(None);
         }
-        let msg = self.buf[0].1;
-        // Parse BEFORE dequeuing so the message is still available on error.
-        let (_request_id, result) = msg
-            .as_response::<T>()
-            .ok_or(RecvError::DeserializeFailed)?;
+        let out = self.buf[0].decode::<T>().ok_or(RecvError::DeserializeFailed);
         self.buf_len -= 1;
         self.buf.copy_within(1..=self.buf_len, 0);
-        self.buf[self.buf_len] = (0, Message::empty());
-        Ok(Some(result))
+        self.buf[self.buf_len] = RespEntry::EMPTY;
+        out.map(Some)
     }
 
     /// 按 rid 匹配取响应（乱序场景）。
@@ -237,22 +303,18 @@ impl RpcClient {
     /// Returns `Ok(None)` if no matching response is buffered,
     /// `Ok(Some(value))` on successful deserialization, or
     /// `Err(RecvError::DeserializeFailed)` if a matching response was present
-    /// but could not be decoded as type `T`.
+    /// but could not be decoded as type `T`. 匹配条目无论成败都**消费**。
     pub fn recv_for<T: serde::de::DeserializeOwned>(
         &mut self,
         request_id: RequestId,
     ) -> Result<Option<T>, RecvError> {
         for i in 0..self.buf_len {
-            if self.buf[i].0 == request_id {
-                let msg = self.buf[i].1;
-                // Parse BEFORE dequeuing so the message is still available on error.
-                let (_rid, result) = msg
-                    .as_response::<T>()
-                    .ok_or(RecvError::DeserializeFailed)?;
+            if self.buf[i].rid == request_id {
+                let out = self.buf[i].decode::<T>().ok_or(RecvError::DeserializeFailed);
                 self.buf_len -= 1;
                 self.buf[i] = self.buf[self.buf_len];
-                self.buf[self.buf_len] = (0, Message::empty());
-                return Ok(Some(result));
+                self.buf[self.buf_len] = RespEntry::EMPTY;
+                return out.map(Some);
             }
         }
         Ok(None)
@@ -261,5 +323,34 @@ impl RpcClient {
     /// 缓冲区中待处理的响应数量。
     pub fn buffered(&self) -> usize {
         self.buf_len
+    }
+
+    /// 发起服务发现（INIT，保留 method 0）。
+    ///
+    /// 响应载荷是服务描述符原始字节（非 postcard）——用
+    /// [`Self::recv_raw_for`] 收取后经 [`descriptor::parse`](crate::descriptor::parse)
+    /// 解析。旧固件（无 INIT 拦截）下本调用收到 poison 响应
+    /// （`recv_raw_for` 命中后字节解不开描述符）或版本门直接拒绝发送，
+    /// 均为快失败。
+    pub fn discover<N: FnOnce()>(
+        &self,
+        notify: N,
+    ) -> Result<RequestId, ov_channels::SendError> {
+        self.call(crate::METHOD_INIT, &(), notify)
+    }
+
+    /// 按 rid 取**原始载荷字节**（rid 之外、不经 postcard 解码，不消费）。
+    ///
+    /// 服务发现专用：描述符是自有线格式，走 raw 路径而非类型化解码。
+    /// 未到达返回 `None`；条目保留在缓冲里直到被 `recv_for`/`recv` 消费
+    /// 或覆盖（discover 流程通常即刻解析，无需显式清理）。
+    pub fn recv_raw_for(&mut self, request_id: RequestId) -> Option<&[u8]> {
+        for i in 0..self.buf_len {
+            if self.buf[i].rid == request_id {
+                let len = self.buf[i].len;
+                return Some(&self.buf[i].data[..len]);
+            }
+        }
+        None
     }
 }

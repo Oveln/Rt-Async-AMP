@@ -34,9 +34,9 @@ const SHM_SIZE: usize = rtshm_abi::QEMU_SHM_SIZE;
 
 define_service_client! {
     RtAsyncRpc {
-        ECHO: 0 => call echo(val: u32) -> u32;
-        ADD:  1 => call add(a: i32, b: i32) -> i32;
-        DELAY: 2 => send delay(us: u32);
+        ECHO: 1 => call echo(val: u32) -> u32;
+        ADD:  2 => call add(a: i32, b: i32) -> i32;
+        DELAY: 3 => send delay(us: u32);
     }
 }
 
