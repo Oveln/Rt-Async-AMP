@@ -323,21 +323,22 @@ AP 用户态控制 AKA-00 小车（底盘 ESP32-C3 + ZP10S 机械臂）。**协�
 AKA-00 的 `MotorPairProtocol`/`ServoProtocol`）。INIT/GRAB/RELEASE 经 ov-rpc
 `acall` 异步完成（handler 转交任务、完成后补响应，AP `recv_for` 无感闭环）。
 
-**接线（2026-08-27 载板原理图 `k3-com260_kit_v02` 定案；08-29 机械臂分离
-软串口，双通道）**：com260 40 针排针上唯一完整可用的 R.UART 是 **R_UART0 @
+**接线（2026-08-27 载板原理图 `k3-com260_kit_v02` 定案；09-03 机械臂定案
+AP 域 UART5，双通道）**：com260 40 针排针上唯一完整可用的 R.UART 是 **R_UART0 @
 GPIO_122/123 → pin29(TX)/pin32(RX)**（网络名 GPIO01/GPIO07 = MMC2_DAT3/DAT2，
 经 1.8V→3.3V 电平转换；与 M.2 WiFi SDIO 共网，不插 WiFi 卡即独占；**这就是
-RP console 所在引脚**）。底盘走 R_UART0；机械臂 ZP10S 走**软串口 TX**（
-`chip-k3-rt24::soft_uart`：R.GPIO[30] = GPIO_113 m2 → **pin40**（网络
-I2S0_SDOUT，经载板电平转换出 3.3V），位时序由 AON_TIMER1 counter1 比较中断
-逐位重建，115200-8N1，任务异步发送——帧内 mask mailbox 中断源，IPC 延迟
-毛刺 ≤1.39ms/指令）：
+RP console 所在引脚**）。底盘走 R_UART0；机械臂 ZP10S 走 **AP 域 UART5 TX
+轮询**（`chip-k3-rt24::ap_uart`：RT24 对 AP 域 UART「总线可达、中断不可达」
+——To AP APB 窗口 0xd4000000/4MB 覆盖 UART0/2~10，中断只进 AP APLIC；ZP10S
+纯写无应答，TX 用 LSR 轮询即完整通道。TX = GPIO_83 m4 → **pin3**（网络
+I2C3_SDA，直连不经电平转换器；RX pad82/pin5 不用），115200-8N1，帧级阻塞
+发送 ~1.3ms/帧）：
 
 ```text
 40pin pin29 (TX) ──── ESP32-C3 RX（底盘，AA 55 二进制帧；console log 共线，
                       ESP32 按 AA55 帧头重同步，ASCII 不构成帧头）
 40pin pin32 (RX) ──── ESP32-C3 TX（遥测应答，单向干净）
-40pin pin40      ──── ZP10S RX（机械臂软串口 TX，独立线，log 不可达）
+40pin pin3       ──── ZP10S RX（机械臂 UART5 TX，独立线，log 不可达）
 ```
 
 ⚠️ 排针上其它看似可用的信号**均不是 R.UART**：「UART1」（pin8/10/11/36）=
@@ -352,11 +353,16 @@ USB0_VBUS_DET 不在排针、GPIO_57→M.2 E-key BT_EN）；R.UART3 不可用
 （GPIO_89 模组未引出，GPIO_88 接 EFM8 电源 MCU SHUTDOWN_REQ，mux 会触关机
 时序）。
 
-**板验首验项（软串口）**：① PLIC 中断号 9 = int_src[9] `timer_2_irq` =
-AON_TIMER1 counter#1（手册 7.2 信号名 1 起始的映射假设，不响则按 8/10
-改 `soft_uart.rs` 的 `TIMER_IRQ` 常量）；② R_GPIO PLR/PDR/PSR/PCR = +0/+4/
-+8/+0xC（手册 16.8，R.GPIO[30] 落 port0 无端口间距歧义）；③ pin40 波形
-（接 USB 串口 RX 验 `#001P1500T1000!` 字节完整后再生效 ZP10S）。
+**AP UART5 通道要点（2026-09-03 板验通过）**：probe 自适应选 func parent——
+优先跟随 console UART0 的 APBC sel（活源实证），按 MPMU SUCCR/SUCCR_1 实际
+频率算除数，全死才写 SUCCR（死源无消费者），两阶段实测均收敛 sel=1/DLL=8；
+成功日志一行 `[ap-uart] probed: uart5 @ 0xd4017400 ... clk: ... sel=1 dll=8`。
+AP 引导链会把 pad83 重 mux 成触摸屏 i2c3（实测 probe 后 0xd044→0xc046），
+`send()` 每次前自查 MFPR 自愈并打 `pad83 stolen ... re-mux` warn——**AP 每次
+启动偷一次、自愈后即稳定，偶发一条属正常**；反复出现说明对端持续重夺，届时
+在 AP 侧 dts 把 i2c3 节点改 disabled 重编 starryos.uimg。此前的软串口通道
+（pin40/AON_TIMER1 位重建）因跨域桥定拍开销 13.4µs > 115200 位宽 8.68µs 物理
+不可达而废弃，模块 `soft_uart.rs` 保留（AON_TIMER/R_GPIO 时序实测结论备查）。
 
 ```bash
 # RP 固件（换打包 bin）：

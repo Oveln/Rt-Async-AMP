@@ -2,9 +2,10 @@
 //!
 //! 协议在 RT24（AP 用户态只发语义 RPC，见 intercom 的方法表）；本模块实现
 //! 两个协议，**双通道**：底盘走 R_UART0（与 console log 共线，容错依据见
-//! [`PORT_CHASSIS`] 注释），机械臂走**软串口 TX**（`chip_k3_rt24::soft_uart`，
-//! R.GPIO[30] → 40pin pin40 独立线，AON_TIMER1 c1 比较中断定拍——ZP10S
-//! 纯写无应答，单 TX 即完整通道，架构与中断延迟预算见该驱动模块文档）：
+//! [`PORT_CHASSIS`] 注释），机械臂走 **AP 域 UART5 TX 轮询**（`chip_k3_rt24::
+//! ap_uart`，TX = pad83 mode4 → 40pin pin3 独立线——RT24 对 AP 域 UART
+//! 中断不可达，ZP10S 纯写无应答，LSR 轮询 TX 即完整通道，时钟/引脚定案见
+//! 该驱动模块文档）：
 //!
 //! - **底盘**（`src/base_control/tt_pid`，ESP32-C3 PID 电机控制器）：帧
 //!   `AA 55 <cmd> <len> <payload> <xor>`，115200-8N1。运动指令 fire-and-forget
@@ -38,7 +39,7 @@
 //!
 //! 单 hart。R_UART0 的 TX 由两写者混用（console / chassis 任务，单核串行
 //! 无字节撕裂，ESP32 按 AA 55 帧头重同步），RX 只由 chassis 任务消费；
-//! ZP10S 通道单写者（task_arm → soft_uart 字节环，ISR 消费）。RPC handler
+//! ZP10S 通道单写者（task_arm → ap_uart 阻塞轮询，帧级 1.3ms）。RPC handler
 //! 与任务之间的交接全部经原子量/SPSC 环（Release/Acquire 发布序，防 P1
 //! 抢占 P2 造成的撕裂）。`UART_WRITE/READ`（raw 诊断）与任务并发访问
 //! R_UART0 仅限 bring-up 阶段（CHASSIS_INIT 之前 / 空闲时），协议运行期
@@ -53,8 +54,8 @@ use portable_atomic::{
 use core::cell::UnsafeCell;
 use core::sync::atomic::Ordering;
 
+use chip_k3_rt24::ap_uart;
 use chip_k3_rt24::pxa_uart::{self, PxaUart};
-use chip_k3_rt24::soft_uart;
 use fugit::ExtU64;
 use ov_channels::Message;
 
@@ -452,20 +453,12 @@ impl ArmRing {
     }
 }
 
-/// 臂指令经软串口异步发出（字节入环即返回，波形由 AON_TIMER1 c1 中断
-/// 后台生成——见 soft_uart 模块文档）。单生产者：仅本任务调用。
+/// 臂指令经 AP UART5 阻塞发出（send 末尾等 LSR.TEMT，整帧移出线才返回，
+/// ~1.3ms@115200——调用方后续 sleep 自帧尾起算）。单生产者：仅本任务调用。
 fn arm_send(bytes: &[u8]) {
-    let n = soft_uart::send(bytes);
+    let n = ap_uart::send(bytes);
     if n != bytes.len() {
-        log::warn!("[robot] soft-uart ring short: {}/{}", n, bytes.len());
-    }
-}
-
-/// 等软串口把已入队字节发完（acall 补响应前的收尾；1ms 轮询足够——
-/// 一条指令 16 字节 ≈ 1.39ms 级）。
-async fn arm_drain() {
-    while !soft_uart::idle() {
-        futures::timer::after(1.millis()).await;
+        log::warn!("[robot] ap-uart send short: {}/{}", n, bytes.len());
     }
 }
 
@@ -494,13 +487,11 @@ pub async fn task_arm() {
                     futures::timer::after(2000.millis()).await;
                     arm_send(angle_cmd(0, POSE_LIFT_S0, &mut b));
                     arm_send(angle_cmd(1, POSE_LIFT_S1, &mut b));
-                    arm_drain().await;
                     respond(rid, 0);
                 }
                 ArmCmd::Release { rid } => {
                     let mut b = [0u8; 16];
                     arm_send(angle_cmd(2, GRIPPER_OPEN, &mut b));
-                    arm_drain().await;
                     futures::timer::after(500.millis()).await;
                     respond(rid, 0);
                 }
@@ -577,9 +568,9 @@ pub fn arm_release(rid: u64, _nonce: u32) {
     }
 }
 
-/// 机械臂通道诊断（命令环丢弃 + 软串口字节环溢出）。
+/// 机械臂通道诊断（命令环丢弃计数；AP UART 轮询发送无队列，不丢字节）。
 pub fn arm_dropped() -> u32 {
-    ARM_RING.dropped() + soft_uart::stats().1
+    ARM_RING.dropped()
 }
 
 /// 异步完成响应：构造 Response 经 CH1 + 门铃补发（AP recv_for(rid) 闭环）。
