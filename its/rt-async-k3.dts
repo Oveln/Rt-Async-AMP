@@ -139,22 +139,24 @@
 		reg = <0x0 0xe0000000 0x0 0x4000000>;
 	};
 
-	// ── 软串口 TX（机械臂 ZP10S 独立通道，2026-08-29）─────────────────
-	// 输出线 GPIO_113 mux m2 = R.GPIO[30]（40pin pin40，网络 I2S0_SDOUT，
-	// 经载板 U2405 电平转换出 3.3V；线径直连 ZP10S 控制板 RX）。位时序由
-	// AON_TIMER1 counter1（0xc0889000，PLIC int_src[9]）比较中断重建，
-	// 参数在 soft_uart.rs 内为常量——本节点只为 pinctrl 应用与 probe 生命周期。
-	rgpio30_pin_cfg: rgpio30-pin-cfg {
+	// ── AP 域 UART5 TX（机械臂 ZP10S 独立通道，2026-09-03）────────────
+	// RT24 对 AP 域 UART"总线可达、中断不可达"（To AP APB 0xd4000000 4MB
+	// 窗口覆盖 UART0/2~10；中断只进 AP APLIC）→ TX-only 轮询，见 ap_uart.rs。
+	// TX = GPIO_83 mux m4 = 40pin pin3（网络 I2C3_SDA，直连不经电平转换器
+	// ——kit_v02 p24 网表过 U240x 的网名均带 _LS 后缀，I2C3_SDA 无；线径
+	// 直连 ZP10S 控制板 RX，自 pin40 软串口通道迁来）。RX pad82/pin5 不用。
+	// AP 侧 serial5 disabled、pads82/83 无任何 pinctrl 引用，无占用者。
+	apuart5_tx_pin_cfg: apuart5-tx-pin-cfg {
 		pinctrl-single,pins = <
-			K3_PADCONF(GPIO_113, (MUX_MODE2 | EDGE_NONE | PULL_UP | PAD_DS8))  /* rgpio30 = soft uart tx */
+			K3_PADCONF(GPIO_83, (MUX_MODE4 | EDGE_NONE | PULL_UP | PAD_DS8))  /* uart5 tx = arm */
 		>;
 	};
 
-	softuart@c0889400 {
-		compatible = "spacemit,k3-soft-uart";
-		reg = <0x0 0xc0889400 0x0 0x100>;
+	apuart5@d4017400 {
+		compatible = "spacemit,k3-ap-uart";
+		reg = <0x0 0xd4017400 0x0 0x100>;
 		pinctrl-names = "default";
-		pinctrl-0 = <&rgpio30_pin_cfg>;
+		pinctrl-0 = <&apuart5_tx_pin_cfg>;
 	};
 
 	// 跨核共享内存（与 AP 侧 rt-async-amp/reserved rt_shm 对齐：RCPU SRAM 起始

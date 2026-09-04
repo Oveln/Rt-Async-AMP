@@ -27,6 +27,7 @@
 #![no_std]
 #![allow(unreachable_code)]
 
+pub mod ap_uart;
 pub mod clock;
 pub mod clint_k3;
 pub mod handshake;
@@ -63,10 +64,13 @@ static K3_DRIVERS: &[&dyn Driver] = &[
     &clint_k3::TIMER,
     &clint_k3::MSIP,
     &plic_k3::PLIC,
-    // 软串口 TX（机械臂 ZP10S 独立通道）：probe 配 R.GPIO 输出 + AON
-    // TIMER1 c1 + PLIC（priority=2）。排在 PLIC 后：DTS 中本节点位于
-    // intc@e0000000 之后（DFS 先序 → probe 时 intctl() 已就绪）。
-    &soft_uart::INSTANCE,
+    // AP 域 UART5 TX-only（机械臂 ZP10S 通道，40pin pin3）：probe 开
+    // APBC 时钟 + 配 PXA IP（自开钟，不依赖 CCU slot）。TX 轮询无中断，
+    // 排 plic 后仅为 DTS 文档序一致。
+    &ap_uart::INSTANCE,
+    // soft_uart（R.GPIO 位时序软串口）2026-09-03 由 ap_uart 取代，DT 节点
+    // 已撤故不再注册；模块保留——AON_TIMER1 match 语义、R_GPIO 时钟门、
+    // 跨域桥开销等实测结论都在其中，备将来复用。
 ];
 
 #[extern_trait]
