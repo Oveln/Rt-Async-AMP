@@ -23,10 +23,10 @@ rt-async-amp/                  ← 主仓（本仓），集成分支 master
 ├── apps/
 │   ├── rt-async-k3/           ←   K3 固件（sched_demo 等，产物 → build/k3-com260/*.elf）
 │   └── rt-async-app/          ←   QEMU virt 固件
-├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译）
+├── user-apps/                 ←   StarryOS 用户态程序（musl 交叉编译；robot-py 为 glibc 例外，见其注释）
 │   ├── user-test-{ipc,mbox,rpc,sched,bench,pbmt}/ ← AMP 测试程序（bench=延迟基准，pbmt=PMA 非缓存判窗）
-│   ├── robot-ctl/             ←   机器人控制入口（CLI + serve JSON 行，配 robot.py；RP 侧 k3-robot-ctrl）
-│   ├── rtsh/                  ←   rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：启动自动服务发现+按名解析 mid/ping/stat/机器人/probe）
+│   ├── rtsh/                  ←   唯一用户态程序：rt-async shell（lib 层 = /dev/rt_shm 客户端 + 服务发现 + 机器人语义方法；bin = REPL/单发）
+│   ├── robot-py/              ←   rtsh 库层的原生 Python 扩展（PyO3，riscv64 glibc，板上 Python 3.14）
 │   └── rtshm-abi/             ←   /dev/rt_shm ioctl ABI（与 tgoskits 内核侧对齐）
 ├── its/                       ←   设备树源（.dts）+ 宏定义（k3-pinctrl.h / k3-clock.h）
 ├── envs/                      ←   环境 profile（qemu-plic / qemu-aia / k3-com260）
@@ -68,8 +68,8 @@ cargo xtask build k3-com260         # K3 环境聚合：opensbi.itb + bins + eso
 cargo xtask build k3-opensbi        # 单独构建 K3 OpenSBI（opensbi.itb = PMA 非缓存 + banner）
 cargo xtask build k3-sched-demo     # 单 bin（产物落平台默认环境 build/k3-com260/）
 cargo xtask build k3-robot-ctrl     # 机器人固件（AKA-00 底盘+臂协议，P1 任务 + acall 异步完成）
-cargo xtask build robot-ctl         # AP 用户态机器人控制（配 RP k3-robot-ctrl，见 README 机器人小节）
-cargo xtask build rtsh              # rt-async 交互式 shell（/dev/rt_shm REPL，配 k3-robot-ctrl 全命令面）
+cargo xtask build rtsh              # 唯一用户态程序（/dev/rt_shm REPL + 机器人命令，lib 层供 robot-py 绑定）
+cargo xtask build robot-py          # rtsh 库层的原生 Python 扩展（需 ~/riscv-yocto 板上 Python 头文件）
 ```
 
 > **K3 共享窗一致性 = PMA 非缓存（硬依赖）**：X100 硅忽略 Svpbmt PTE 位，

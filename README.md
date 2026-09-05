@@ -227,8 +227,9 @@ quit/Ctrl-D 退出），`rtsh <cmd> [args..]` 单发即退。**启动时自动�
   `echo` / `add` / `delay`、`ping [N]`（RTT 分位数 + D1-D4
   发现路径分布，单次含 RP 侧 isr→sched / sched→seen 分段）、`stat`
   插桩计数器表（bench `s0` 的交互版）；
-- **机器人语义**：同 robot-ctl 的全部 CLI op（status/init/drive/stop/
-  brake/get/arm/torque/grab/release/uwrite/uread）；
+- **机器人语义**：`status`/`init`/`drive`/`stop`/`brake`/`get`/`arm`/
+  `torque`/`grab`/`release`/`uwrite`/`uread`（见「机器人控制」小节，与
+  robot-py 库同一路实现）；
 - **probe 测量面**：`membench OP [ARG]`、`peek ADDR`（只读寄存器 1000
   连读单价）、`litmus`——仅 probe 固件实现。
 
@@ -314,14 +315,16 @@ BENCH_CSV=/tmp/s1.csv /tmp/user-test-bench s1 300  # 大样本 + CSV 落盘（30
   notify fence 可省；L3 RP stale ⇒ clear_busy 后的 fence 必须保留
   （或换硬件 spinlock）。
 
-#### 机器人控制（robot-ctl + k3-robot-ctrl）
+#### 机器人控制（rtsh + robot-py + k3-robot-ctrl）
 
 AP 用户态控制 AKA-00 小车（底盘 ESP32-C3 + ZP10S 机械臂）。**协议在 RP 侧**
 （`apps/rt-async-k3/src/robot.rs`：tt_pid 二进制帧 + zp10s ASCII，两个 P1
-协议任务），AP 侧只发语义 RPC——`robot-ctl`（CLI + serve JSON 行协议，
-`user-apps/robot-ctl/robot.py` 供 Python 经 Popen 管道调用，接口对齐
-AKA-00 的 `MotorPairProtocol`/`ServoProtocol`）。INIT/GRAB/RELEASE 经 ov-rpc
-`acall` 异步完成（handler 转交任务、完成后补响应，AP `recv_for` 无感闭环）。
+协议任务），AP 侧只发语义 RPC。用户态入口收敛为两个：**rtsh**（唯一用户态
+程序，REPL / 单发 `rtsh <cmd>`，方法名经服务发现解析）与 **robot-py**
+（rtsh 库层的原生 Python 扩展，`import robot` 直接调用，接口对齐 AKA-00
+的 `MotorPairProtocol`/`ServoProtocol`，无子进程 / 管道协议）。
+INIT/GRAB/RELEASE 经 ov-rpc `acall` 异步完成（handler 转交任务、完成后补
+响应，AP `recv_for` 无感闭环）。
 
 **接线（2026-08-27 载板原理图 `k3-com260_kit_v02` 定案；09-03 机械臂定案
 AP 域 UART5，双通道）**：com260 40 针排针上唯一完整可用的 R.UART 是 **R_UART0 @
@@ -368,34 +371,35 @@ AP 引导链会把 pad83 重 mux 成触摸屏 i2c3（实测 probe 后 0xd044→0
 # RP 固件（换打包 bin）：
 cargo xtask build k3-robot-ctrl
 ELF_SRC=build/k3-com260/rt-async-k3-robot-ctrl.elf bash scripts/flash/k3-pack-itb.sh
-# AP 程序（wget 部署同上，robot.py 一并拉取）：
-cargo xtask build robot-ctl
+# AP 程序（wget 部署同上；robot-py 需 ~/riscv-yocto 的板上 Python 头文件）：
+cargo xtask build rtsh
+cargo xtask build robot-py   # → build/robot.cpython-314-riscv64-linux-gnu.so
 
-# 板上调试（单发 CLI；交互式全命令面可用 /tmp/rtsh，见 user-apps 小节）：
-/tmp/robot-ctl status                       # 端口 probe 掩码 / 底盘状态
-/tmp/robot-ctl uwrite 0 AA55...             # raw 写（回环实验：pin29↔pin32 短接）
-/tmp/robot-ctl uread 0                      # raw 读
-/tmp/robot-ctl init                         # 底盘 INIT+CONFIG（等 ACK）
-/tmp/robot-ctl drive 30 30 && sleep 2 && /tmp/robot-ctl brake
-/tmp/robot-ctl get                          # RPM / 编码器快照
-/tmp/robot-ctl arm 2 120                    # 单舵机
-/tmp/robot-ctl grab                         # 抓取全序列（~4.5s）
+# 板上调试（rtsh 单发；交互式 REPL 直接运行 /tmp/rtsh）：
+/tmp/rtsh status                             # 端口 probe 掩码 / 底盘状态
+/tmp/rtsh uwrite 0 AA55...                   # raw 写（回环实验：pin29↔pin32 短接）
+/tmp/rtsh uread 0                            # raw 读
+/tmp/rtsh init                               # 底盘 INIT+CONFIG（等 ACK）
+/tmp/rtsh drive 30 30 && sleep 2 && /tmp/rtsh brake
+/tmp/rtsh get                                # RPM / 编码器快照
+/tmp/rtsh arm 2 120                          # 单舵机
+/tmp/rtsh grab                               # 抓取全序列（~4.5s）
 
-# Python（serve 模式，接口对齐 AKA-00）：
+# Python 原生库（.so 放入 sys.path，如 /tmp；接口对齐 AKA-00）：
 python3 - <<'PY'
 from robot import Robot
-r = Robot("/tmp/robot-ctl")
+r = Robot()
 r.init(); r.set_speed(30, 30)
 print(r.get_encoder()); r.brake()
 r.set_angle(2, 120); r.grab(); r.release()
 PY
 ```
 
-RP 方法 id 表（`intercom.rs`）：7-9 raw UART 诊断 / 10-13 底盘
-（SET_SPEED、STOP、GET 快照、INIT acall）/ 14-17 机械臂（SET_ANGLE、
-TORQUE、GRAB/RELEASE acall）。`acall` 为 ov-rpc 宏新增 kind：服务端
-handler 收 rid 转交后台任务即返回，任务完成后 `Message::response(rid)`
-经 CH1+门铃补发。
+RP 方法 id 表（`intercom.rs`；mid 由服务发现按名解析，无需记忆）：8-10
+raw UART 诊断 / 11-14 底盘（SET_SPEED、STOP、GET 快照、INIT acall）/
+15-18 机械臂（SET_ANGLE、TORQUE、GRAB/RELEASE acall）。`acall` 为 ov-rpc
+宏新增 kind：服务端 handler 收 rid 转交后台任务即返回，任务完成后
+`Message::response(rid)` 经 CH1+门铃补发。
 
 **缓存一致性（PMA 非缓存，2026-08-26 定案）**：共享窗经 OpenSBI 固件
 （`opensbi-k3` 子仓 `feat/pma-audio-io`，见上文刷写小节）把覆盖窗口的 PMA
