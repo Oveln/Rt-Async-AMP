@@ -6,14 +6,15 @@
 //!
 //! ```text
 //! P1  task_chassis ── R_UART0(slot0，与 console 共口) ── 40pin pin29(TX)/pin32(RX)
-//! P1  task_arm     ── 软串口 TX（R.GPIO[30] @AON_TIMER1 c1 定拍）── 40pin pin40
+//! P1  task_arm     ── AP 域 UART5 TX 轮询（pad83 mode4）── 40pin pin3
 //! P2  task_ipc     ── 共享窗 + mailbox4（intercom：RPC 分发/异步完成）
 //! P3  watchdog     ── magic 自愈（同 ipc_demo）
 //! ```
 //!
-//! AP 侧配套程序：user-apps/robot-ctl（CLI + serve JSON 行协议，供 Python
-//! 调用）。接线与使用方法见 README「机器人控制」小节（双通道方案 +
-//! 备选 M.2 飞线双串口，2026-08-27 原理图定案 / 08-29 臂分离软串口）。
+//! AP 侧配套：user-apps/rtsh（唯一用户态程序，REPL / 单发）与
+//! user-apps/robot-py（rtsh 库层的原生 Python 扩展，import robot）。接线、
+//! 协议、RPC 方法表与标定说明见本目录 robot-ctrl.md（双通道
+//! 方案 2026-08-27 原理图定案 / 2026-09-04 臂改 AP 域 UART5、撤软串口）。
 
 #![no_std]
 #![no_main]

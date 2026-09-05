@@ -1,8 +1,10 @@
-//! rtsh —— rt-async 交互式 shell（AP 用户态，StarryOS）。
+//! rtsh —— rt-async 交互式 shell（AP 用户态，StarryOS），唯一用户态程序。
 //!
-//! 把 /dev/rt_shm 当设备打开（open + mmap + NOTIFY/AWAIT ioctl 门铃），在
-//! 共享窗上经 ov-rpc 与 RP 固件交互式对话——一个"rt-async 功能 shell"。
-//! 链路与 robot-ctl 相同（见 user-test-rpc 的链路说明）。
+//! 把 /dev/rt_shm 当设备打开（open + mmap + NOTIFY 门铃 + ppoll 等待），在
+//! 共享窗上经 ov-rpc 与 RP 固件交互式对话。核心（Shell / 服务发现 / 机器人
+//! 语义方法）在 `rtsh` 库层（`src/lib.rs`），供 `user-apps/robot-py`（原生
+//! Python 扩展）共用——机器人控制的用户态入口收敛为「rtsh 一个程序 +
+//! robot 一个 Python 库」（原 robot-ctl CLI/serve 与 robot.py 已并入）。
 //!
 //! 配对固件与命令面：
 //! - K3 `k3-robot-ctrl`：全部命令可用（通用 + 机器人语义 + probe 测量面）；
@@ -19,274 +21,8 @@
 //! - 单发：`rtsh <cmd> [args..]`，执行一条即退出（脚本 / 快捷调用）。
 
 use std::io::{self, Write};
-use std::os::unix::io::IntoRawFd;
 
-use ov_channels::{ChannelId, SharedMemory};
-
-#[allow(dead_code)]
-const RT_SHM_IOC_NOTIFY: libc::c_ulong = rtshm_abi::IOC_NOTIFY as libc::c_ulong;
-#[allow(dead_code)]
-const RT_SHM_IOC_AWAIT: libc::c_ulong = rtshm_abi::IOC_AWAIT as libc::c_ulong;
-#[allow(dead_code)]
-const RT_SHM_IOC_CLR_PENDING: libc::c_ulong = rtshm_abi::IOC_CLR_PENDING as libc::c_ulong;
-const SHM_SIZE: usize = rtshm_abi::K3_SHM_SIZE;
-
-/// 普通 call 响应超时（秒）。
-const T_CALL: u32 = 3;
-/// 慢命令超时（秒）：底盘 INIT（等 ACK）/ membench（部分 op 忙等 >1s）。
-const T_SLOW: u32 = 10;
-/// 抓取全序列超时（秒，~4.5s 动作 + 帧时间）。
-const T_GRAB: u32 = 15;
-
-// 方法名与 RP 固件 intercom.rs define_service! 的常量名对齐（ECHO/ADD/
-// …/ARM_RELEASE）；mid 运行时经服务发现按名字解析（见 Shell::discover），
-// 编号无需镜像。acall 在客户端按 call 发起（响应由完成方补发）。
-
-// ============================================================================
-// /dev/rt_shm 封装（与 robot-ctl 同构：open + mmap + ioctl + 就绪等待/排空）
-// ============================================================================
-
-fn do_ioctl(fd: libc::c_int, cmd: libc::c_ulong, arg: libc::c_ulong) -> io::Result<libc::c_int> {
-    let ret = unsafe { libc::ioctl(fd, cmd as _, arg) };
-    if ret < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(ret)
-    }
-}
-
-struct RtShm {
-    fd: libc::c_int,
-    ptr: *mut std::ffi::c_void,
-}
-
-impl RtShm {
-    fn open() -> io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open("/dev/rt_shm")?;
-        let fd = file.into_raw_fd();
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                SHM_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                fd,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            let err = io::Error::last_os_error();
-            unsafe { libc::close(fd) };
-            return Err(err);
-        }
-        Ok(Self { fd, ptr })
-    }
-
-    fn shm_addr(&self) -> usize {
-        self.ptr as usize
-    }
-
-    fn notify(&self) -> io::Result<()> {
-        do_ioctl(self.fd, RT_SHM_IOC_NOTIFY, 0)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    fn clear_pending(&self) -> io::Result<()> {
-        do_ioctl(self.fd, RT_SHM_IOC_CLR_PENDING, 0)?;
-        Ok(())
-    }
-
-    /// 阻塞等待 RP 门铃（mailbox IRQ 唤醒；SIGALRM 可打断为 EINTR）。
-    fn await_ipi(&self) -> io::Result<()> {
-        do_ioctl(self.fd, RT_SHM_IOC_AWAIT, 0)?;
-        Ok(())
-    }
-
-    /// 轮询共享窗 magic 就绪（5s 超时；RP 固件未起/未 init 时 false）。
-    fn wait_valid(&self) -> bool {
-        let shm = unsafe { SharedMemory::<3>::at(self.shm_addr()) };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline {
-            if shm.is_valid() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        false
-    }
-
-    /// 排空 ch1 残留响应（上一次异常退出的在途响应）。
-    fn drain_ch1(&self) {
-        let shm = unsafe { SharedMemory::<3>::at(self.shm_addr()) };
-        if let Ok(rx) = shm.receiver(ChannelId::new(1)) {
-            while rx.try_recv().is_some() {}
-        }
-    }
-}
-
-impl Drop for RtShm {
-    fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.ptr, SHM_SIZE);
-            libc::close(self.fd);
-        }
-    }
-}
-
-// ============================================================================
-// shell 客户端（RPC 调用 + SIGALRM 超时看门狗，同 robot-ctl）
-// ============================================================================
-
-extern "C" fn on_sigalrm(_sig: libc::c_int) {}
-
-/// 发现表条目：(mid, flags, 名称)——flags 见 ov_rpc::descriptor。
-struct Discovered {
-    mid: u64,
-    flags: u8,
-    name: String,
-}
-
-struct Shell {
-    rt: RtShm,
-    client: ov_rpc::RpcClient,
-    /// 服务发现结果（启动时 INIT 一次；`services` 命令可刷新）。
-    table: Vec<Discovered>,
-}
-
-impl Shell {
-    fn open() -> Result<Self, String> {
-        unsafe {
-            libc::signal(libc::SIGALRM, on_sigalrm as *const () as libc::sighandler_t);
-        }
-        let rt = RtShm::open().map_err(|e| format!("open /dev/rt_shm: {e}"))?;
-        if !rt.wait_valid() {
-            return Err("shared window not ready (RP firmware down?)".into());
-        }
-        rt.drain_ch1();
-        let client = ov_rpc::RpcClient::new(rt.shm_addr());
-        Ok(Self { rt, client, table: Vec::new() })
-    }
-
-    fn notify(&self) -> io::Result<()> {
-        self.rt.notify()
-    }
-
-    /// 服务发现：INIT（method 0）→ 描述符解析 → 刷新方法表。
-    ///
-    /// 旧固件（无 INIT 拦截）下收到 poison 响应（描述符解不开）或版本门
-    /// 直接拒绝发送——均为明确报错而非挂死。
-    fn discover(&mut self) -> Result<(), String> {
-        let rid = self
-            .client
-            .discover(|| self.rt.notify().map_err(|e| e.to_string()).unwrap_or(()))
-            .map_err(|e| format!("INIT 发送失败: {e:?}"))?;
-
-        unsafe { libc::alarm(T_CALL) };
-        let raw = (|| -> Result<Vec<u8>, String> {
-            let mut spins: u32 = 0;
-            loop {
-                self.rt.await_ipi().map_err(|e| format!("await: {e}"))?;
-                self.client.poll_responses();
-                match self.client.recv_raw_for(rid) {
-                    Some(bytes) => return Ok(bytes.to_vec()),
-                    None => {
-                        // 空唤醒（他源门铃/杂散）：有限次重等后放弃。
-                        spins += 1;
-                        if spins > 64 {
-                            return Err("no response (spins exhausted)".into());
-                        }
-                    }
-                }
-            }
-        })();
-        unsafe { libc::alarm(0) };
-        let raw = raw?;
-
-        let d = ov_rpc::descriptor::parse(&raw)
-            .ok_or_else(|| "描述符解析失败（旧固件无服务发现？）".to_string())?;
-        self.table = d
-            .methods()
-            .map(|m| Discovered { mid: m.mid, flags: m.flags, name: m.name.to_string() })
-            .collect();
-        Ok(())
-    }
-
-    /// 方法表渲染（启动横幅与 `services` 命令共用）。
-    fn services_text(&self) -> String {
-        let mut lines = vec![format!(
-            "可用 RPC 方法：{} 个（mid 0 = INIT 服务发现）",
-            self.table.len()
-        )];
-        lines.push("  mid  形态    名称".into());
-        for m in &self.table {
-            let kind = ov_rpc::descriptor::MethodDesc { mid: m.mid, flags: m.flags, name: &m.name }
-                .kind_name();
-            lines.push(format!("  {:>3}  {:<6}  {}", m.mid, kind, m.name));
-        }
-        lines.join("\n")
-    }
-
-    /// 按方法名解析 mid（发现表查找；未注册 → Err 快速失败）。
-    fn mid(&self, name: &str) -> Result<u64, String> {
-        self.table
-            .iter()
-            .find(|m| m.name == name)
-            .map(|m| m.mid)
-            .ok_or_else(|| format!("固件未提供方法 {name}（services 查看方法表）"))
-    }
-
-    /// 双向调用（call：服务端回 IPI）。
-    fn call<A: serde::Serialize>(&mut self, name: &str, args: &A) -> Result<ov_rpc::RequestId, String> {
-        let mid = self.mid(name)?;
-        self.client
-            .call(mid, args, || self.notify().expect("NOTIFY failed"))
-            .map_err(|e| format!("send: {e:?}"))
-    }
-
-    /// 单向下发（send：不期待响应）。
-    fn send<A: serde::Serialize>(&mut self, name: &str, args: &A) -> Result<(), String> {
-        let mid = self.mid(name)?;
-        self.client
-            .send(mid, args, || self.notify().expect("NOTIFY failed"))
-            .map_err(|e| format!("send: {e:?}"))
-    }
-
-    /// 阻塞等响应并按 rid 取回（SIGALRM 超时 → Err）。
-    fn wait_reply<T: serde::de::DeserializeOwned>(
-        &mut self,
-        rid: ov_rpc::RequestId,
-        timeout_s: u32,
-    ) -> Result<T, String> {
-        unsafe { libc::alarm(timeout_s) };
-        let out = (|| -> Result<T, String> {
-            let mut spins: u32 = 0;
-            loop {
-                self.rt.await_ipi().map_err(|e| format!("await: {e}"))?;
-                self.client.poll_responses();
-                match self
-                    .client
-                    .recv_for::<T>(rid)
-                    .map_err(|e| format!("recv: {e:?}"))?
-                {
-                    Some(v) => return Ok(v),
-                    None => {
-                        // 空唤醒（他源门铃/杂散）：有限次重等后放弃。
-                        spins += 1;
-                        if spins > 64 {
-                            return Err("no response (spins exhausted)".into());
-                        }
-                    }
-                }
-            }
-        })();
-        unsafe { libc::alarm(0) };
-        out
-    }
-}
+use rtsh::{Shell, T_CALL_MS, T_SLOW_MS};
 
 // ============================================================================
 // 参数/格式化小工具
@@ -361,7 +97,7 @@ fn fmt_stat(idx: u32, v: u64) -> String {
 
 fn stat_query(sh: &mut Shell, idx: u32) -> Result<u64, String> {
     let rid = sh.call("STATS", &(idx,))?;
-    sh.wait_reply::<u64>(rid, T_CALL)
+    sh.wait_reply::<u64>(rid, T_CALL_MS)
 }
 
 // ============================================================================
@@ -384,7 +120,7 @@ fn cmd_ping(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
     for seq in 0..n as u64 {
         let t0 = now_ns();
         let rid = sh.call("PING", &(seq,))?;
-        let r = sh.wait_reply::<(u64, u8, u64, u64, u64, u64)>(rid, T_CALL)?;
+        let r = sh.wait_reply::<(u64, u8, u64, u64, u64, u64)>(rid, T_CALL_MS)?;
         let t1 = now_ns();
         rtts.push((t1 - t0) as f64 / 1e3);
         paths[(r.1 as usize).min(4)] += 1;
@@ -495,14 +231,14 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "echo" => {
             let v: u32 = need(toks, 1, "N")?;
             let rid = sh.call("ECHO", &(v,))?;
-            let r: u32 = sh.wait_reply(rid, T_CALL)?;
+            let r: u32 = sh.wait_reply(rid, T_CALL_MS)?;
             Ok(format!("echo: {r}"))
         }
         "add" => {
             let a: i32 = need(toks, 1, "A")?;
             let b: i32 = need(toks, 2, "B")?;
             let rid = sh.call("ADD", &(a, b))?;
-            let r: i32 = sh.wait_reply(rid, T_CALL)?;
+            let r: i32 = sh.wait_reply(rid, T_CALL_MS)?;
             Ok(format!("add: {a} + {b} = {r}"))
         }
         "delay" => {
@@ -514,107 +250,73 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
         "stat" => cmd_stat(sh, toks),
         "services" | "disc" => cmd_services(sh, toks),
 
-        // ── 机器人（K3 k3-robot-ctrl；输出语义同 robot-ctl）──
+        // ── 机器人（K3 k3-robot-ctrl；走库层 robot_* 方法，与 robot-py 同路）──
         "status" => {
-            let rid = sh.call("UART_STATUS", &(1u32,))?;
-            let v = sh.wait_reply::<(u32, u32, u32, u32, u32)>(rid, T_CALL)?;
+            let s = sh.robot_status()?;
             Ok(format!(
                 "status: ports={:#04x} chassis_inited={} chassis_err={} arm_dropped={}",
-                v.1, v.2, v.3, v.4
+                s.ports, s.chassis_inited, s.chassis_err, s.arm_dropped
             ))
         }
         "init" => {
             let ppr: u16 = opt(toks, 1, 4680u16)?;
             let pwm: u16 = opt(toks, 2, 20000u16)?;
-            let rid = sh.call("CHASSIS_INIT", &(ppr, pwm))?;
-            let r: u32 = sh.wait_reply(rid, T_SLOW)?;
-            if r == u32::MAX {
-                Err("busy（已有 init 在途）".into())
-            } else {
-                Ok(format!("init: result={r}"))
-            }
+            let r = sh.robot_init(ppr, pwm)?;
+            Ok(format!("init: result={r}"))
         }
         "drive" | "set_speed" => {
             let l: i16 = need(toks, 1, "L")?;
             let r: i16 = need(toks, 2, "R")?;
-            sh.send("CHASSIS_SET_SPEED", &(l, r))?;
+            sh.robot_set_speed(l, r)?;
             Ok(format!("drive: left={l} right={r}"))
         }
         "stop" => {
-            sh.send("CHASSIS_STOP", &(1u8,))?;
+            sh.robot_stop(false)?;
             Ok("stop: 已下发".into())
         }
         "brake" => {
-            sh.send("CHASSIS_STOP", &(2u8,))?;
+            sh.robot_stop(true)?;
             Ok("brake: 已下发".into())
         }
         "get" => {
-            let rid = sh.call("CHASSIS_GET", &(1u32,))?;
-            let v = sh
-                .wait_reply::<(u32, u32, i32, i32, i32, i32, u32, u64)>(rid, T_CALL)?;
+            let t = sh.robot_get()?;
             Ok(format!(
                 "get: inited={} rpm_left={} rpm_right={} enc_m1={} enc_m2={} err={} last_ms={}",
-                v.1, v.2, v.3, v.4, v.5, v.6, v.7
+                t.inited, t.rpm_left, t.rpm_right, t.enc_m1, t.enc_m2, t.err, t.last_ms
             ))
         }
         "arm" | "set_angle" => {
             let s: u8 = need(toks, 1, "SERVO")?;
             let a: u16 = need(toks, 2, "ANGLE")?;
-            sh.send("ARM_SET_ANGLE", &(s, a))?;
+            sh.robot_set_angle(s, a)?;
             Ok(format!("arm: servo={s} angle={a}"))
         }
         "torque" => {
             let rel: u8 = opt(toks, 1, 1u8)?;
-            sh.send("ARM_TORQUE", &(rel,))?;
+            sh.robot_torque(rel != 0)?;
             Ok(format!("torque: release={rel}"))
         }
         "grab" => {
-            let rid = sh.call("ARM_GRAB", &(1u32,))?;
-            let r: u32 = sh.wait_reply(rid, T_GRAB)?;
-            if r == u32::MAX {
-                Err("arm queue full".into())
-            } else {
-                Ok(format!("grab: result={r}"))
-            }
+            let r = sh.robot_grab()?;
+            Ok(format!("grab: result={r}"))
         }
         "release" => {
-            let rid = sh.call("ARM_RELEASE", &(1u32,))?;
-            let r: u32 = sh.wait_reply(rid, T_SLOW)?;
-            if r == u32::MAX {
-                Err("arm queue full".into())
-            } else {
-                Ok(format!("release: result={r}"))
-            }
+            let r = sh.robot_release()?;
+            Ok(format!("release: result={r}"))
         }
         "uwrite" => {
             let port: u8 = need(toks, 1, "PORT")?;
             let Some(bytes) = toks.get(2).and_then(|s| parse_hex(s)) else {
                 return Err("缺少/无效 hex".into());
             };
-            if bytes.len() > 32 {
-                return Err("hex 过长（≤32 字节）".into());
-            }
-            let mut data = [0u8; 32];
-            data[..bytes.len()].copy_from_slice(&bytes);
-            let rid = sh.call("UART_WRITE", &(port, bytes.len() as u8, data))?;
-            let n: u32 = sh.wait_reply(rid, T_CALL)?;
-            if n == u32::MAX {
-                Err("port not probed".into())
-            } else {
-                Ok(format!("uwrite: written={n}"))
-            }
+            let n = sh.robot_uwrite(port, &bytes)?;
+            Ok(format!("uwrite: written={n}"))
         }
         "uread" => {
             let port: u8 = need(toks, 1, "PORT")?;
             let max: u8 = opt(toks, 2, 32u8)?;
-            let rid = sh.call("UART_READ", &(port, max))?;
-            match sh.wait_reply::<(u32, [u8; 32])>(rid, T_CALL)? {
-                (u32::MAX, _) => Err("port not probed".into()),
-                (n, data) => {
-                    let n = n as usize;
-                    Ok(format!("uread: n={n} hex={}", hex_str(&data[..n.min(32)])))
-                }
-            }
+            let b = sh.robot_uread(port, max)?;
+            Ok(format!("uread: n={} hex={}", b.len(), hex_str(&b)))
         }
 
         // ── probe 测量面（仅 probe 固件实现；普通固件上服务端按未知
@@ -623,7 +325,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
             let op: u32 = need(toks, 1, "OP")?;
             let arg: u32 = opt(toks, 2, 0u32)?;
             let rid = sh.call("MEMBENCH", &(op, arg))?;
-            let (ns, ck) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW)?;
+            let (ns, ck) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW_MS)?;
             Ok(format!("membench: op={op} arg={arg} → ns={ns} ck=0x{ck:x}（{ck}）"))
         }
         "peek" => {
@@ -635,7 +337,7 @@ fn exec(sh: &mut Shell, toks: &[&str]) -> Result<String, String> {
             }
             // PEEK_T = op 16（1000 次连续只读，返回 (ns, 末次值)）。
             let rid = sh.call("MEMBENCH", &(16u32, addr))?;
-            let (ns, v) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW)?;
+            let (ns, v) = sh.wait_reply::<(u64, u64)>(rid, T_SLOW_MS)?;
             Ok(format!(
                 "peek: {addr:#010x} → {:#010x}（1000 连读 {ns} ns，均 {:.1} ns/笔）\n      仅限只读寄存器：读 FIFO/msg 类寄存器会消费数据",
                 v as u32, ns as f64 / 1000.0

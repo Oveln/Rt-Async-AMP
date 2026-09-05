@@ -1,0 +1,15 @@
+[package]
+name = "robot-py"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# 库名 robot：PyO3 的 #[pymodule] fn robot 生成 PyInit_robot，部署文件名
+# robot.cpython-314-riscv64-linux-gnu.so（或简写 robot.so），import robot 即用。
+[lib]
+name = "robot"
+crate-type = ["cdylib"]
+
+[dependencies]
+rtsh = { path = "../rtsh" }
+pyo3 = { version = "0.29", features = ["extension-module"] }
