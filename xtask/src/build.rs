@@ -135,7 +135,7 @@ pub const RTASYNC_BINS: &[RtAsyncBin] = &[
         features: &[],
     },
     // 机器人控制固件（AKA-00 底盘 + 机械臂）：intercom 服务 + robot 协议
-    // 任务（P1），与 user-apps/robot-ctl 配对。
+    // 任务（P1），与 user-apps/rtsh / robot-py 配对。
     RtAsyncBin {
         name: "robot_ctrl",
         target_name: "k3-robot-ctrl",
@@ -511,16 +511,58 @@ pub fn user_test_pbmt(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/user-test-pbmt", "user-test-pbmt", &[]);
 }
 
-/// 机器人控制 AP 侧入口（CLI + serve JSON 行协议，配 robot.py 供 Python
-/// 调用；与 RP 固件 k3-robot-ctrl 配对）。
-pub fn robot_ctl(root: &Path, _cfg: &Config) {
-    build_user_app(root, "user-apps/robot-ctl", "robot-ctl", &[]);
-}
-
-/// rt-async 交互式 shell（/dev/rt_shm + ov-rpc REPL：ping/stat 延迟诊断、
-/// 机器人语义、probe 测量面；与 K3 固件 k3-robot-ctrl 配对最全）。
+/// rtsh —— rt-async 交互式 shell，唯一用户态程序（/dev/rt_shm + ov-rpc
+/// REPL + 机器人语义命令；库层供 robot-py 绑定）。
 pub fn rtsh(root: &Path, _cfg: &Config) {
     build_user_app(root, "user-apps/rtsh", "rtsh", &[]);
+}
+
+/// robot-py —— rtsh 库层的原生 Python 扩展（PyO3，riscv64 glibc）。
+///
+/// 目标 ABI = 板上 rootfs 的 Python（Yocto 构建，glibc——与 user-apps 的
+/// musl 静态线不同）；Python 头文件取自 ~/riscv-yocto 的 python3 recipe
+/// sysroot（可用 ROBOT_PY_CROSS_LIB_DIR 覆盖）。产物复制为
+/// build/robot.cpython-314-riscv64-linux-gnu.so，板上 wget 后 import 即用。
+pub fn robot_py(root: &Path, _cfg: &Config) {
+    const TARGET: &str = "riscv64gc-unknown-linux-gnu";
+    const PY_VER: &str = "3.14";
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cross_lib_dir = std::env::var("ROBOT_PY_CROSS_LIB_DIR").unwrap_or_else(|_| {
+        format!("{home}/riscv-yocto/build/tmp/work/riscv64imafdc-poky-linux/python3/{PY_VER}.2/sysroot-destdir/usr")
+    });
+    assert!(
+        std::path::Path::new(&cross_lib_dir)
+            .join(format!("include/python{PY_VER}/Python.h"))
+            .exists(),
+        "robot-py: 板上 Python 头文件不在 {cross_lib_dir}（~/riscv-yocto 环境缺失？可用 ROBOT_PY_CROSS_LIB_DIR 指定）"
+    );
+    let envs = [
+        ("PYO3_CROSS", "1"),
+        ("PYO3_CROSS_PYTHON_VERSION", PY_VER),
+        ("PYO3_CROSS_LIB_DIR", cross_lib_dir.as_str()),
+        (
+            "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER",
+            "riscv64-linux-gnu-gcc",
+        ),
+    ];
+    // 带 envs 直接喂子进程（util::run 不支持环境注入，这里本地展开）。
+    let st = std::process::Command::new("cargo")
+        .args(["build", "--release", "--target", TARGET])
+        .current_dir(root.join("user-apps/robot-py"))
+        .envs(envs.map(|(k, v)| (k, std::ffi::OsString::from(v))))
+        .status()
+        .unwrap_or_else(|e| panic!("cargo: {e}"));
+    assert!(st.success(), "cargo exited with {st}");
+    let build_dir = root.join("build");
+    fs::create_dir_all(&build_dir).unwrap();
+    let src = root
+        .join("target")
+        .join(TARGET)
+        .join("release")
+        .join("librobot.so");
+    let dst = build_dir.join("robot.cpython-314-riscv64-linux-gnu.so");
+    fs::copy(&src, &dst).unwrap();
+    eprintln!("robot-py → {}", dst.display());
 }
 
 fn build_user_app(root: &Path, app_dir: &str, artifact_name: &str, features: &[&str]) {

@@ -14,7 +14,7 @@ members = [
     "user-apps/user-test-sched",
     "user-apps/user-test-bench",
     "user-apps/user-test-pbmt",
-    "user-apps/robot-ctl",
+    "user-apps/robot-py",
     "user-apps/rtsh",
     "xtask",
 ]
