@@ -64,7 +64,8 @@ use ov_channels::Message;
 /// 共口依据（2026-08-27 载板原理图 k3-com260_kit_v02 定案）：com260 40 针
 /// 排针上唯一完整可用的 R.UART 就是 R_UART0 @ GPIO_122/123 → 40pin
 /// pin29(TX)/pin32(RX)（网络名 GPIO01/GPIO07，经 1.8V→3.3V 电平转换）。
-/// 底盘（ESP32 二进制帧）+ console log 共线（ZP10S 已分离到软串口）：
+/// 底盘（ESP32 二进制帧）+ console log 共线（机械臂已分离到 AP 域 UART5
+/// 独立线，见模块头）：
 /// - ESP32 按 `AA 55` 帧头重同步，log 文本 / 任何 ASCII 不构成有效帧头；
 /// - RX 方向（pin32）只有 ESP32 遥测驱动，单向干净。
 /// 备选双口（M.2 槽空时经插座脚引出）：R.UART4（TX=GPIO_80→PCIeA_WAKEn
@@ -228,14 +229,17 @@ fn angle_cmd(servo: u8, angle: u16, out: &mut [u8; 16]) -> &[u8] {
 const TORQUE_RELEASE: &[u8] = b"#255PULK";
 const TORQUE_RESTORE: &[u8] = b"#255PULR";
 
-// ── ZP10S 默认位姿（arm_angles_default.json，AKA-00 出厂值）──────────────
-// servo0/servo1 = 臂关节，servo2 = 夹爪。
-const POSE_GRAB_S0: u16 = 41;
-const POSE_GRAB_S1: u16 = 228;
-const POSE_LIFT_S0: u16 = 150;
-const POSE_LIFT_S1: u16 = 150;
-const GRIPPER_OPEN: u16 = 44;
-const GRIPPER_CLOSE: u16 = 150;
+// ── ZP10S 位姿常量（AKA-00 运行配置 arm_angles.json，同其 angle_config.py
+//    内置默认一致；2026-09-04 板测校准）─────────────────────────────────
+// servo0/servo1 = 臂关节，servo2 = 夹爪；夹爪大角度 = 张开、小角度 = 闭合。
+// 注意：不要用仓库里的 arm_angles_default.json（过时样本，夹爪极性相反——
+// 板测 grab 变成"收爪下探、到底张开"，2026-09-05 对照上游运行值修正）。
+const POSE_GRAB_S0: u16 = 245;
+const POSE_GRAB_S1: u16 = 180;
+const POSE_LIFT_S0: u16 = 200;
+const POSE_LIFT_S1: u16 = 180;
+const GRIPPER_OPEN: u16 = 150;
+const GRIPPER_CLOSE: u16 = 90;
 
 // ============================================================================
 // chassis 状态（RPC handler 同步读 / 任务写，全原子量）
